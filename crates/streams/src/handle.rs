@@ -472,11 +472,11 @@ impl Streams {
             .await
     }
 
-    /// Reads again the exact range of an earlier answer and checks it against that answer's
-    /// digest (RR-2). It runs the read that the answer came from, with the same input state and
-    /// the start that read found, so it gives the same supersessions and stale marks, and it waits
-    /// for nothing and checks no owner. Records with other content fail as a mismatch. Records the store no longer holds
-    /// fail as lost (REC-01).
+    /// Reads again the exact range of an earlier answer and checks it against that answer's digest
+    /// (RR-2). It runs the read that the answer came from, with the same input state and the start
+    /// that read found, so it gives the same supersessions and stale marks, and it waits for
+    /// nothing and checks no owner. Records with other content fail as a mismatch. Records the
+    /// store no longer holds fail as lost (REC-01).
     pub async fn read_range(&self, request: ReadRangeRequest) -> StreamResult<ReadResponse> {
         let stream = address(request.stream.as_ref())?;
         if request.chain_first_run_id.is_empty() {

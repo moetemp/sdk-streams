@@ -170,7 +170,10 @@ impl Subscriptions {
         {
             Err(NotifyError::Refused(error)) if !attach.attached => {
                 // The notifier lost the callback this process remembers, so it attaches again.
-                tracing::debug!(%error, "The notifier refused a reader's wait, so it attaches again");
+                tracing::debug!(
+                    %error,
+                    "The notifier refused a reader's wait, so it attaches again"
+                );
                 self.attached.forget(&attach.key);
                 attach = self.attach(streams, request, chain_first_run_id).await?;
                 self.send_wait(client, &stream, &attach, after_counter)

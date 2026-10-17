@@ -1164,7 +1164,8 @@ mod on_postgres {
             self.on_topic(
                 &format!(
                     "WITH t AS ({TOPIC}), \
-                     records AS (DELETE FROM {{s}}.records r USING t WHERE r.topic_id = t.topic_id), \
+                     records AS (DELETE FROM {{s}}.records r USING t \
+                       WHERE r.topic_id = t.topic_id), \
                      producers AS (DELETE FROM {{s}}.producers h USING t \
                        WHERE h.topic_id = t.topic_id) \
                      DELETE FROM {{s}}.topics x USING t WHERE x.topic_id = t.topic_id"
