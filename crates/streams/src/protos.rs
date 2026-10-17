@@ -12,6 +12,28 @@ pub mod coresdk {
 }
 
 pub mod temporal {
+    /// The stream API of the moetemp/api fork, which sdk-rust does not vendor. Its other API
+    /// types come from `temporalio-common`.
+    pub mod api {
+        pub mod stream {
+            pub mod v1 {
+                include!(concat!(env!("OUT_DIR"), "/temporal.api.stream.v1.rs"));
+            }
+        }
+        pub mod enums {
+            pub mod v1 {
+                include!(concat!(env!("OUT_DIR"), "/temporal.api.enums.v1.rs"));
+            }
+        }
+        pub mod workflowservice {
+            pub mod v1 {
+                include!(concat!(
+                    env!("OUT_DIR"),
+                    "/temporal.api.workflowservice.v1.rs"
+                ));
+            }
+        }
+    }
     pub mod sdk {
         pub mod streams {
             pub mod v1 {

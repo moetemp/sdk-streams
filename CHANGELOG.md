@@ -20,3 +20,5 @@
   local-file archive with the stream driver, the stream notifier clients' traits, subscriptions,
   Workflow Activity and standalone Activity owners, and the store capabilities.
 - Moved the link checks into the crate, and grew `OutputRecord` with `link` for LINK records.
+- The crate generates the stream API from its own copy in `protos/api_stream`, taken from
+  `moetemp/api` `c1a8d975`, since sdk-rust no longer vendors it. It builds on sdk-rust kj5.

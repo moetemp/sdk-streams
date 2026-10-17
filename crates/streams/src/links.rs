@@ -615,7 +615,7 @@ pub(crate) fn follow_digest(items: &[FollowedRecord]) -> Vec<u8> {
 mod tests {
     use super::*;
     use crate::proto::{StreamFailureKind, StreamOwnerKind, StreamRecord, Supersession};
-    use temporalio_common::protos::temporal::api::stream::v1::StreamReference;
+    use crate::protos::temporal::api::stream::v1::StreamReference;
 
     fn root() -> StreamAddress {
         StreamAddress {

@@ -9,8 +9,9 @@ use std::{
     },
     time::Duration,
 };
-use temporalio_common::protos::temporal::api::{
-    common::v1::Payload, enums::v1::StreamOwnerKind as RefKind, stream::v1::StreamReference,
+use temporalio_common::protos::temporal::api::common::v1::Payload;
+use temporalio_streams::protos::temporal::api::{
+    enums::v1::StreamOwnerKind as RefKind, stream::v1::StreamReference,
 };
 use temporalio_streams::{
     MemoryStore, OwnerClient, OwnerDescription, OwnerError, OwnerId, OwnerStatus, StreamService,
