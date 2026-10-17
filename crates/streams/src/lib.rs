@@ -34,6 +34,7 @@ mod service;
 mod store;
 mod subscribe;
 mod tiered;
+mod wake;
 mod workflow;
 
 #[cfg(feature = "postgres")]
@@ -76,6 +77,7 @@ pub use store::{
     MAX_FLOOR_HOLDERS, MAX_RECORD_BYTES, StreamStore, empty_close_result,
 };
 pub use tiered::TieredStore;
+pub use wake::{STREAM_WAKE_TYPE_URL, fold_stream_wake, fold_stream_wakes};
 pub use workflow::{MAX_APPEND_BYTES, STREAM_COMPLETED_TASKS, STREAM_RETRY_BITS, stream_attempt};
 
 /// The protos stores and lang exchange.

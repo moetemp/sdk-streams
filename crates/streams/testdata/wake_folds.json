@@ -1,0 +1,269 @@
+[
+  {
+    "name": "no wakes fold to none",
+    "wakes": [],
+    "folded": []
+  },
+  {
+    "name": "one wake per subscription is kept as it is",
+    "wakes": [
+      {
+        "subscription_id": "1",
+        "position": "position-3",
+        "counter": 3,
+        "metadata": {
+          "records": "3"
+        }
+      }
+    ],
+    "folded": [
+      {
+        "subscription_id": "1",
+        "position": "position-3",
+        "counter": 3,
+        "metadata": {
+          "records": "3"
+        }
+      }
+    ]
+  },
+  {
+    "name": "the highest counter per subscription is kept in first-seen order",
+    "wakes": [
+      {
+        "subscription_id": "b",
+        "position": "a",
+        "counter": 2
+      },
+      {
+        "subscription_id": "a",
+        "position": "b",
+        "counter": 1
+      },
+      {
+        "subscription_id": "b",
+        "position": "c",
+        "counter": 4
+      },
+      {
+        "subscription_id": "b",
+        "position": "d",
+        "counter": 3
+      },
+      {
+        "subscription_id": "a",
+        "position": "e",
+        "counter": 1
+      }
+    ],
+    "folded": [
+      {
+        "subscription_id": "b",
+        "position": "c",
+        "counter": 4
+      },
+      {
+        "subscription_id": "a",
+        "position": "b",
+        "counter": 1
+      }
+    ]
+  },
+  {
+    "name": "a lower counter keeps the higher one's position and metadata",
+    "wakes": [
+      {
+        "subscription_id": "1",
+        "position": "nine",
+        "counter": 9,
+        "metadata": {
+          "m": "9"
+        }
+      },
+      {
+        "subscription_id": "1",
+        "position": "four",
+        "counter": 4,
+        "metadata": {
+          "m": "4"
+        }
+      }
+    ],
+    "folded": [
+      {
+        "subscription_id": "1",
+        "position": "nine",
+        "counter": 9,
+        "metadata": {
+          "m": "9"
+        }
+      }
+    ]
+  },
+  {
+    "name": "an equal counter keeps the first position",
+    "wakes": [
+      {
+        "subscription_id": "1",
+        "position": "first",
+        "counter": 5
+      },
+      {
+        "subscription_id": "1",
+        "position": "second",
+        "counter": 5
+      }
+    ],
+    "folded": [
+      {
+        "subscription_id": "1",
+        "position": "first",
+        "counter": 5
+      }
+    ]
+  },
+  {
+    "name": "a recheck, a close or a resubscribe survives a higher counter",
+    "wakes": [
+      {
+        "subscription_id": "a",
+        "position": "closed",
+        "counter": 5,
+        "recheck": true,
+        "closed": true,
+        "close_result": "done"
+      },
+      {
+        "subscription_id": "a",
+        "position": "later",
+        "counter": 7,
+        "resubscribe": true
+      }
+    ],
+    "folded": [
+      {
+        "subscription_id": "a",
+        "position": "later",
+        "counter": 7,
+        "recheck": true,
+        "closed": true,
+        "close_result": "done",
+        "resubscribe": true
+      }
+    ]
+  },
+  {
+    "name": "a recheck with no new counter keeps the counter",
+    "wakes": [
+      {
+        "subscription_id": "1",
+        "position": "position-6",
+        "counter": 6
+      },
+      {
+        "subscription_id": "1",
+        "position": "",
+        "counter": 0,
+        "recheck": true
+      }
+    ],
+    "folded": [
+      {
+        "subscription_id": "1",
+        "position": "position-6",
+        "counter": 6,
+        "recheck": true
+      }
+    ]
+  },
+  {
+    "name": "the first close keeps its outcome",
+    "wakes": [
+      {
+        "subscription_id": "1",
+        "position": "position-3",
+        "counter": 3,
+        "closed": true,
+        "close_result": "summary"
+      },
+      {
+        "subscription_id": "1",
+        "position": "position-4",
+        "counter": 4,
+        "closed": true,
+        "close_failure": "late"
+      }
+    ],
+    "folded": [
+      {
+        "subscription_id": "1",
+        "position": "position-4",
+        "counter": 4,
+        "closed": true,
+        "close_result": "summary"
+      }
+    ]
+  },
+  {
+    "name": "a close after an open wake takes the close's outcome",
+    "wakes": [
+      {
+        "subscription_id": "1",
+        "position": "position-8",
+        "counter": 8
+      },
+      {
+        "subscription_id": "1",
+        "position": "position-2",
+        "counter": 2,
+        "closed": true,
+        "close_failure": "the agent gave up"
+      }
+    ],
+    "folded": [
+      {
+        "subscription_id": "1",
+        "position": "position-8",
+        "counter": 8,
+        "closed": true,
+        "close_failure": "the agent gave up"
+      }
+    ]
+  },
+  {
+    "name": "a failed task's wakes and its retry's fold together",
+    "wakes": [
+      {
+        "subscription_id": "a",
+        "position": "position-5",
+        "counter": 5
+      },
+      {
+        "subscription_id": "b",
+        "position": "position-1",
+        "counter": 1
+      },
+      {
+        "subscription_id": "a",
+        "position": "position-7",
+        "counter": 7,
+        "closed": true,
+        "close_result": "summary"
+      }
+    ],
+    "folded": [
+      {
+        "subscription_id": "a",
+        "position": "position-7",
+        "counter": 7,
+        "closed": true,
+        "close_result": "summary"
+      },
+      {
+        "subscription_id": "b",
+        "position": "position-1",
+        "counter": 1
+      }
+    ]
+  }
+]

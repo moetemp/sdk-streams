@@ -24,3 +24,6 @@
   polls through the client `Connection`, and describes standalone Activity and Workflow Activity
   owners.
 - The Workflow publish takes LINK records and checks each link as a follower reads it.
+- Added `fold_stream_wake`, `fold_stream_wakes` and `STREAM_WAKE_TYPE_URL`, the reference fold of
+  the stream wakes on a Workflow Task's attachments, with the shared vectors
+  `testdata/wake_folds.json` and the codec notes in `docs/wakes.md`.
