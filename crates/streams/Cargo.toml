@@ -18,6 +18,9 @@ default = ["envconfig", "tls-ring"]
 tls-ring = ["temporalio-client/tls-ring", "temporalio-common/tls-ring"]
 tls-aws-lc = ["temporalio-client/tls-aws-lc", "temporalio-common/tls-aws-lc"]
 envconfig = ["temporalio-client/envconfig", "temporalio-common/envconfig"]
+# A FIPS build: `tls-aws-lc`, and `aws-lc-rs` in FIPS mode, so the shared rustls provider links
+# `aws-lc-fips-sys`. Take it with no default features, so no crate in the build pulls `ring`.
+fips = ["tls-aws-lc", "dep:aws-lc-rs"]
 serde_serialize = ["dep:serde", "temporalio-common/serde_serialize"]
 # The Redis store. Off by default, so a build that needs only the trait takes no Redis client.
 # TLS uses the rustls provider the process installs, the same one Core uses.
@@ -25,6 +28,9 @@ redis = ["dep:redis", "dep:crc16"]
 
 [dependencies]
 async-trait = "0.1"
+# Only under `fips`. The crate never calls it. Its `fips` feature switches the one `aws-lc-rs` in
+# the build into FIPS mode.
+aws-lc-rs = { version = "1", features = ["fips"], optional = true }
 crc16 = { version = "0.4", optional = true }
 parking_lot = "0.12"
 prost = { workspace = true }

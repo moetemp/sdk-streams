@@ -51,13 +51,12 @@ jobs:
         with:
           repo-token: ${{ secrets.GITHUB_TOKEN }}
       - uses: Swatinem/rust-cache@v2
-      - run: cargo build --workspace --no-default-features --features tls-aws-lc,redis
+      - run: cargo build --workspace --no-default-features --features fips,redis
+      # Normal and build edges only, since the tests' own dependencies may take `ring`.
       - run: |
-          if cargo tree -e normal --no-default-features --features tls-aws-lc,redis -i ring \
-              --target all 2>/dev/null | grep -q ring; then
-            cargo tree -e normal --no-default-features --features tls-aws-lc,redis -i ring
-            exit 1
-          fi
+          tree=$(cargo tree -e normal,build --no-default-features --features fips,redis \
+            -i ring --target all 2>/dev/null || true)
+          if [ -n "$tree" ]; then echo "$tree"; exit 1; fi
 
   redis:
     name: Redis store tests (standalone and cluster)

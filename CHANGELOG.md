@@ -13,3 +13,7 @@
   `WorkflowTaskHistoryInfo` gives. The chain closes after a live terminal completion once the
   server shows the run closed.
 - Added the Core mock tests of the Workflow publish, including the chain-close contract cases.
+  run's History shows that completion closed the run.
+- Added the `fips` feature, which builds TLS on `aws-lc-rs` in FIPS mode with no `ring`.
+- Read the run's History tail for the chain close, not its description. The close event must match
+  the terminal command, and the task before it must be the completed one.

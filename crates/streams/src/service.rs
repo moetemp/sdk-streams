@@ -178,10 +178,11 @@ impl StreamService {
         response.map_err(StreamFailure::from)
     }
 
-    /// Drops `worker_id`'s state for `run_id`. With `workflow_execution_ending`, closes the run's
-    /// chain in the background when the run's last live completion ended the chain and the
-    /// server shows the run closed. Lang waits for it before it completes the eviction
-    /// activation, so it never races the first publish of the run's next cache entry.
+    /// Drops `worker_id`'s state for `run_id` and returns without a server call. With
+    /// `workflow_execution_ending`, closes the run's chain in the background when the run's last
+    /// live completion ended the chain and the run's History shows that completion closed the
+    /// run. Lang waits for the call before it completes the eviction activation, so it never
+    /// races the first publish of the run's next cache entry.
     pub async fn run_evicted(
         &self,
         worker_id: &str,
@@ -197,7 +198,7 @@ impl StreamService {
     /// such as a chain close. Replay never sends a close again, so a Worker shutdown must wait
     /// for it. A Worker can shut down before it hands lang the eviction of a run that just ended,
     /// so the shutdown also closes the chain of each run whose last live completion ended it,
-    /// once the server shows the run closed.
+    /// with the same History check.
     pub async fn shutdown_worker(&self, worker_id: &str) {
         self.workflows.shutdown_worker(worker_id).await;
     }
