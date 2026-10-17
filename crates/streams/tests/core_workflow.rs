@@ -313,10 +313,12 @@ fn lang_appending_to(
     appended_at_completion: Arc<Mutex<Vec<usize>>>,
 ) -> Lang {
     let mock = mock_appending_to(history, batches, store.clone(), appended_at_completion);
+    // The task that started at event 8 closes the run in the histories that complete in their
+    // second task.
     Lang::new(
         mock,
         store.clone(),
-        Owner::with(WorkflowExecutionStatus::Completed),
+        Owner::closed_by(WorkflowExecutionStatus::Completed, Some(8)),
     )
 }
 
@@ -630,7 +632,7 @@ async fn the_owner_closes_a_chain_the_run_ended(
         store.clone(),
         Default::default(),
     );
-    let lang = Lang::new(mock, store.clone(), Owner::with(status));
+    let lang = Lang::new(mock, store.clone(), Owner::closed_by(status, Some(3)));
     let activation = lang.poll().await;
     lang.complete(&activation, vec![], vec![command]).await;
     lang.shutdown().await;
@@ -1295,12 +1297,12 @@ async fn a_rerun_after_the_run_closed_its_own_topic_drops_its_records_and_goes_o
 }
 
 // The chain-close contract. The eviction reason alone proves nothing, so the close needs a live
-// terminal completion and a run the server shows closed.
+// terminal completion, and History must show that this completion closed the run.
 
-#[tokio::test]
-async fn a_refused_terminal_completion_with_an_undelivered_cancel_keeps_the_chain_open() {
-    // A Local Activity cancel that lang has not polled holds the eviction back, and the run's
-    // end then overwrites the refusal's eviction reason.
+/// Runs a terminal completion that the server refuses while a Local Activity cancel that lang has
+/// not polled holds the eviction back. The run's end then overwrites the refusal's eviction
+/// reason. Answers the store and the run id. The terminal completion's task started at event 3.
+async fn refused_completion_with_held_eviction(owner: Arc<Owner>) -> (Arc<RecordingStore>, String) {
     let mut t = TestHistoryBuilder::default();
     t.add_wfe_started_with_wft_timeout(Duration::from_secs(60));
     t.add_workflow_task_scheduled_and_started();
@@ -1311,8 +1313,7 @@ async fn a_refused_terminal_completion_with_an_undelivered_cancel_keeps_the_chai
         Err(tonic::Status::invalid_argument("UnhandledCommand"))
     }));
     let store = Arc::new(RecordingStore::default());
-    let owner = Owner::with(WorkflowExecutionStatus::Running);
-    let lang = Lang::new(build_mock_pollers(mock_cfg), store.clone(), owner.clone());
+    let lang = Lang::new(build_mock_pollers(mock_cfg), store.clone(), owner);
 
     let activation = lang.poll().await;
     let run_id = activation.run_id.clone();
@@ -1395,15 +1396,39 @@ async fn a_refused_terminal_completion_with_an_undelivered_cancel_keeps_the_chai
         .await
         .unwrap();
     lang.shutdown().await;
+    (store, run_id)
+}
 
+#[tokio::test]
+async fn a_refused_terminal_completion_with_an_undelivered_cancel_keeps_the_chain_open() {
+    // History shows no close event, since the server took no terminal command.
+    let owner = Owner::with(WorkflowExecutionStatus::Running);
+    let (store, run_id) = refused_completion_with_held_eviction(owner.clone()).await;
     assert_eq!(
         *owner.asked.lock(),
         [(NAMESPACE.to_string(), WORKFLOW_ID.to_string(), run_id)],
-        "the service asked the server about the run"
+        "the service read the run's History"
     );
     assert!(
         !store.calls().contains(&"close_chain"),
-        "the server shows the run open, so the chain stays open"
+        "History shows the run open, so the chain stays open"
+    );
+}
+
+#[tokio::test]
+async fn a_refused_terminal_completion_then_a_later_task_that_closes_the_run_keeps_the_chain_open()
+{
+    // While the eviction waits, the run's next task completes the run. Its close follows the
+    // task that started at event 10, not the refused one at event 3.
+    let owner = Owner::closed_by(WorkflowExecutionStatus::Completed, Some(10));
+    let (store, run_id) = refused_completion_with_held_eviction(owner.clone()).await;
+    assert_eq!(
+        *owner.asked.lock(),
+        [(NAMESPACE.to_string(), WORKFLOW_ID.to_string(), run_id)]
+    );
+    assert!(
+        !store.calls().contains(&"close_chain"),
+        "the closing task is not ours, so the chain does not close at the stale attempt"
     );
 }
 
@@ -1469,7 +1494,7 @@ async fn an_accepted_terminal_completion_closes_the_chain() {
     t.add_by_type(EventType::WorkflowExecutionStarted);
     t.add_workflow_task_scheduled_and_started();
     let store = Arc::new(RecordingStore::default());
-    let owner = Owner::with(WorkflowExecutionStatus::Completed);
+    let owner = Owner::closed_by(WorkflowExecutionStatus::Completed, Some(3));
     let mut mock_cfg = MockPollCfg::from_resps(t, [1]);
     // Keeps the Worker up, so it hands lang the eviction of the ended run.
     mock_cfg.make_poll_stream_interminable = true;
