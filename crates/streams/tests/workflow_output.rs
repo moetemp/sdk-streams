@@ -107,7 +107,7 @@ async fn a_publish_appends_under_the_attempt_history_gives() {
             TOPIC,
             committed
                 .iter()
-                .map(|r| (r.kind, r.content_hash.as_slice()))
+                .map(|r| (r.kind, r.content_hash.as_slice(), r.link.as_ref()))
         ),
         "the digest never depends on the codec, so a repeat of the batch deduplicates"
     );

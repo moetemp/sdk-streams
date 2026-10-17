@@ -306,6 +306,7 @@ impl WorkflowOutput {
             namespace: request.namespace.clone(),
             workflow_id: request.workflow_id.clone(),
             first_run_id,
+            ..Default::default()
         };
         run.run_id = request.run_id.clone();
         let prefix = request
@@ -394,6 +395,7 @@ impl WorkflowOutput {
                     kind: record.kind,
                     body: record.body.clone(),
                     content_hash: record.content_hash.clone(),
+                    link: record.link.clone(),
                 };
                 stored_append_record(&topic.topic, &producer_id, run.attempt, sequence, &append)
                     .map(|mut stored| {
@@ -418,7 +420,7 @@ impl WorkflowOutput {
                 topic
                     .records
                     .iter()
-                    .map(|r| (r.kind, r.content_hash.as_slice())),
+                    .map(|r| (r.kind, r.content_hash.as_slice(), r.link.as_ref())),
             ),
             records,
         };
@@ -586,6 +588,7 @@ mod tests {
                 ..Default::default()
             }),
             content_hash: vec![hash; CONTENT_HASH_BYTES],
+            ..Default::default()
         }
     }
 

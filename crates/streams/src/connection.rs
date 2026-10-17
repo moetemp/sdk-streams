@@ -2,7 +2,8 @@
 //! client's server about streams' owners.
 
 use crate::{
-    OwnerClient, OwnerDescription, OwnerError, RunClose, StreamResult, StreamService, proto,
+    OwnerClient, OwnerDescription, OwnerError, OwnerId, OwnerStatus, RunClose, StreamResult,
+    StreamService, proto,
 };
 use prost::Message;
 use std::sync::Arc;
@@ -49,9 +50,14 @@ impl OwnerClient for ConnectionOwnerClient {
     async fn describe(
         &self,
         namespace: &str,
-        workflow_id: &str,
+        owner: OwnerId<'_>,
         run_id: &str,
     ) -> Result<OwnerDescription, OwnerError> {
+        let OwnerId::Workflow(workflow_id) = owner else {
+            return Err(OwnerError::Failed(format!(
+                "this owner client describes Workflows only, not {owner:?}"
+            )));
+        };
         let response = self
             .connection
             .workflow_service()
@@ -203,7 +209,7 @@ fn owner_description(
         info.first_run_id.clone()
     };
     Ok(OwnerDescription {
-        status: info.status(),
+        status: OwnerStatus::of_workflow(info.status()),
         run_id,
         first_run_id,
     })
@@ -242,7 +248,7 @@ mod tests {
             OwnerDescription {
                 run_id: "run-2".to_string(),
                 first_run_id: "run-1".to_string(),
-                status: WorkflowExecutionStatus::ContinuedAsNew,
+                status: OwnerStatus::ContinuedAsNew,
             }
         );
     }

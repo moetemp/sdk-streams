@@ -5,6 +5,8 @@ package temporal.sdk.streams.v1;
 option ruby_package = "Temporalio::Internal::Bridge::Api::StreamRecord";
 
 import "temporal/api/common/v1/message.proto";
+import "temporal/api/failure/v1/message.proto";
+import "temporal/api/stream/v1/message.proto";
 
 // One entry in a stream. The record is the wire format: stores keep it
 // serialized as is and readers in every language decode the same bytes.
@@ -31,6 +33,9 @@ message StreamRecord {
     // The producer's position within its attempt, starting at one, or zero
     // when it does not number its records.
     int64 sequence = 7;
+    // Set on LINK only. It stays out of the payload codec, as ids in History
+    // do, so Core can follow it.
+    StreamLink link = 8;
     // Set by a Workflow run's own producer only: the WorkflowTaskStarted
     // event id of the task attempt that wrote the record.
     int64 task_started_event_id = 9;
@@ -40,6 +45,12 @@ message StreamRecord {
     // A trailing zero means the list goes back to the run's start. A reader
     // learns from it whether an earlier attempt it delivered completed.
     repeated int64 completed_tasks = 10;
+    // On a CLOSE, the result the stream closed with, after the payload codec.
+    // `producer_id` names who closed it. A CLOSE with no result and no
+    // failure closed with no outcome.
+    temporal.api.common.v1.Payload close_result = 11;
+    // On a CLOSE, the failure the stream closed with.
+    temporal.api.failure.v1.Failure close_failure = 12;
 }
 
 // What a record means to a reader.
@@ -54,8 +65,9 @@ enum StreamRecordKind {
     // A reader synthesizes SUPERSEDED with this value and never stores it, so
     // no stored kind may take it.
     reserved 3;
-    // Kept for links between streams.
-    reserved 4;
+    // A reference to another stream. `link` carries it. `body` may carry a
+    // value, after the payload codec.
+    STREAM_RECORD_KIND_LINK = 4;
     // Ends `topic` for every reader, or every topic of the chain when `topic`
     // is empty. Readers drop every record after the first one. On a store
     // without close flags, producers and the owner's Worker write it to close.
@@ -63,4 +75,34 @@ enum StreamRecordKind {
     // Names `topic` in the chain's control log `_chain`, so a closer finds the
     // chain's topics on a store that can't list them. Topic readers skip it.
     STREAM_RECORD_KIND_TOPIC = 6;
+}
+
+// A reference from one stream to another, for followers.
+message StreamLink {
+    enum Event {
+        EVENT_UNSPECIFIED = 0;
+        // A follower starts reading `stream` strictly after `after`.
+        EVENT_OPEN = 1;
+        // The writer waited for the link named `name` up to `until`, or to
+        // its end when `until` is empty.
+        EVENT_JOIN = 2;
+    }
+    Event event = 1;
+    // The linked stream. Required on OPEN. Empty on JOIN.
+    temporal.api.stream.v1.StreamReference stream = 2;
+    // Names the link within its producer. A JOIN matches the OPEN with the
+    // same name. At most 256 bytes. Required.
+    string name = 3;
+    // A cursor of the linked stream. Empty starts at the oldest retained
+    // record.
+    string after = 4;
+    // On JOIN, a cursor of the linked stream where the segment ends. Empty is
+    // the stream's end.
+    string until = 5;
+    // The linked stream's namespace. Empty is the namespace of the stream
+    // that holds the link.
+    string namespace = 6;
+    // The Nexus endpoint that serves the linked stream. Empty is the endpoint
+    // that served the stream that holds the link.
+    string endpoint = 7;
 }

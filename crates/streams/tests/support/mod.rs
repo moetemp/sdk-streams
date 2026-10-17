@@ -9,8 +9,8 @@ use temporalio_common::protos::temporal::api::{
     common::v1::Payload, enums::v1::WorkflowExecutionStatus,
 };
 use temporalio_streams::{
-    BEGINNING, Capabilities, MemoryStore, OwnerClient, OwnerDescription, OwnerError, ReadTarget,
-    RunClose, StreamError, StreamResult, StreamStore,
+    BEGINNING, Capabilities, MemoryStore, OwnerClient, OwnerDescription, OwnerError, OwnerId,
+    OwnerStatus, ReadTarget, RunClose, StreamError, StreamResult, StreamStore,
     proto::{
         ChainId, DeleteOwnerRequest, DeleteOwnerResponse, OutputRecord, ReadRequest,
         StoreAppendRequest, StoreAppendResponse, StoreLatestRequest, StoreLatestResponse,
@@ -43,6 +43,7 @@ pub fn records_on(topic: &str, values: &[&str]) -> Vec<OutputRecord> {
                 ..Default::default()
             }),
             content_hash: vec![value.as_bytes()[0]; 32],
+            ..Default::default()
         })
         .collect()
 }
@@ -254,13 +255,13 @@ impl OwnerClient for Owner {
     async fn describe(
         &self,
         _namespace: &str,
-        _workflow_id: &str,
+        _owner: OwnerId<'_>,
         run_id: &str,
     ) -> Result<OwnerDescription, OwnerError> {
         Ok(OwnerDescription {
             run_id: run_id.to_string(),
             first_run_id: run_id.to_string(),
-            status: *self.status.lock(),
+            status: OwnerStatus::of_workflow(*self.status.lock()),
         })
     }
 

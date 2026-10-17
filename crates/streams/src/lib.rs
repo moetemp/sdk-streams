@@ -82,7 +82,7 @@ pub use workflow::{MAX_APPEND_BYTES, STREAM_COMPLETED_TASKS, STREAM_RETRY_BITS, 
 pub mod proto {
     pub use crate::protos::{
         coresdk::streams::*,
-        temporal::api::common::v1::Payload,
         temporal::sdk::streams::v1::{StreamLink, StreamRecord, StreamRecordKind, stream_link},
     };
+    pub use temporalio_common::protos::temporal::api::common::v1::Payload;
 }

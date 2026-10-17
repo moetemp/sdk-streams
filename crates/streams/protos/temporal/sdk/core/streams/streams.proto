@@ -4,7 +4,9 @@ package coresdk.streams;
 option ruby_package = "Temporalio::Internal::Bridge::Api::Streams";
 
 import "google/protobuf/duration.proto";
+import "google/protobuf/timestamp.proto";
 import "temporal/api/common/v1/message.proto";
+import "temporal/api/failure/v1/message.proto";
 import "temporal/sdk/streams/v1/message.proto";
 
 // The stream calls lang makes, served in process by the stream service against the configured
@@ -28,6 +30,42 @@ service StreamService {
   // Drops the dedupe state of one producer attempt on one stream. Safe only once the attempt's
   // last append returned, since a retry of that append would then land twice.
   rpc RetireProducer(RetireProducerRequest) returns (RetireProducerResponse);
+  // Waits until the stream notifications this process sent are out, for at most 10 seconds. A
+  // notification goes in the background, so a process calls it before it stops.
+  rpc FlushNotifications(FlushNotificationsRequest) returns (FlushNotificationsResponse);
+  // Attaches a Workflow's reader of a stream to the stream's notifier as an idle callback. An idle
+  // reader hears nothing until a read with `subscriber` finds no record and asks for one wake, so
+  // a reader reads with `subscriber` and needs no call of its own. The process attaches each
+  // subscription once and answers a repeat from memory, and the server takes a repeat from
+  // another process as the same attach.
+  rpc Subscribe(SubscribeRequest) returns (SubscribeResponse);
+  // Detaches a Workflow's reader that stops before the stream ends.
+  rpc Unsubscribe(UnsubscribeRequest) returns (UnsubscribeResponse);
+  // Waits on the stream's notifier, for a client reader whose read came back empty. Returns when
+  // the notifier's counter is above `after_counter`, when the stream closed, or at the server's
+  // wait limit (`streamnotifier.pollMaxWait`). The poll starts the notifier, and Core reads the
+  // stream once more just after it sends the poll, since a record that landed before the notifier
+  // existed woke no one. A newer record there answers at once. The reader then reads again.
+  // After the wait limit, that read finds records whose notification was lost, or comes back
+  // empty again.
+  rpc WaitForNotification(WaitForNotificationRequest) returns (WaitForNotificationResponse);
+  // Runs a stream driver over the store's notification log until the caller cancels the call.
+  // It answers only when the server takes no stream notifications, or when the store keeps no
+  // log. Each driver of one store needs its own consumer name.
+  rpc RunStreamDriver(RunStreamDriverRequest) returns (RunStreamDriverResponse);
+  // Reads again the exact range an earlier read answered, for a positions-only Workflow reader on
+  // replay, and checks it against that read's digest. Waits for nothing and checks no owner.
+  rpc ReadRange(ReadRangeRequest) returns (ReadResponse);
+  // Ends a positions-only reader's hold on a stream's records after a grace, so retention takes
+  // them again.
+  rpc ReleaseFloor(ReleaseFloorRequest) returns (ReleaseFloorResponse);
+  // Reads a stream and the streams it links, in one order. Order within each stream is kept. A
+  // linked stream's records come after its OPEN, and the linking stream's records after a JOIN
+  // come after the linked stream reached the JOIN's point. Lang passes `state` back to resume.
+  rpc Follow(FollowRequest) returns (FollowResponse);
+  // Reads again the exact ranges an earlier Follow answered, for a positions-only follower on
+  // replay, checks each against its digest, and gives the same records in the same order.
+  rpc FollowRange(FollowRangeRequest) returns (FollowResponse);
   // What the store can do beyond the log every store gives, and its limits.
   rpc DescribeStore(DescribeStoreRequest) returns (DescribeStoreResponse);
   // Appends what one live activation of a Workflow published. Lang calls it before it completes
@@ -48,12 +86,50 @@ message StreamStoreConfig {
   oneof store {
     RedisStoreConfig redis = 1;
     MemoryStoreConfig memory = 2;
+    PostgresStoreConfig postgres = 9;
   }
+  // Tells each stream's notifier on the server when the stream moves, after every append. That's
+  // what wakes a reader that waits on the notifier. Off by default, since most streams have no
+  // such reader and each notification costs a call. It turns on progress only. Closes reach the
+  // notifier either way. A server without the stream notifier costs one call, and then the
+  // process stops notifying.
+  bool notify_on_append = 3;
+  // How many streams to keep a notifier for, dropping the least recently used. Zero uses 1000.
+  uint32 max_notifiers = 4;
+  reserved 5;
+  reserved "notify_every_append";
   // How long a read waits for a Workflow that Temporal doesn't know yet, counted from the read's
   // first owner check. Until then the read answers empty, so a reader can start before its
   // owner does. After it the read fails as NOT_FOUND. Unset waits 60 seconds, and zero fails at
   // once.
   google.protobuf.Duration owner_start_grace = 6;
+  // Each append writes a notification entry in the same store step, and producers send no
+  // notifications. A `StreamDriver` reads the entries and notifies the server, so readers wake
+  // only while one runs. Off by default. A store without a notification log refuses it.
+  bool notification_log = 7;
+  // Keeps streams in object storage after the store drops them, so they stay readable for longer
+  // than the store's retention. Reads cross from the archive to the store with no gap, with the
+  // same cursors. A `StreamDriver` writes the archive, so it needs `notification_log`.
+  ArchiveConfig archive = 8;
+}
+
+// Where and how a stream archive keeps streams.
+message ArchiveConfig {
+  // `s3://<bucket>/<prefix>` or `file:///<directory>`. S3 credentials, the region and the
+  // endpoint come from the environment, as `AWS_ACCESS_KEY_ID`, `AWS_REGION` and
+  // `AWS_ENDPOINT_URL`. The archive deletes nothing but an owner's delete, so a bucket lifecycle
+  // rule sets how long it keeps streams.
+  string url = 1;
+  // A segment ends at the first record that takes it to this many bytes or more. Zero uses
+  // 4 MiB.
+  uint64 segment_bytes = 2;
+  // How long a stream goes without a write before the driver archives its tail. A stream that
+  // keeps taking writes has its tail archived this often too. Unset uses five minutes.
+  google.protobuf.Duration segment_idle = 3;
+  // How long the store holds records that the archive doesn't hold yet, after the archive last
+  // moved. When the driver stops for longer, the store's retention goes on and readers find the
+  // gap as expired. Unset uses seven days.
+  google.protobuf.Duration stall_limit = 4;
 }
 
 // Streams in a Redis or Redis Cluster that the service connects to itself.
@@ -72,9 +148,52 @@ message RedisStoreConfig {
   uint32 blocking_reads_per_node = 5;
   // How long a short call waits for its reply. Unset uses the default.
   google.protobuf.Duration response_timeout = 6;
+  // How long a positions-only reader holds a stream's records after its last read. Unset uses
+  // `retention`.
+  google.protobuf.Duration floor_lease = 7;
+  // How long a hold lasts after its reader released it. Unset keeps one day.
+  google.protobuf.Duration floor_release_grace = 8;
+  // With `StreamStoreConfig.notification_log`, how many doorbell streams the log rings, each one
+  // a driver blocks on. Zero uses 16.
+  uint32 notify_doorbells = 9;
   // Runs with no Lua, so the store keeps no producer state and no last position, and the service
   // takes their fallbacks. For tests of the fallbacks on a real store.
   bool plain = 10;
+}
+
+// Streams in a PostgreSQL database that Core connects to itself, PostgreSQL 14 or later.
+message PostgresStoreConfig {
+  // A `postgres://` or `postgresql://` URL. Credentials come from the URL. TLS follows the URL's
+  // `sslmode` and `sslrootcert` as libpq reads them.
+  string url = 1;
+  // The schema that holds the tables. Empty uses `temporal_streams`.
+  string schema = 2;
+  // How long a stream keeps a record. Unset keeps seven days.
+  google.protobuf.Duration retention = 3;
+  // How many connections the pool keeps. Zero uses 16.
+  uint32 max_connections = 4;
+  // How long a call waits, as the session's `statement_timeout`. Unset uses five seconds.
+  google.protobuf.Duration response_timeout = 5;
+  // How long a positions-only reader holds a stream's records after its last read. Unset uses
+  // `retention`.
+  google.protobuf.Duration floor_lease = 6;
+  // How long a hold lasts after its reader released it. Unset keeps one day.
+  google.protobuf.Duration floor_release_grace = 7;
+  // With `StreamStoreConfig.notification_log`, how many doorbells the log rings, from 1 to 64.
+  // Zero uses 16.
+  uint32 notify_doorbells = 8;
+  // A URL for the connection that listens and the one that applies migrations, when `url` goes
+  // through a pooler in transaction mode. Empty uses `url`.
+  string listen_url = 9;
+  // How often a process looks for new records for its waiting reads. Unset uses 100 ms.
+  google.protobuf.Duration poll_interval = 10;
+  // Each append also sends NOTIFY, so waiting reads in other processes wake in milliseconds.
+  // Costs append throughput when many producers write at once.
+  bool notify_reads = 11;
+  // The store checks the schema version and never changes it. A DBA applies the migrations.
+  bool skip_migrations = 12;
+  // How often the janitor trims records past the retention. Unset uses one minute.
+  google.protobuf.Duration janitor_interval = 13;
 }
 
 // Streams in this process's memory, for tests and local development. Nothing survives the
@@ -89,25 +208,44 @@ message MemoryStoreConfig {
 enum StreamOwnerKind {
   STREAM_OWNER_KIND_UNSPECIFIED = 0;
   STREAM_OWNER_KIND_WORKFLOW = 1;
+  // A standalone Activity run. It is a chain of one run, so its streams end with the run.
+  STREAM_OWNER_KIND_ACTIVITY = 2;
+  // An Activity that a Workflow run scheduled. It is a chain of one, keyed by the scheduling run
+  // and the Activity id, so its streams end with the Activity.
+  STREAM_OWNER_KIND_WORKFLOW_ACTIVITY = 3;
 }
 
 // One stream, a topic of an owner in a namespace.
 message StreamAddress {
   string namespace = 1;
   StreamOwnerKind owner_kind = 2;
+  // The owning Workflow, or the Workflow that scheduled a Workflow Activity. Empty for a
+  // standalone Activity owner.
   string workflow_id = 3;
   // Pins the stream to the run chain that holds this run. Empty follows the chain that holds the
-  // Workflow id when the call starts.
+  // Workflow id when the call starts. For an Activity owner, the Activity run, and empty names
+  // the newest run of the Activity id when the call starts. For a Workflow Activity owner, the
+  // run that scheduled the Activity. It is required, since an Activity id names nothing across
+  // runs.
   string run_id = 4;
   string topic = 5;
+  // The owning Activity. Empty for a Workflow owner.
+  string activity_id = 6;
 }
 
 // A Workflow's run chain. Its streams are keyed by its first run, so they follow
-// Continue-as-New, and a new chain on the same Workflow id gets streams of its own.
+// Continue-as-New, and a new chain on the same Workflow id gets streams of its own. A standalone
+// Activity run is a chain of one run, with the run as `first_run_id`. A Workflow Activity is a
+// chain of one, with the scheduling run as `first_run_id`.
 message ChainId {
   string namespace = 1;
+  // Empty for a standalone Activity owner.
   string workflow_id = 2;
   string first_run_id = 3;
+  // `UNSPECIFIED` is a Workflow owner, so a chain from before the Activity kind stays valid.
+  StreamOwnerKind owner_kind = 4;
+  // Empty for a Workflow owner.
+  string activity_id = 5;
 }
 
 // A producer that names itself.
@@ -125,6 +263,10 @@ message ActivityProducer {
   string run_id = 2;
   string activity_id = 3;
   int32 attempt = 4;
+  // When the attempt started, as the Activity task gives it. With it, Core writes the attempt as
+  // `started_unix_ms << 11 | min(attempt, 2047)`, so a later attempt and a reset attempt both
+  // supersede an earlier one. Unset writes `attempt` as it is.
+  google.protobuf.Timestamp attempt_started_time = 5;
 }
 
 // One record lang appends.
@@ -136,6 +278,8 @@ message AppendRecord {
   // encrypts with a fresh nonce makes a retry's bytes differ, so a retry is recognized by this.
   // Empty when there is no body.
   bytes content_hash = 3;
+  // Set on LINK only. A LINK's body is optional.
+  temporal.sdk.streams.v1.StreamLink link = 4;
 }
 
 message AppendRequest {
@@ -175,6 +319,29 @@ message ReadRequest {
   uint32 max_records = 4;
   // The `state` of the previous answer of the same read. Empty on its first call.
   bytes state = 5;
+  reserved 6;
+  reserved "arm";
+  // For a positions-only Workflow reader: names the reader, as its run id and its subscription
+  // id. The store holds the records after this read's start against retention for that holder,
+  // until `ReleaseFloor` and its grace, or until the holder's lease passes with no read.
+  string floor_holder = 7;
+  // Set by a Workflow reader. An answer with no records that is not `done` attaches the reader
+  // idle when this process has not, asks the notifier for one wake after the answer's
+  // `wake_after`, and reads once more when a record landed before the attach. An answer with
+  // records sends nothing, so a reader that keeps up costs the notifier nothing.
+  ReadSubscriber subscriber = 8;
+  // The most stored record bytes one answer holds past its first record. Zero puts no bound. A
+  // Workflow reader that records its answers in History sets it, so an answer stays below the
+  // server's blob size limit.
+  uint64 max_bytes = 9;
+}
+
+// The Workflow reader that an idle read wakes, as `SubscribeRequest` names it.
+message ReadSubscriber {
+  string workflow_id = 1;
+  string run_id = 2;
+  string subscription_id = 3;
+  uint32 generation = 4;
 }
 
 // A later attempt of a producer started writing. Readers synthesize it, and no store holds it.
@@ -209,6 +376,197 @@ message ReadResponse {
   // The owner's chain ended and the read delivered every record the stream retains. No later
   // call returns a record.
   bool done = 4;
+  reserved 5;
+  reserved "armed";
+  // Set on an answer with no records and not `done`: the notification counter of the read's
+  // position, zero for an empty stream. A notification with a higher counter names a record
+  // after the position, so the reader waits for a counter above this one. One that landed before
+  // the wait started counts.
+  int64 wake_after = 6;
+  // Set with `done` when the stream's topic was closed with a result. A chain close, when the
+  // owner ended with no close, sets none of these three.
+  temporal.api.common.v1.Payload close_result = 7;
+  // Set with `done` when the stream's topic was closed with a failure.
+  temporal.api.failure.v1.Failure close_failure = 8;
+  // Set with `done` to the `closed_by` of the topic's first close.
+  string closed_by = 9;
+  // SHA-256 over the answer's records, as `ReadRange` checks it: per record its cursor, its stale
+  // flag, and for a stored record its kind, producer, attempt, sequence and plaintext content
+  // hash, or for a supersession its producer and both attempts. It leaves out the encoded body.
+  bytes records_digest = 10;
+  // The first run of the chain the read read. `ReadRange` takes it, so replay needs no describe.
+  string chain_first_run_id = 11;
+  // The cursor this answer reads strictly after, with `$end` resolved. With `cursor`, it is the
+  // range `ReadRange` reads again.
+  string start_cursor = 12;
+}
+
+message ReadRangeRequest {
+  // The stream, as the read named it.
+  StreamAddress stream = 1;
+  // The read's `chain_first_run_id`.
+  string chain_first_run_id = 2;
+  // The read's `start_cursor` and its answer's `cursor`.
+  string after = 3;
+  string to = 4;
+  // How many stored records the answer held, not counting supersessions.
+  uint32 stored_records = 5;
+  // The read's input `state`.
+  bytes state = 6;
+  // The answer's `records_digest`.
+  bytes records_digest = 7;
+  // As in `ReadRequest`, so a replay holds the records for its own run.
+  string floor_holder = 8;
+  // Set when the read's `after` was `$end`. That read looked up no record at the start it found,
+  // and the replay must not either, or a newer attempt there reads as superseded.
+  bool start_from_end = 9;
+}
+
+message ReleaseFloorRequest {
+  StreamAddress stream = 1;
+  string chain_first_run_id = 2;
+  string floor_holder = 3;
+}
+
+message ReleaseFloorResponse {}
+
+message FollowRequest {
+  // The root stream.
+  StreamAddress stream = 1;
+  // The root cursor, on the first call. Later calls resume from `state` and ignore it.
+  string after = 2;
+  // The `state` of the previous answer. Empty on the first call.
+  bytes state = 3;
+  // How long to wait for a record when no source has one. Core waits at most 60 seconds.
+  google.protobuf.Duration wait = 4;
+  // How many stored records one answer holds at most, across all sources. Zero uses 100. Core
+  // answers with at most 1,000.
+  uint32 max_records = 5;
+  // How deep links are followed. The root is depth zero. Zero uses 4. The first call's limits
+  // hold for the whole follow, and `state` keeps them.
+  uint32 max_depth = 6;
+  // How many linked streams are open at once. Zero uses 16.
+  uint32 max_open = 7;
+  // For a positions-only follower: each source holds its records as `<floor_holder>/<source>`.
+  string floor_holder = 8;
+  // Set by a Workflow follower. An empty answer attaches each idle source idle and asks its
+  // notifier for one wake after the source's `wake_after`.
+  FollowSubscriber subscriber = 9;
+}
+
+// The Workflow that follows, so each idle source wakes it.
+message FollowSubscriber {
+  string workflow_id = 1;
+  string run_id = 2;
+  // Each source subscribes as `<subscription_prefix>.<source>`.
+  string subscription_prefix = 3;
+  uint32 generation = 4;
+}
+
+message FollowedRecord {
+  // The source the item belongs to. Zero is the root. A SKIPPED link names the source that holds
+  // the link.
+  uint32 source = 1;
+  oneof item {
+    ReadRecord record = 2;
+    LinkState link_state = 3;
+  }
+}
+
+// What happened to a link, as the follower saw it.
+message LinkState {
+  enum Kind {
+    KIND_UNSPECIFIED = 0;
+    // The linked stream is open, and its records follow.
+    KIND_OPENED = 1;
+    // The linked stream's segment ended: the stream closed, or it reached the JOIN's `until`. A
+    // closed stream gives its close outcome.
+    KIND_DONE = 2;
+    // The linked stream can't be read. `error` says why. The follow goes on without it.
+    KIND_UNAVAILABLE = 3;
+    // The link was not followed. `reason` says why.
+    KIND_SKIPPED = 4;
+  }
+  Kind kind = 1;
+  temporal.sdk.streams.v1.StreamLink link = 2;
+  temporal.api.common.v1.Payload close_result = 3;
+  temporal.api.failure.v1.Failure close_failure = 4;
+  // Set on UNAVAILABLE.
+  StreamFailure error = 5;
+  // Set on SKIPPED: `depth`, `limit`, `cycle`, `open` or `endpoint`.
+  string reason = 6;
+}
+
+// A source that an answer's records name.
+message FollowSource {
+  uint32 number = 1;
+  // The source that holds the source's link. Zero for the root and its links.
+  uint32 parent = 2;
+  uint32 depth = 3;
+  StreamAddress stream = 4;
+  // The link's name. Empty for the root.
+  string name = 5;
+}
+
+// One read of one source, as `ReadRange` reads it again.
+message SourceRange {
+  uint32 source = 1;
+  string chain_first_run_id = 2;
+  string start_cursor = 3;
+  string cursor = 4;
+  uint32 stored_records = 5;
+  bytes state_in = 6;
+  bytes records_digest = 7;
+  bool start_from_end = 8;
+  // The read ended the source's stream, with this outcome.
+  bool done = 9;
+  temporal.api.common.v1.Payload close_result = 10;
+  temporal.api.failure.v1.Failure close_failure = 11;
+  // The read failed, so the source is unavailable. No other field but `source` is set.
+  StreamFailure error = 12;
+}
+
+// An idle source that a Workflow follower waits on.
+message SourceWake {
+  uint32 source = 1;
+  string subscription_id = 2;
+  // The source's notification counter. A wake above it names a new record.
+  int64 wake_after = 3;
+}
+
+message FollowResponse {
+  repeated FollowedRecord records = 1;
+  // The composite position: every source's cursor and read state, and the gates. Opaque to lang.
+  bytes state = 2;
+  // The root ended and every linked segment ended. No later call returns a record.
+  bool done = 3;
+  // Each source that `records` names.
+  repeated FollowSource sources = 4;
+  // Each read of this answer, in read order.
+  repeated SourceRange ranges = 5;
+  // On an empty answer of a Workflow follower, each idle source.
+  repeated SourceWake wakes = 6;
+  // The root's close outcome, with `done`.
+  temporal.api.common.v1.Payload close_result = 7;
+  temporal.api.failure.v1.Failure close_failure = 8;
+  // SHA-256 over the order of `records`, as `FollowRange` checks it.
+  bytes follow_digest = 9;
+}
+
+message FollowRangeRequest {
+  // The root stream, as the Follow named it.
+  StreamAddress stream = 1;
+  // The `state` the Follow started from.
+  bytes state_in = 2;
+  // The Follow's `ranges`.
+  repeated SourceRange ranges = 3;
+  // The Follow's `follow_digest`.
+  bytes follow_digest = 4;
+  // As in `FollowRequest`.
+  string floor_holder = 5;
+  // The first Follow's limits, for a `state_in` that is empty. A non-empty `state_in` keeps them.
+  uint32 max_depth = 6;
+  uint32 max_open = 7;
 }
 
 message LatestRequest {
@@ -222,14 +580,118 @@ message LatestResponse {
 
 message CloseRequest {
   StreamAddress stream = 1;
+  // What every callback attached to the stream's notifier completes with, after lang's payload
+  // codec. The stream's notifier on the server closes once the store has. When set, a notifier
+  // that doesn't take the close fails the call, and Core keeps trying in the background too.
+  // Unset, the callbacks complete with a `binary/null` result, and the notifier close is retried
+  // in the background.
+  temporal.api.common.v1.Payload result = 2;
+  // Closes the stream with a failure instead of `result`, after lang's failure converter and
+  // codec. The callbacks complete as failed, or as canceled for a failure with canceled info.
+  // A close carries a result or a failure, never both.
+  temporal.api.failure.v1.Failure failure = 3;
+  // Who closed the stream, opaque to Core. At most 256 bytes. The store keeps it with the first
+  // close's outcome, and readers and refused appends see it, so a writer can tell a close by its
+  // own run.
+  string closed_by = 4;
+}
+
+// The first close of a topic, as a store keeps it. A later close of the topic keeps this one. A
+// chain close, when the owner ended, keeps none. With `result` and `failure`, at most 1.5 MiB.
+message StoredClose {
+  temporal.api.common.v1.Payload result = 1;
+  temporal.api.failure.v1.Failure failure = 2;
+  string closed_by = 3;
 }
 
 message CloseResponse {}
 
+message FlushNotificationsRequest {}
+
+message FlushNotificationsResponse {}
+
+message SubscribeRequest {
+  // The stream to read. The reader's Workflow is in the stream's namespace.
+  StreamAddress stream = 1;
+  // The reader's Workflow and run.
+  string workflow_id = 2;
+  string run_id = 3;
+  // Names the reader in its run. Lang derives it from the reader's call number, so replay gives
+  // the same one. At most 256 bytes.
+  string subscription_id = 4;
+  // Counts the times the reader subscribed again after a wake with `resubscribe`. Each value is a
+  // new attach, since the server answers a repeat of a dropped attach as done. Lang counts it from
+  // the wakes, so replay gives the same one.
+  uint32 generation = 5;
+}
+
+message SubscribeResponse {
+  // The first run of the stream's run chain, which keys the notifier the reader attached to.
+  string chain_first_run_id = 1;
+  // Whether this call sent the attach. False when this process attached the reader before.
+  bool attached = 2;
+  // The notification counter of the stream's newest record, read after the attach landed, zero
+  // for an empty stream. A record that landed before the notifier existed woke no one, so a
+  // reader whose last read stopped below this counter reads once more before it sleeps.
+  int64 newest_counter = 3;
+}
+
+message UnsubscribeRequest {
+  // The stream, the reader's run, the subscription and its generation, as the last Subscribe
+  // named them.
+  StreamAddress stream = 1;
+  string run_id = 2;
+  string subscription_id = 3;
+  uint32 generation = 4;
+}
+
+message UnsubscribeResponse {}
+
+message WaitForNotificationRequest {
+  // The stream the reader reads.
+  StreamAddress stream = 1;
+  // The `wake_after` of the read that came back empty.
+  int64 after_counter = 2;
+}
+
+message WaitForNotificationResponse {
+  // The highest counter the notifier has seen.
+  int64 counter = 1;
+  // The position that came with `counter`.
+  string position = 2;
+  // The wait reached its limit with no counter above `after_counter` and no close.
+  bool timed_out = 3;
+  // The stream closed. The reader reads to its end.
+  bool closed = 4;
+  // The result the stream closed with, when it gave one.
+  temporal.api.common.v1.Payload close_result = 5;
+  // The failure the stream closed with, when it closed with one.
+  temporal.api.failure.v1.Failure close_failure = 6;
+}
+
+message RunStreamDriverRequest {
+  // The driver's name in the log's consumer group, unique among the store's drivers.
+  string consumer = 1;
+  // How often the driver looks at every slot that holds entries. Unset uses 30 seconds.
+  google.protobuf.Duration sweep_interval = 2;
+  // How long another driver's unacked entries wait before this one takes them. Unset uses 60
+  // seconds.
+  google.protobuf.Duration claim_idle = 3;
+  // The most entries one read takes, and so the most streams one notify call names. Zero uses
+  // 100.
+  uint32 batch = 4;
+}
+
+message RunStreamDriverResponse {}
+
 message DeleteOwnerRequest {
   string namespace = 1;
   StreamOwnerKind owner_kind = 2;
+  // The Workflow whose streams go, for a Workflow owner. The streams of every Activity that the
+  // Workflow scheduled go too.
   string workflow_id = 3;
+  // The standalone Activity whose streams go, across all its runs, for an Activity owner.
+  string activity_id = 4;
 }
 
 message DeleteOwnerResponse {
@@ -321,6 +783,12 @@ enum StreamFailureKind {
   // the same call fails the same way. A lang built before this kind maps it, as any kind it
   // doesn't know, to a storage failure.
   STREAM_FAILURE_KIND_INVALID_ARGUMENT = 12;
+  // A replay read found other records than the read it repeats: other content, another count
+  // or another end. Lang reports it as nondeterminism.
+  STREAM_FAILURE_KIND_REPLAY_MISMATCH = 13;
+  // A replay read found that the store no longer holds the range the read it repeats got
+  // (REC-01), such as records that retention trimmed or a deleted log.
+  STREAM_FAILURE_KIND_REPLAY_RANGE_LOST = 14;
 }
 
 message StreamFailure {
@@ -328,6 +796,9 @@ message StreamFailure {
   string message = 2;
   // The cursor of the record that failed, for RECORD.
   string cursor = 3;
+  // For CLOSED, the `closed_by` of the topic's first close. Empty when the owner's chain closed
+  // or the close named no one.
+  string closed_by = 4;
 }
 
 // The calls below are what the service asks of a store, below owner checks, cursors and
@@ -348,6 +819,8 @@ message StoreAppendRequest {
 message StoreAppendResponse {
   string first_position = 1;
   string last_position = 2;
+  reserved 3;
+  reserved "arm";
 }
 
 message StoreReadRequest {
@@ -357,6 +830,8 @@ message StoreReadRequest {
   string after_position = 3;
   google.protobuf.Duration wait = 4;
   uint32 max_records = 5;
+  reserved 6;
+  reserved "arm";
 }
 
 message StoredRecord {
@@ -369,6 +844,10 @@ message StoreReadResponse {
   repeated StoredRecord records = 1;
   // The chain or this topic is marked closed.
   bool closed = 2;
+  reserved 3;
+  reserved "armed";
+  // The topic's first close, when it was closed as a topic. Unset for a chain close.
+  StoredClose close = 4;
 }
 
 message StoreLatestRequest {
@@ -412,14 +891,16 @@ message PublishWorkflowTaskRequest {
 // One record a Workflow published.
 message OutputRecord {
   string topic = 1;
-  // DATA or FINISH.
+  // DATA, FINISH or LINK.
   temporal.sdk.streams.v1.StreamRecordKind kind = 2;
-  // The value on DATA, after lang's payload codec. Absent on FINISH.
+  // The value on DATA, after lang's payload codec. Absent on FINISH. Optional on LINK.
   temporal.api.common.v1.Payload body = 3;
-  // The SHA-256 of the body as the payload converter made it, before the codec. Set on DATA. The
-  // service builds each topic's batch digest from these, so a repeat of a batch matches whatever
-  // the codec made of the bodies.
+  // The SHA-256 of the body as the payload converter made it, before the codec. Set with a body.
+  // The service builds each topic's batch digest from these, so a repeat of a batch matches
+  // whatever the codec made of the bodies.
   bytes content_hash = 4;
+  // Set on LINK only.
+  temporal.sdk.streams.v1.StreamLink link = 5;
 }
 
 enum WorkflowTerminalCommand {

@@ -1,0 +1,122 @@
+syntax = "proto3";
+
+package temporal.api.stream.v1;
+
+option go_package = "go.temporal.io/api/stream/v1;stream";
+option java_package = "io.temporal.api.stream.v1";
+option java_multiple_files = true;
+option java_outer_classname = "MessageProto";
+option ruby_package = "Temporalio::Api::Stream::V1";
+option csharp_namespace = "Temporalio.Api.Stream.V1";
+
+import "google/protobuf/timestamp.proto";
+import "temporal/api/common/v1/message.proto";
+import "temporal/api/enums/v1/common.proto";
+import "temporal/api/enums/v1/stream.proto";
+import "temporal/api/failure/v1/message.proto";
+
+// Names one stream within a namespace: its owner and its topic.
+message StreamReference {
+    temporal.api.enums.v1.StreamOwnerKind owner_kind = 1;
+    // The owning Workflow, for `STREAM_OWNER_KIND_WORKFLOW`. The Workflow that scheduled the
+    // owning Activity, for `STREAM_OWNER_KIND_WORKFLOW_ACTIVITY`. Empty for other kinds.
+    string workflow_id = 2;
+    // For `STREAM_OWNER_KIND_WORKFLOW`, the id of the first run in the owning Workflow's run
+    // chain. The stream notifier is keyed by it, so one notifier serves the stream across the
+    // chain's runs, and a stream that reuses the Workflow id in a new chain gets a notifier of its
+    // own. For `STREAM_OWNER_KIND_ACTIVITY`, the id of the owning Activity run. For
+    // `STREAM_OWNER_KIND_WORKFLOW_ACTIVITY`, the id of the run that scheduled the Activity, not
+    // the chain's first run. An empty run id is refused.
+    string run_id = 3;
+    // The stream's topic within its owner.
+    string topic = 4;
+    // The owning standalone Activity, for `STREAM_OWNER_KIND_ACTIVITY`. The owning Activity's id
+    // in the scheduling run, for `STREAM_OWNER_KIND_WORKFLOW_ACTIVITY`. Empty for other kinds.
+    string activity_id = 5;
+}
+
+// A callback attached to a stream notifier, as DescribeStreamNotifier reports it.
+message StreamCallbackInfo {
+    // The request ID the callback was attached with.
+    string request_id = 1;
+    // The callback. Its header keeps its keys, but every value is empty, since the values hold
+    // the caller's credentials.
+    temporal.api.common.v1.Callback callback = 2;
+    // The state of the callback's completion delivery.
+    temporal.api.enums.v1.CallbackState state = 3;
+    // The highest counter delivered to the callback as progress.
+    int64 delivered_counter = 4;
+    // Whether the receiver refused progress, so the callback only gets the completion.
+    bool progress_disabled = 5;
+    // The number of attempts made for the delivery in flight, starting at 1.
+    int32 attempt = 6;
+    // The time the last attempt completed.
+    google.protobuf.Timestamp last_attempt_complete_time = 7;
+    // The failure of the last attempt, if it failed.
+    temporal.api.failure.v1.Failure last_attempt_failure = 8;
+    // The Workflow the callback wakes, when it was attached with a `workflow_target` and not a
+    // Nexus callback. Then `callback` is unset.
+    WorkflowWakeTarget workflow_target = 9;
+}
+
+// A Workflow that a stream notifier wakes when the stream moves or closes. The Workflow is in the
+// namespace of the request that attached it.
+message WorkflowWakeTarget {
+    string workflow_id = 1;
+    string run_id = 2;
+    // Names one reader of the stream in that run. The Workflow gets the wakes of each reader as
+    // their own `StreamWake`. At most 256 bytes.
+    string subscription_id = 3;
+}
+
+// A wake for one reader of a stream in a Workflow. The server records it as one of the
+// `attachments` of the next Workflow Task scheduled event, so it adds no event of its own.
+//
+// A wake says that the stream moved, not what it holds. The reader reads the stream itself. Wakes
+// of one reader are folded, so the reader sees the latest one, with the highest `counter`.
+message StreamWake {
+    // The `subscription_id` of the `WorkflowWakeTarget` this wake is for.
+    string subscription_id = 1;
+    // The position that came with `counter`, in the producer's terms.
+    string position = 2;
+    // The highest counter the notifier has seen. A reader that subscribed after a counter wakes
+    // when this value is above it. Zero when the notifier has seen no notification.
+    int64 counter = 3;
+    // The metadata that came with `counter`.
+    map<string, string> metadata = 4;
+    // Set when the notifier asks the reader to read again with no new counter. The notifier sends
+    // it after a quiet period, so a reader also finds records whose notification was lost.
+    bool recheck = 5;
+    // Set when the stream closed. The reader reads to the end of the stream, then sees the
+    // outcome.
+    bool closed = 6;
+    // The result the stream closed with, when `closed` is set. Optional.
+    temporal.api.common.v1.Payload close_result = 7;
+    // The failure the stream closed with, when `closed` is set and it closed with one.
+    temporal.api.failure.v1.Failure close_failure = 8;
+    // Set when the notifier dropped this reader, for example at the notifier's idle timeout. The
+    // reader attaches again under a new request ID.
+    bool resubscribe = 9;
+}
+
+// One stream's entry in a NotifyStreams request: the same fields as a NotifyStream request that
+// does not close the stream.
+message StreamNotification {
+    StreamReference stream_ref = 1;
+    // Where the stream stands, in the producer's terms. At most 1 KiB of UTF-8.
+    string position = 2;
+    // The newest counter of the stream. Must be positive. The notifier ignores a counter at or
+    // below the one it holds.
+    int64 counter = 3;
+    // Small details passed on to the callbacks. At most 2 KiB in total, counted as UTF-8 bytes.
+    map<string, string> metadata = 4;
+}
+
+// The answer to one entry of a NotifyStreams request.
+message StreamNotificationResult {
+    // The gRPC status code of the entry, as a NotifyStream call for it would answer. Zero (OK)
+    // when the server applied the entry, or dropped it since the stream has no notifier.
+    int32 code = 1;
+    // Why the server refused the entry. Empty when `code` is zero.
+    string message = 2;
+}

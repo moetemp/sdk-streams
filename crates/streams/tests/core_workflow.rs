@@ -1216,6 +1216,7 @@ async fn a_topic_closed_before_the_publish_drops_its_records_and_the_task_goes_o
             namespace: NAMESPACE.to_string(),
             workflow_id: WORKFLOW_ID.to_string(),
             first_run_id,
+            ..Default::default()
         },
         TOPIC,
     )
