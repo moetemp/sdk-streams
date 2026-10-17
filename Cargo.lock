@@ -3152,6 +3152,7 @@ dependencies = [
  "assert_matches",
  "async-trait",
  "aws-lc-rs",
+ "bytes",
  "crc16",
  "deadpool-postgres",
  "futures-util",

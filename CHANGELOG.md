@@ -26,3 +26,5 @@
 - The Workflow publish takes LINK records and checks each link as a follower reads it.
 - The crate generates the stream API from its own copy in `protos/api_stream`, taken from
   `moetemp/api` `c1a8d975`, since sdk-rust no longer vendors it. It builds on sdk-rust kj5.
+- The notifier client calls the stream notifier RPCs by method path through
+  `Connection::raw_unary`, with the namespace header, since sdk-rust lists none of them.
