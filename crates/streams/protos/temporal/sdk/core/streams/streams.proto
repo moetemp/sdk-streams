@@ -37,7 +37,8 @@ service StreamService {
   // before it completes the eviction activation.
   rpc RunEvicted(RunEvictedRequest) returns (RunEvictedResponse);
   // Drops one Worker's state for all its runs, and waits for the store calls the Worker's runs
-  // left running. Lang calls it at Worker shutdown, after the last eviction.
+  // left running. Lang calls it at Worker shutdown, after the last eviction. A run whose last live
+  // completion ended its chain gets the close its eviction would give.
   rpc ShutdownWorker(ShutdownWorkerRequest) returns (ShutdownWorkerResponse);
 }
 

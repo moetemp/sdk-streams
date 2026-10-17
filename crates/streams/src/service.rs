@@ -195,7 +195,9 @@ impl StreamService {
 
     /// Drops all of `worker_id`'s state, and waits for the store calls its runs left running,
     /// such as a chain close. Replay never sends a close again, so a Worker shutdown must wait
-    /// for it.
+    /// for it. A Worker can shut down before it hands lang the eviction of a run that just ended,
+    /// so the shutdown also closes the chain of each run whose last live completion ended it,
+    /// once the server shows the run closed.
     pub async fn shutdown_worker(&self, worker_id: &str) {
         self.workflows.shutdown_worker(worker_id).await;
     }

@@ -360,3 +360,21 @@ async fn a_publish_does_not_wait_for_the_retire_and_shutdown_does() {
     shutdown.await;
     assert_eq!(store.retired().len(), 1);
 }
+
+#[tokio::test]
+async fn a_shutdown_without_the_eviction_closes_a_chain_the_run_ended() {
+    for (status, closes) in [
+        (WorkflowExecutionStatus::Completed, true),
+        (WorkflowExecutionStatus::Running, false),
+    ] {
+        let store = Arc::new(RecordingStore::default());
+        let service = service_on(&store, &Owner::with(status));
+        let last = ending(
+            publish(3, 0, &[], &["a"]),
+            WorkflowTerminalCommand::Complete,
+        );
+        send(&service, last).await.unwrap();
+        shutdown(&service, "worker-1").await;
+        assert_eq!(store.calls().contains(&"close_chain"), closes, "{status:?}");
+    }
+}

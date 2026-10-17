@@ -463,9 +463,14 @@ impl WorkflowOutput {
         let current = run.attempt;
         let retired = run.sessions_below(current);
         self.retire(worker_id, &run, retired);
-        let Some(attempt) = run.chain_end.filter(|_| ending) else {
-            return;
-        };
+        if let Some(attempt) = run.chain_end.filter(|_| ending) {
+            self.close_if_run_closed(worker_id, &run, attempt);
+        }
+    }
+
+    /// Closes the run's chain at `attempt` in the background, once the server shows the run
+    /// closed.
+    fn close_if_run_closed(&self, worker_id: &str, run: &RunState, attempt: i64) {
         let store = self.store.clone();
         let owner = self.owner.clone();
         let chain = run.chain.clone();
@@ -517,6 +522,11 @@ impl WorkflowOutput {
             let current = run.attempt;
             let retired = run.sessions_below(current);
             self.retire(worker_id, &run, retired);
+            // A Worker that shuts down may never hand lang the eviction of a run that just ended,
+            // so the shutdown takes its place. The Describe check still guards the close.
+            if let Some(attempt) = run.chain_end {
+                self.close_if_run_closed(worker_id, &run, attempt);
+            }
         }
         let tasks = self.tasks.lock().remove(worker_id);
         if let Some(tasks) = tasks {
