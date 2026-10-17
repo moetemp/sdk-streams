@@ -29,10 +29,10 @@ fn key_of(key: &OperationKey) -> Key {
 
 /// The key `progress` names, if it names one.
 fn progress_key(progress: &NexusOperationProgress) -> Option<Key> {
-    match &progress.operation {
-        Some(Operation::OperationKey(key)) => Some(key_of(key)),
-        None => None,
-    }
+    progress
+        .operation
+        .as_ref()
+        .map(|Operation::OperationKey(key)| key_of(key))
 }
 
 /// Folds `progress` into `folded`, which keeps one progress per operation key, in order of first
