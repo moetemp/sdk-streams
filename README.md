@@ -15,7 +15,7 @@ the crate.
 | Stage | sdk-streams branch | sdk-rust commit |
 |---|---|---|
 | Brook | `moe/brook/ss1-import-store` and up | `moe/brook/k1-workflow-task-info` `4ebdacab` |
-| Jetty | `moe/jetty/sj1-import-jetty` and up | `moe/jetty/kj3-early-task-heartbeat` `969a0883` |
+| Jetty | `moe/jetty/sj1-import-jetty` and up | `moe/jetty/kj5-early-task-heartbeat` `4c05def9` |
 
 ## Linking from a lang bridge
 
@@ -45,7 +45,10 @@ build takes `fips` with no default features. It turns on `tls-aws-lc` and the FI
 The build needs `protoc`. The crate generates `coresdk.streams` and `temporal.sdk.streams.v1` from
 `crates/streams/protos`. The Temporal API protos under `protos/api_include` are a copy for imports
 only. `scripts/sync-api-protos.sh` refreshes the copy from the pinned sdk-rust commit, and CI fails
-when the copy differs.
+when the copy differs. sdk-rust vendors no stream API, so the crate generates its own from
+`protos/api_stream`, a copy of the `moetemp/api` commit in `protos/api_stream/API_COMMIT`. It calls
+the stream notifier RPCs by method path through `Connection::raw_unary`.
+`scripts/sync-stream-api.sh` refreshes that copy, and CI fails when it differs.
 
 - Format and lint: `cargo fmt --all -- --check`, then
   `cargo clippy --workspace --all-features --tests -- -D warnings`.

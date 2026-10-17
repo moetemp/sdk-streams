@@ -1,8 +1,8 @@
 //! What every SDK and store must agree on for stream records: their stored metadata keys, the
 //! topics a store keys, and the links a follower reads.
 
+use crate::protos::temporal::api::stream::v1::StreamReference;
 use crate::protos::temporal::sdk::streams::v1::{StreamLink, stream_link};
-use temporalio_common::protos::temporal::api::stream::v1::StreamReference;
 
 /// The record metadata key a body's plaintext hash is stored under, as a `binary/plain` payload
 /// whose data is the hex SHA-256.
@@ -82,7 +82,7 @@ pub fn check_link(link: &StreamLink) -> Result<(), String> {
 
 /// Refuses a reference whose ids don't fit its owner kind.
 fn check_reference(stream: &StreamReference) -> Result<(), String> {
-    use temporalio_common::protos::temporal::api::enums::v1::StreamOwnerKind as Kind;
+    use crate::protos::temporal::api::enums::v1::StreamOwnerKind as Kind;
     check_topic(&stream.topic)?;
     let (workflow, run, activity) = (
         !stream.workflow_id.is_empty(),

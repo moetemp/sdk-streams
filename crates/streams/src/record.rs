@@ -481,7 +481,7 @@ mod tests {
     }
 
     fn open_link() -> StreamLink {
-        use temporalio_common::protos::temporal::api::{
+        use crate::protos::temporal::api::{
             enums::v1::StreamOwnerKind as Kind, stream::v1::StreamReference,
         };
         StreamLink {

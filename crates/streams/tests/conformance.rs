@@ -2210,7 +2210,7 @@ mod cases {
     }
 
     pub(crate) async fn a_link_record_reads_back_with_its_link(case: &dyn Case) {
-        use temporalio_common::protos::temporal::api::{
+        use temporalio_streams::protos::temporal::api::{
             enums::v1::StreamOwnerKind as Kind, stream::v1::StreamReference,
         };
         let chain = case.chain();

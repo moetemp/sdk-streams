@@ -39,6 +39,7 @@ postgres = [
 
 [dependencies]
 async-trait = "0.1"
+bytes = "1"
 # Only under `fips`. The crate never calls it. Its `fips` feature switches the one `aws-lc-rs` in
 # the build into FIPS mode.
 aws-lc-rs = { version = "1", features = ["fips"], optional = true }

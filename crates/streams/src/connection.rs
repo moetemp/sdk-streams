@@ -6,31 +6,86 @@ use crate::{
     OwnerError, OwnerId, OwnerStatus, RunClose, StreamNotification, StreamResult, StreamService,
     WorkflowAttachment,
     proto::{self, ChainId},
+    protos::temporal::api::{
+        enums::v1::StreamOwnerKind,
+        stream::v1::{self, StreamReference, WorkflowWakeTarget},
+        workflowservice::v1::{
+            AttachStreamCallbackRequest, AttachStreamCallbackResponse, DetachStreamCallbackRequest,
+            DetachStreamCallbackResponse, NotifyStreamRequest, NotifyStreamResponse,
+            NotifyStreamsRequest, NotifyStreamsResponse, PollStreamNotifierRequest,
+            PollStreamNotifierResponse, WaitStreamCallbackRequest, WaitStreamCallbackResponse,
+        },
+    },
 };
 use prost::Message;
-use std::{collections::BTreeMap, sync::Arc};
+use std::{collections::BTreeMap, sync::Arc, time::Duration};
 use temporalio_client::Connection;
 use temporalio_common::{
     protos::{
         google::rpc::Status as RpcStatus,
         temporal::api::{
             common::v1::WorkflowExecution,
-            enums::v1::{EventType, StreamOwnerKind, WorkflowExecutionStatus},
+            enums::v1::{EventType, WorkflowExecutionStatus},
             history::v1::{HistoryEvent, history_event},
-            stream::v1::{self, StreamReference, WorkflowWakeTarget},
             workflowservice::v1::{
-                AttachStreamCallbackRequest, DescribeActivityExecutionRequest,
-                DescribeActivityExecutionResponse, DescribeWorkflowExecutionRequest,
-                DescribeWorkflowExecutionResponse, DetachStreamCallbackRequest,
-                GetWorkflowExecutionHistoryReverseRequest, NotifyStreamRequest,
-                NotifyStreamsRequest, PollStreamNotifierRequest, PollStreamNotifierResponse,
-                WaitStreamCallbackRequest,
+                DescribeActivityExecutionRequest, DescribeActivityExecutionResponse,
+                DescribeWorkflowExecutionRequest, DescribeWorkflowExecutionResponse,
+                GetWorkflowExecutionHistoryReverseRequest,
             },
         },
     },
     telemetry::metrics::TemporalMeter,
 };
 use tonic::IntoRequest;
+
+/// The method paths of the stream notifier RPCs. sdk-rust lists none of them, so the crate calls
+/// each one by its path.
+mod method {
+    macro_rules! path {
+        ($name:ident, $rpc:literal) => {
+            pub(super) const $name: &str =
+                concat!("/temporal.api.workflowservice.v1.WorkflowService/", $rpc);
+        };
+    }
+    path!(ATTACH, "AttachStreamCallback");
+    path!(WAIT, "WaitStreamCallback");
+    path!(DETACH, "DetachStreamCallback");
+    path!(NOTIFY, "NotifyStream");
+    path!(NOTIFY_MANY, "NotifyStreams");
+    path!(POLL, "PollStreamNotifier");
+    #[cfg(test)]
+    path!(DESCRIBE, "DescribeStreamNotifier");
+}
+
+/// How long a notifier poll may wait, as the client gives its own long polls. The server answers
+/// at its own wait limit before that.
+const POLL_TIMEOUT: Duration = Duration::from_secs(70);
+
+/// Calls the stream notifier RPC at `method` through `connection`, with its TLS, API key, headers
+/// and retries. The namespace header routes the call, as the client's own RPCs do.
+async fn notifier_call<Resp: Message + Default>(
+    connection: &Connection,
+    method: &'static str,
+    namespace: &str,
+    request: impl Message,
+    timeout: Option<Duration>,
+) -> Result<Resp, tonic::Status> {
+    let mut request = tonic::Request::new(bytes::Bytes::from(request.encode_to_vec()));
+    if let Ok(namespace) = namespace.parse() {
+        request
+            .metadata_mut()
+            .insert("temporal-namespace", namespace);
+    }
+    if let Some(timeout) = timeout {
+        request.set_timeout(timeout);
+    }
+    let response = connection.raw_unary(method, request).await?;
+    Resp::decode(response.into_inner()).map_err(|error| {
+        tonic::Status::internal(format!(
+            "The server's answer to {method} did not decode: {error}"
+        ))
+    })
+}
 
 /// Connects to the store `config` names. The service asks `connection`'s server about streams'
 /// owners, sends the stream notifications the config turns on to it, attaches Workflow readers
@@ -60,12 +115,18 @@ struct ConnectionNotifierClient {
 #[async_trait::async_trait]
 impl NotifierClient for ConnectionNotifierClient {
     async fn notify(&self, notification: StreamNotification) -> Result<(), NotifyError> {
-        self.connection
-            .workflow_service()
-            .notify_stream(notify_request(notification).into_request())
-            .await
-            .map(|_| ())
-            .map_err(notify_error)
+        let request = notify_request(notification);
+        let namespace = request.namespace.clone();
+        notifier_call::<NotifyStreamResponse>(
+            &self.connection,
+            method::NOTIFY,
+            &namespace,
+            request,
+            None,
+        )
+        .await
+        .map(drop)
+        .map_err(notify_error)
     }
 
     async fn notify_streams(
@@ -92,13 +153,16 @@ impl NotifierClient for ConnectionNotifierClient {
             let indexes: Vec<_> = (0..namespaces.len())
                 .filter(|&index| namespaces[index] == request.namespace)
                 .collect();
-            let response = self
-                .connection
-                .workflow_service()
-                .notify_streams(request.into_request())
-                .await
-                .map_err(notify_error)?
-                .into_inner();
+            let namespace = request.namespace.clone();
+            let response: NotifyStreamsResponse = notifier_call(
+                &self.connection,
+                method::NOTIFY_MANY,
+                &namespace,
+                request,
+                None,
+            )
+            .await
+            .map_err(notify_error)?;
             // A server that answers no results applied every entry.
             for (index, result) in indexes.into_iter().zip(response.results) {
                 if result.code != tonic::Code::Ok as i32 {
@@ -111,12 +175,18 @@ impl NotifierClient for ConnectionNotifierClient {
     }
 
     async fn attach_workflow(&self, attachment: WorkflowAttachment) -> Result<(), NotifyError> {
-        self.connection
-            .workflow_service()
-            .attach_stream_callback(attach_request(attachment).into_request())
-            .await
-            .map(|_| ())
-            .map_err(notify_error)
+        let request = attach_request(attachment);
+        let namespace = request.namespace.clone();
+        notifier_call::<AttachStreamCallbackResponse>(
+            &self.connection,
+            method::ATTACH,
+            &namespace,
+            request,
+            None,
+        )
+        .await
+        .map(drop)
+        .map_err(notify_error)
     }
 
     async fn wait_callback(
@@ -126,21 +196,23 @@ impl NotifierClient for ConnectionNotifierClient {
         request_id: String,
         after_counter: i64,
     ) -> Result<(), NotifyError> {
-        self.connection
-            .workflow_service()
-            .wait_stream_callback(
-                WaitStreamCallbackRequest {
-                    namespace: chain.namespace.clone(),
-                    stream_ref: Some(chain_reference(&chain, topic)),
-                    request_id,
-                    after_counter,
-                    identity: self.connection.identity().to_string(),
-                }
-                .into_request(),
-            )
-            .await
-            .map(|_| ())
-            .map_err(notify_error)
+        let request = WaitStreamCallbackRequest {
+            namespace: chain.namespace.clone(),
+            stream_ref: Some(chain_reference(&chain, topic)),
+            request_id,
+            after_counter,
+            identity: self.connection.identity().to_string(),
+        };
+        notifier_call::<WaitStreamCallbackResponse>(
+            &self.connection,
+            method::WAIT,
+            &chain.namespace,
+            request,
+            None,
+        )
+        .await
+        .map(drop)
+        .map_err(notify_error)
     }
 
     async fn detach(
@@ -149,20 +221,22 @@ impl NotifierClient for ConnectionNotifierClient {
         topic: String,
         request_id: String,
     ) -> Result<(), NotifyError> {
-        self.connection
-            .workflow_service()
-            .detach_stream_callback(
-                DetachStreamCallbackRequest {
-                    namespace: chain.namespace.clone(),
-                    stream_ref: Some(chain_reference(&chain, topic)),
-                    request_id,
-                    ..Default::default()
-                }
-                .into_request(),
-            )
-            .await
-            .map(|_| ())
-            .map_err(notify_error)
+        let request = DetachStreamCallbackRequest {
+            namespace: chain.namespace.clone(),
+            stream_ref: Some(chain_reference(&chain, topic)),
+            request_id,
+            ..Default::default()
+        };
+        notifier_call::<DetachStreamCallbackResponse>(
+            &self.connection,
+            method::DETACH,
+            &chain.namespace,
+            request,
+            None,
+        )
+        .await
+        .map(drop)
+        .map_err(notify_error)
     }
 
     async fn poll(
@@ -171,21 +245,22 @@ impl NotifierClient for ConnectionNotifierClient {
         topic: String,
         after_counter: i64,
     ) -> Result<Option<NotifierPoll>, NotifyError> {
-        let answer = self
-            .connection
-            .workflow_service()
-            .poll_stream_notifier(
-                PollStreamNotifierRequest {
-                    namespace: chain.namespace.clone(),
-                    stream_ref: Some(chain_reference(&chain, topic)),
-                    after_counter,
-                    identity: self.connection.identity().to_string(),
-                }
-                .into_request(),
-            )
-            .await;
+        let request = PollStreamNotifierRequest {
+            namespace: chain.namespace.clone(),
+            stream_ref: Some(chain_reference(&chain, topic)),
+            after_counter,
+            identity: self.connection.identity().to_string(),
+        };
+        let answer = notifier_call(
+            &self.connection,
+            method::POLL,
+            &chain.namespace,
+            request,
+            Some(POLL_TIMEOUT),
+        )
+        .await;
         match answer {
-            Ok(response) => Ok(Some(poll_answer(response.into_inner()))),
+            Ok(response) => Ok(Some(poll_answer(response))),
             // The server answers at its own wait limit, before the client's deadline. A deadline
             // that passes anyway asks for the same re-read.
             Err(status) if status.code() == tonic::Code::DeadlineExceeded => Ok(None),
@@ -588,6 +663,7 @@ fn activity_owner_description(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use temporalio_client::callback_based::GrpcRequest;
     use temporalio_common::protos::temporal::api::{
         history::v1::{
             WorkflowExecutionCompletedEventAttributes, WorkflowTaskCompletedEventAttributes,
@@ -978,6 +1054,118 @@ mod tests {
         }
     }
 
+    /// A connection whose server answers each notifier call with `answer`, and the calls it saw.
+    async fn served(
+        answer: impl Fn(&GrpcRequest) -> Result<Vec<u8>, tonic::Status> + Send + Sync + 'static,
+    ) -> (
+        ConnectionNotifierClient,
+        Arc<std::sync::Mutex<Vec<GrpcRequest>>>,
+    ) {
+        use temporalio_client::callback_based::{CallbackBasedGrpcService, GrpcSuccessResponse};
+        let seen: Arc<std::sync::Mutex<Vec<GrpcRequest>>> = Default::default();
+        let recorded = seen.clone();
+        let answer = Arc::new(answer);
+        let service = CallbackBasedGrpcService {
+            callback: Arc::new(move |request| {
+                let (recorded, answer) = (recorded.clone(), answer.clone());
+                Box::pin(async move {
+                    let proto = if request.rpc == "GetSystemInfo" {
+                        Ok(vec![])
+                    } else {
+                        let answered = answer(&request);
+                        recorded.lock().unwrap().push(request);
+                        answered
+                    };
+                    proto.map(|proto| GrpcSuccessResponse {
+                        headers: Default::default(),
+                        proto,
+                    })
+                })
+            }),
+        };
+        let options = temporalio_client::ConnectionOptions::new(
+            url::Url::parse("http://localhost:7233").unwrap(),
+        )
+        .service_override(service)
+        .dns_load_balancing(None)
+        .build();
+        let connection = Connection::connect(options).await.unwrap();
+        (ConnectionNotifierClient { connection }, seen)
+    }
+
+    fn workflow_chain() -> ChainId {
+        proto::ChainId {
+            namespace: "ns".to_string(),
+            workflow_id: "wf".to_string(),
+            first_run_id: "run-1".to_string(),
+            ..Default::default()
+        }
+    }
+
+    #[tokio::test]
+    async fn a_notification_goes_to_the_rpc_by_its_path_with_the_namespace_header() {
+        let (client, seen) = served(|_| Ok(vec![])).await;
+        client
+            .notify(StreamNotification {
+                chain: workflow_chain(),
+                topic: "tokens".to_string(),
+                position: "cursor".to_string(),
+                counter: 7,
+                close: None,
+            })
+            .await
+            .unwrap();
+        let seen = seen.lock().unwrap();
+        let [call] = seen.as_slice() else {
+            panic!("one call, not {seen:?}");
+        };
+        assert_eq!(
+            (call.service.as_str(), call.rpc.as_str()),
+            (
+                "temporal.api.workflowservice.v1.WorkflowService",
+                "NotifyStream"
+            )
+        );
+        assert_eq!(call.headers["temporal-namespace"], "ns");
+        let request = NotifyStreamRequest::decode(call.proto.clone()).unwrap();
+        assert_eq!((request.namespace.as_str(), request.counter), ("ns", 7));
+    }
+
+    #[tokio::test]
+    async fn a_poll_decodes_the_answer_and_a_refusal_keeps_its_code() {
+        let (client, seen) = served(|request| match request.rpc.as_str() {
+            "PollStreamNotifier" => Ok(PollStreamNotifierResponse {
+                counter: 9,
+                position: "p".to_string(),
+                ..Default::default()
+            }
+            .encode_to_vec()),
+            _ => Err(tonic::Status::not_found("no notifier")),
+        })
+        .await;
+        let poll = client
+            .poll(workflow_chain(), "tokens".to_string(), 3)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!((poll.counter, poll.position.as_str()), (9, "p"));
+        let refused = client
+            .attach_workflow(WorkflowAttachment {
+                chain: workflow_chain(),
+                topic: "tokens".to_string(),
+                request_id: "r".to_string(),
+                workflow_id: "reader".to_string(),
+                run_id: "reader-run".to_string(),
+                subscription_id: "1".to_string(),
+                idle: true,
+            })
+            .await
+            .unwrap_err();
+        assert!(matches!(refused, NotifyError::Refused(_)), "{refused:?}");
+        let rpcs: Vec<_> = seen.lock().unwrap().iter().map(|c| c.rpc.clone()).collect();
+        assert_eq!(rpcs, ["PollStreamNotifier", "AttachStreamCallback"]);
+    }
+
     /// One HTTP request the test listener got: its `Nexus-Operation-State` and its body.
     type Delivery = (String, String);
 
@@ -1076,10 +1264,12 @@ mod tests {
     /// `STREAMS_NOTIFIER_NEXUS_PROGRESS`, since a Jetty server sends progress only to Workflow
     /// wake targets.
     async fn live() -> Option<Live> {
+        use crate::protos::temporal::api::workflowservice::v1::{
+            AttachStreamCallbackRequest, AttachStreamCallbackResponse,
+        };
         use temporalio_common::protos::temporal::api::{
-            common::v1::WorkflowType,
-            taskqueue::v1::TaskQueue,
-            workflowservice::v1::{AttachStreamCallbackRequest, StartWorkflowExecutionRequest},
+            common::v1::WorkflowType, taskqueue::v1::TaskQueue,
+            workflowservice::v1::StartWorkflowExecutionRequest,
         };
         let Ok(server) = std::env::var("STREAMS_NOTIFIER_SERVER") else {
             eprintln!("set STREAMS_NOTIFIER_SERVER to run the live notifier test");
@@ -1120,31 +1310,32 @@ mod tests {
             .into_inner();
         // An earlier live test may have left deliveries behind.
         while deliveries().lock().unwrap().try_recv().is_ok() {}
-        connection
-            .workflow_service()
-            .attach_stream_callback(
-                AttachStreamCallbackRequest {
-                    namespace: "default".to_string(),
-                    stream_ref: Some(StreamReference {
-                        owner_kind: StreamOwnerKind::Workflow as i32,
-                        workflow_id: workflow_id.clone(),
-                        run_id: started.run_id.clone(),
-                        topic: "tokens".to_string(),
-                        ..Default::default()
-                    }),
-                    request_id: "caller".to_string(),
-                    callback: Some(
-                        temporalio_common::protos::temporal::api::common::v1::callback::Nexus {
-                            url: "http://127.0.0.1:7899/callback".to_string(),
-                            ..Default::default()
-                        },
-                    ),
+        notifier_call::<AttachStreamCallbackResponse>(
+            &connection,
+            method::ATTACH,
+            "default",
+            AttachStreamCallbackRequest {
+                namespace: "default".to_string(),
+                stream_ref: Some(StreamReference {
+                    owner_kind: StreamOwnerKind::Workflow as i32,
+                    workflow_id: workflow_id.clone(),
+                    run_id: started.run_id.clone(),
+                    topic: "tokens".to_string(),
                     ..Default::default()
-                }
-                .into_request(),
-            )
-            .await
-            .unwrap();
+                }),
+                request_id: "caller".to_string(),
+                callback: Some(
+                    temporalio_common::protos::temporal::api::common::v1::callback::Nexus {
+                        url: "http://127.0.0.1:7899/callback".to_string(),
+                        ..Default::default()
+                    },
+                ),
+                ..Default::default()
+            },
+            None,
+        )
+        .await
+        .unwrap();
         let service = connect_stream_service(
             proto::StreamStoreConfig {
                 store: Some(proto::stream_store_config::Store::Memory(
@@ -1270,9 +1461,11 @@ mod tests {
 
     #[tokio::test(flavor = "multi_thread")]
     async fn a_live_close_with_a_failure_fails_the_callers() {
-        use temporalio_common::protos::temporal::api::{
-            failure::v1::{ApplicationFailureInfo, Failure, failure::FailureInfo},
-            workflowservice::v1::DescribeStreamNotifierRequest,
+        use crate::protos::temporal::api::workflowservice::v1::{
+            DescribeStreamNotifierRequest, DescribeStreamNotifierResponse,
+        };
+        use temporalio_common::protos::temporal::api::failure::v1::{
+            ApplicationFailureInfo, Failure, failure::FailureInfo,
         };
         let Some(live) = live().await else { return };
         live.append_one().await;
@@ -1296,25 +1489,24 @@ mod tests {
             .await;
         assert_eq!(state, "failed", "{body}");
         assert!(body.contains("the agent gave up"), "{body}");
-        let described = live
-            .connection
-            .workflow_service()
-            .describe_stream_notifier(
-                DescribeStreamNotifierRequest {
-                    namespace: "default".to_string(),
-                    stream_ref: Some(StreamReference {
-                        owner_kind: StreamOwnerKind::Workflow as i32,
-                        workflow_id: live.workflow_id.clone(),
-                        run_id: live.run_id.clone(),
-                        topic: "tokens".to_string(),
-                        ..Default::default()
-                    }),
-                }
-                .into_request(),
-            )
-            .await
-            .unwrap()
-            .into_inner();
+        let described: DescribeStreamNotifierResponse = notifier_call(
+            &live.connection,
+            method::DESCRIBE,
+            "default",
+            DescribeStreamNotifierRequest {
+                namespace: "default".to_string(),
+                stream_ref: Some(StreamReference {
+                    owner_kind: StreamOwnerKind::Workflow as i32,
+                    workflow_id: live.workflow_id.clone(),
+                    run_id: live.run_id.clone(),
+                    topic: "tokens".to_string(),
+                    ..Default::default()
+                }),
+            },
+            None,
+        )
+        .await
+        .unwrap();
         assert!(described.closed);
         assert_eq!(
             described.close_failure.map(|failure| failure.message),
@@ -1353,14 +1545,16 @@ mod tests {
     /// interval longer than the test, since a recheck wakes the reader too.
     #[tokio::test(flavor = "multi_thread")]
     async fn a_live_workflow_reader_gets_one_wake_per_idle_stretch() {
+        use crate::protos::temporal::api::workflowservice::v1::{
+            DescribeStreamNotifierRequest, DescribeStreamNotifierResponse,
+        };
         use prost::Message;
         use std::time::Duration;
         use temporalio_common::protos::temporal::api::{
             common::v1::WorkflowType,
             taskqueue::v1::TaskQueue,
             workflowservice::v1::{
-                DescribeStreamNotifierRequest, StartWorkflowExecutionRequest,
-                TerminateWorkflowExecutionRequest,
+                StartWorkflowExecutionRequest, TerminateWorkflowExecutionRequest,
             },
         };
         let Ok(server) = std::env::var("STREAMS_NOTIFIER_SERVER") else {
@@ -1459,24 +1653,24 @@ mod tests {
             }
         };
         let delivered = || async {
-            let described = connection
-                .workflow_service()
-                .describe_stream_notifier(
-                    DescribeStreamNotifierRequest {
-                        namespace: "default".to_string(),
-                        stream_ref: Some(StreamReference {
-                            owner_kind: StreamOwnerKind::Workflow as i32,
-                            workflow_id: owner.workflow_id.clone(),
-                            run_id: owner.run_id.clone(),
-                            topic: "tokens".to_string(),
-                            ..Default::default()
-                        }),
-                    }
-                    .into_request(),
-                )
-                .await
-                .unwrap()
-                .into_inner();
+            let described: DescribeStreamNotifierResponse = notifier_call(
+                &connection,
+                method::DESCRIBE,
+                "default",
+                DescribeStreamNotifierRequest {
+                    namespace: "default".to_string(),
+                    stream_ref: Some(StreamReference {
+                        owner_kind: StreamOwnerKind::Workflow as i32,
+                        workflow_id: owner.workflow_id.clone(),
+                        run_id: owner.run_id.clone(),
+                        topic: "tokens".to_string(),
+                        ..Default::default()
+                    }),
+                },
+                None,
+            )
+            .await
+            .unwrap();
             let [callback] = described.callbacks.as_slice() else {
                 panic!("one callback, not {:?}", described.callbacks);
             };
