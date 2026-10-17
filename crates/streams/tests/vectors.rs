@@ -66,11 +66,11 @@ fn activity_attempt_keys_match_the_vectors() {
 
 /// The wake in a `wake_folds.json` entry. `close_result` is the data of the result payload, and
 /// `close_failure` the failure's message. A missing field takes its proto default.
-fn vector_wake(value: &Value) -> temporalio_common::protos::temporal::api::stream::v1::StreamWake {
+fn vector_wake(value: &Value) -> temporalio_streams::protos::temporal::api::stream::v1::StreamWake {
     use temporalio_common::protos::temporal::api::{common::v1::Payload, failure::v1::Failure};
     let text = |field: &str| value[field].as_str().unwrap_or_default().to_string();
     let flag = |field: &str| value[field].as_bool().unwrap_or_default();
-    temporalio_common::protos::temporal::api::stream::v1::StreamWake {
+    temporalio_streams::protos::temporal::api::stream::v1::StreamWake {
         subscription_id: text("subscription_id"),
         position: text("position"),
         counter: value["counter"].as_i64().unwrap_or_default(),
