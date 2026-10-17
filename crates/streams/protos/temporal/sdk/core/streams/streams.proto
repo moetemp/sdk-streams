@@ -785,8 +785,8 @@ enum StreamFailureKind {
   // This release or this store does not offer the capability.
   STREAM_FAILURE_KIND_UNSUPPORTED = 11;
   // The call's input breaks the contract, such as a missing member or a value out of range, so
-  // the same call fails the same way. A lang built before this kind maps it, as any kind it
-  // doesn't know, to a storage failure.
+  // the same call fails the same way. The Nexus calls answer it, as BAD_REQUEST. A lang built
+  // before this kind maps it, as any kind it doesn't know, to a storage failure.
   STREAM_FAILURE_KIND_INVALID_ARGUMENT = 12;
   // A replay read found other records than the read it repeats: other content, another count
   // or another end. Lang reports it as nondeterminism.

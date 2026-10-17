@@ -214,7 +214,7 @@ fn checked(stream: Option<&StreamAddress>) -> StreamResult<&StreamAddress> {
                      id, the run that scheduled it and its Activity id",
                 ));
             }
-            temporalio_common::streams::check_topic(&stream.topic)
+            crate::check_topic(&stream.topic)
                 .map_err(|reason| bad_input(&super::failure::without_values(&reason)))?;
             return Ok(stream);
         }
@@ -237,7 +237,7 @@ fn checked(stream: Option<&StreamAddress>) -> StreamResult<&StreamAddress> {
         )));
     }
     // The topic is the caller's own value, so the message names the rule and not the topic.
-    temporalio_common::streams::check_topic(&stream.topic)
+    crate::check_topic(&stream.topic)
         .map_err(|reason| bad_input(&super::failure::without_values(&reason)))?;
     Ok(stream)
 }
@@ -663,9 +663,8 @@ mod tests {
 
     fn append(values: &[&str]) -> Vec<u8> {
         use crate::proto::{AppendRecord, AppendRequest, NamedProducer, append_request};
-        use temporalio_common::protos::temporal::{
-            api::common::v1::Payload, sdk::streams::v1::StreamRecordKind,
-        };
+        use crate::proto::StreamRecordKind;
+        use temporalio_common::protos::temporal::api::common::v1::Payload;
         AppendRequest {
             stream: Some(stream("")),
             producer: Some(append_request::Producer::Named(NamedProducer {

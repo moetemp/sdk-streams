@@ -36,6 +36,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     builder.compile_protos(
         &[
             "protos/temporal/sdk/core/streams/streams.proto",
+            "protos/temporal/sdk/core/streams/nexus.proto",
             "protos/temporal/sdk/streams/v1/message.proto",
         ],
         includes,

@@ -1,0 +1,150 @@
+syntax = "proto3";
+
+package coresdk.streams;
+option ruby_package = "Temporalio::Internal::Bridge::Api::Streams";
+
+import "google/protobuf/timestamp.proto";
+import "temporal/api/common/v1/message.proto";
+import "temporal/api/failure/v1/message.proto";
+import "temporal/sdk/core/streams/streams.proto";
+
+// The stream service's Nexus operations, served by Core. Lang forwards each call's input in the
+// N0a contract's JSON transfer form, runs its payload codec when Core asks for it, and hands the
+// failure Core answers with to its Nexus handler. The contract is
+// `crates/streams/nexus/temporal_streams.nexusrpc.yaml`.
+
+// The calls Bridge adds beside `StreamService`, dispatched by name through the same entry.
+service StreamNexusService {
+  // The stream service's Nexus `append` operation, over its JSON transfer form.
+  rpc NexusAppend(NexusCall) returns (NexusStep);
+  // The stream service's Nexus `read` operation, over its JSON transfer form.
+  rpc NexusRead(NexusCall) returns (NexusStep);
+  // The stream service's Nexus `read_range` operation, over its JSON transfer form.
+  rpc NexusReadRange(NexusCall) returns (NexusStep);
+  // The stream service's Nexus `follow` operation, over its JSON transfer form. Its answer may
+  // ask for codec work once per owner whose records it holds, so lang resumes until it ends.
+  rpc NexusFollow(NexusCall) returns (NexusStep);
+  // The stream service's Nexus `follow_range` operation, over its JSON transfer form.
+  rpc NexusFollowRange(NexusCall) returns (NexusStep);
+  // Goes on with a call that asked for codec work.
+  rpc NexusResume(NexusResumeRequest) returns (NexusStep);
+  // Attaches the caller of a stream-returning Nexus operation's start to the stream's notifier,
+  // and answers with the operation token, or the failure the start answers with. The server then delivers the stream's progress and its
+  // close result to the caller's callback. Idempotent by the start's request id.
+  rpc AttachCaller(AttachCallerRequest) returns (AttachCallerResponse);
+  // Detaches the caller a token's start attached, from the chain it attached to.
+  rpc DetachCaller(DetachCallerRequest) returns (DetachCallerResponse);
+}
+
+// One Nexus operation call.
+message NexusCall {
+  // The operation's input, the N0a model in its JSON transfer form.
+  bytes input = 1;
+  // When the Nexus request times out. Core answers a read in time for its answer to travel back.
+  google.protobuf.Timestamp deadline = 2;
+  NexusLimits limits = 3;
+  // The namespace of the lang Worker's client, which streams the call names live in.
+  string namespace = 4;
+}
+
+message NexusLimits {
+  // The most bytes one read answer takes as JSON past its first record, with its tokens and state.
+  // Zero takes the default of 1 MiB, which keeps an answer below the server's blob size limit.
+  uint64 max_answer_bytes = 1;
+  // The most bytes one record may take in an answer. A record above it can never be read, so an
+  // append with one is refused. Zero takes the default of 1.5 MiB.
+  uint64 max_record_bytes = 2;
+}
+
+// What Core answers a call or a resume with. A codec step comes before the output on a call whose
+// bodies need lang's payload codec, and lang resumes it with the results.
+message NexusStep {
+  oneof step {
+    // The operation's output, the N0a model in its JSON transfer form.
+    bytes output = 1;
+    CodecWork codec = 2;
+    NexusFailure failure = 3;
+  }
+}
+
+// Bodies for lang's payload codec. Lang runs the namespace's codec over every payload, in order,
+// and resumes with one result per payload.
+message CodecWork {
+  // True encodes the bodies of an append, and false decodes the bodies of a read.
+  bool encode = 1;
+  // The stream's namespace and owner, for the codec's serialization context.
+  string namespace = 2;
+  string workflow_id = 3;
+  repeated temporal.api.common.v1.Payload payloads = 4;
+  // Hand back in `NexusResumeRequest`. Core forgets a continuation 60 s after it asked.
+  uint64 continuation = 5;
+  // The kind of the stream's owner. For a standalone Activity owner, `workflow_id` is empty and
+  // `activity_id` names the Activity, and the codec context has the namespace and the Activity id
+  // only. For a Workflow Activity owner, both are set, and the codec context has the namespace,
+  // the Activity id and the Workflow id.
+  StreamOwnerKind owner_kind = 6;
+  string activity_id = 7;
+}
+
+message NexusResumeRequest {
+  uint64 continuation = 1;
+  // One per payload of the `CodecWork`, in order.
+  repeated CodecResult results = 2;
+}
+
+message CodecResult {
+  oneof result {
+    temporal.api.common.v1.Payload payload = 1;
+    // Why the codec failed on this payload. A read hands the record over as an error at its
+    // cursor, and an append fails.
+    string error = 2;
+  }
+}
+
+// How a Nexus operation failed, ready for lang's Nexus handler error.
+message NexusFailure {
+  // The Nexus `HandlerErrorType` name, such as `BAD_REQUEST`.
+  string handler_error_type = 1;
+  bool retryable = 2;
+  string message = 3;
+  // The failure that crosses to the caller, with the stream condition's class as its cause's
+  // application error type.
+  temporal.api.failure.v1.Failure failure = 4;
+}
+
+message AttachCallerRequest {
+  // The stream the operation's start names. An empty run id attaches to the chain that holds the
+  // Workflow id now.
+  StreamAddress stream = 1;
+  // The start's request id. A retried start attaches once.
+  string request_id = 2;
+  // The start's callback URL and headers. An empty URL is refused, since the caller could never
+  // hear about the stream.
+  string callback_url = 3;
+  map<string, string> callback_headers = 4;
+  // The callback is idle, so it hears no progress until a wait. Set, this asks for the first
+  // wait right after the attach: one wake once the stream holds a record above this counter, at
+  // once when it already does. A follower that reads only when woken sets it, zero for the
+  // stream's start. A reader that reads first leaves it unset and waits through its reads'
+  // `wake_token`.
+  optional int64 wake_after_counter = 5;
+}
+
+message AttachCallerResponse {
+  // The token the start answers with. It names the stream, the attach and the chain.
+  string operation_token = 1;
+  // Set when the attach failed, as the Nexus calls answer a failure, so lang hands it to its
+  // Nexus handler as it is. The token is then empty.
+  NexusFailure failure = 2;
+}
+
+message DetachCallerRequest {
+  string namespace = 1;
+  // The token the start answered with.
+  string operation_token = 2;
+}
+
+message DetachCallerResponse {
+  // Set when the detach failed, as the Nexus calls answer a failure.
+  NexusFailure failure = 1;
+}

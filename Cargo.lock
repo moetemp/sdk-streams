@@ -2743,6 +2743,19 @@ dependencies = [
 ]
 
 [[package]]
+name = "serde_yaml"
+version = "0.9.34+deprecated"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "6a8b1a1a2ebf674015cc02edccce75287f1a0130d394307b36743c2f5d504b47"
+dependencies = [
+ "indexmap",
+ "itoa",
+ "ryu",
+ "serde",
+ "unsafe-libyaml",
+]
+
+[[package]]
 name = "sha1_smol"
 version = "1.0.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2977,7 +2990,7 @@ dependencies = [
 [[package]]
 name = "temporalio-client"
 version = "1.1.0"
-source = "git+https://github.com/moetemp/sdk-rust?rev=4c05def9bf7de5ac301d63dd60f681a7f35bbe27#4c05def9bf7de5ac301d63dd60f681a7f35bbe27"
+source = "git+https://github.com/moetemp/sdk-rust?rev=037dc8d3bf620fa923bc2ded667530bac3310e7b#037dc8d3bf620fa923bc2ded667530bac3310e7b"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -3010,7 +3023,7 @@ dependencies = [
 [[package]]
 name = "temporalio-common"
 version = "1.1.0"
-source = "git+https://github.com/moetemp/sdk-rust?rev=4c05def9bf7de5ac301d63dd60f681a7f35bbe27#4c05def9bf7de5ac301d63dd60f681a7f35bbe27"
+source = "git+https://github.com/moetemp/sdk-rust?rev=037dc8d3bf620fa923bc2ded667530bac3310e7b#037dc8d3bf620fa923bc2ded667530bac3310e7b"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -3045,7 +3058,7 @@ dependencies = [
 [[package]]
 name = "temporalio-common-wasm"
 version = "1.1.0"
-source = "git+https://github.com/moetemp/sdk-rust?rev=4c05def9bf7de5ac301d63dd60f681a7f35bbe27#4c05def9bf7de5ac301d63dd60f681a7f35bbe27"
+source = "git+https://github.com/moetemp/sdk-rust?rev=037dc8d3bf620fa923bc2ded667530bac3310e7b#037dc8d3bf620fa923bc2ded667530bac3310e7b"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -3071,7 +3084,7 @@ dependencies = [
 [[package]]
 name = "temporalio-macros"
 version = "1.1.0"
-source = "git+https://github.com/moetemp/sdk-rust?rev=4c05def9bf7de5ac301d63dd60f681a7f35bbe27#4c05def9bf7de5ac301d63dd60f681a7f35bbe27"
+source = "git+https://github.com/moetemp/sdk-rust?rev=037dc8d3bf620fa923bc2ded667530bac3310e7b#037dc8d3bf620fa923bc2ded667530bac3310e7b"
 dependencies = [
  "proc-macro2",
  "quote",
@@ -3081,7 +3094,7 @@ dependencies = [
 [[package]]
 name = "temporalio-protos"
 version = "0.10.0"
-source = "git+https://github.com/moetemp/sdk-rust?rev=4c05def9bf7de5ac301d63dd60f681a7f35bbe27#4c05def9bf7de5ac301d63dd60f681a7f35bbe27"
+source = "git+https://github.com/moetemp/sdk-rust?rev=037dc8d3bf620fa923bc2ded667530bac3310e7b#037dc8d3bf620fa923bc2ded667530bac3310e7b"
 dependencies = [
  "anyhow",
  "base64 0.23.1",
@@ -3102,7 +3115,7 @@ dependencies = [
 [[package]]
 name = "temporalio-sdk-core"
 version = "0.10.0"
-source = "git+https://github.com/moetemp/sdk-rust?rev=4c05def9bf7de5ac301d63dd60f681a7f35bbe27#4c05def9bf7de5ac301d63dd60f681a7f35bbe27"
+source = "git+https://github.com/moetemp/sdk-rust?rev=037dc8d3bf620fa923bc2ded667530bac3310e7b#037dc8d3bf620fa923bc2ded667530bac3310e7b"
 dependencies = [
  "anyhow",
  "assert_matches",
@@ -3152,6 +3165,7 @@ dependencies = [
  "assert_matches",
  "async-trait",
  "aws-lc-rs",
+ "base64 0.23.1",
  "bytes",
  "crc16",
  "deadpool-postgres",
@@ -3168,6 +3182,7 @@ dependencies = [
  "rustls-native-certs",
  "serde",
  "serde_json",
+ "serde_yaml",
  "sha2 0.10.9",
  "temporalio-client",
  "temporalio-common",
@@ -3690,6 +3705,12 @@ name = "unicode-xid"
 version = "0.2.6"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "ebc1c04c71510c7f702b52b7c350734c9ff1295c464a03335b00bb84fc54f853"
+
+[[package]]
+name = "unsafe-libyaml"
+version = "0.2.11"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "673aac59facbab8a9007c7f6108d11f63b603f7cabff99fabf650fea5c32b861"
 
 [[package]]
 name = "untrusted"

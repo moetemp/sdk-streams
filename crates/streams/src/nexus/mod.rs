@@ -1148,7 +1148,7 @@ fn address(namespace: &str, stream: &StreamRef) -> Result<StreamAddress, Box<Nex
             ),
         ))));
     };
-    if let Err(reason) = temporalio_common::streams::check_topic(&stream.topic) {
+    if let Err(reason) = crate::check_topic(&stream.topic) {
         return Err(Box::new(failure::input_mistake(failure::without_values(
             &reason,
         ))));

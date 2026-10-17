@@ -6,7 +6,7 @@ use nexus_support::*;
 use prost::Message;
 use serde_json::{Value, json};
 use std::sync::Arc;
-use temporalio_common::protos::temporal::api::{
+use temporalio_streams::protos::temporal::api::{
     enums::v1::StreamOwnerKind as RefKind, stream::v1::StreamReference,
 };
 use temporalio_streams::{
