@@ -2,7 +2,7 @@
 //! event as an attachment, and lang folds the wakes of one task per subscription. This is the
 //! reference fold. Every lang's fold must give the results of `testdata/wake_folds.json`.
 
-use temporalio_common::protos::temporal::api::stream::v1::StreamWake;
+use crate::protos::temporal::api::stream::v1::StreamWake;
 
 /// The type URL of an attachment that holds a [StreamWake].
 pub const STREAM_WAKE_TYPE_URL: &str = "type.googleapis.com/temporal.api.stream.v1.StreamWake";

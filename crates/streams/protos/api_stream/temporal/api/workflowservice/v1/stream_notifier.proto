@@ -1,0 +1,167 @@
+// The request and response messages of the stream notifier RPCs, cut from
+// temporal/api/workflowservice/v1/request_response.proto by scripts/sync-stream-api.sh.
+syntax = "proto3";
+
+package temporal.api.workflowservice.v1;
+
+import "google/protobuf/timestamp.proto";
+import "temporal/api/common/v1/message.proto";
+import "temporal/api/failure/v1/message.proto";
+import "temporal/api/stream/v1/message.proto";
+
+message AttachStreamCallbackRequest {
+    string namespace = 1;
+    // The stream whose notifier holds the callback.
+    temporal.api.stream.v1.StreamReference stream_ref = 2;
+    // Identifies the attachment. Attaching again with the same request ID changes nothing, and
+    // DetachStreamCallback names the callback by it. A Nexus handler passes its start request ID.
+    string request_id = 3;
+    // Receives the stream's progress while it is open, and one completion when it closes. If the
+    // stream is already closed, the completion is delivered right away. A Nexus handler passes the
+    // callback URL and headers of its start request.
+    temporal.api.common.v1.Callback.Nexus callback = 4;
+    // The identity of the client attaching the callback.
+    string identity = 5;
+    // The operation token the handler returns from its start. The notifier sends it with each
+    // progress delivery and with the completion, so a completion that reaches the caller before
+    // the start response still names the operation.
+    string operation_token = 6;
+    // When the handler started the operation. Sent with the token, for the same reason.
+    google.protobuf.Timestamp start_time = 7;
+    // A Workflow in this namespace that the notifier wakes, in place of a Nexus callback. The
+    // Workflow gets each change of the stream as a `StreamWake` on its next Workflow Task. Exactly
+    // one of `callback` and `workflow_target` is set.
+    temporal.api.stream.v1.WorkflowWakeTarget workflow_target = 8;
+    // Attaches the callback idle. An idle callback gets no progress until WaitStreamCallback asks
+    // for one wake, and it goes back to idle after that delivery. It still gets the completion
+    // when the stream closes. A Workflow reader attaches its `workflow_target` idle, so a busy
+    // reader gets no wake.
+    bool idle = 9;
+}
+
+message AttachStreamCallbackResponse {
+}
+
+message WaitStreamCallbackRequest {
+    string namespace = 1;
+    temporal.api.stream.v1.StreamReference stream_ref = 2;
+    // The request ID the idle callback was attached with.
+    string request_id = 3;
+    // The notifier delivers progress to the callback once, when its counter is above this value.
+    // If the counter is above it already, the delivery goes out at once. A reader passes the
+    // counter of the position its last read reached.
+    //
+    // (-- api-linter: core::0140::prepositions=disabled
+    //     aip.dev/not-precedent: "after" names the bound the counter must pass. --)
+    int64 after_counter = 4;
+    // The identity of the caller.
+    string identity = 5;
+}
+
+message WaitStreamCallbackResponse {
+}
+
+message DetachStreamCallbackRequest {
+    string namespace = 1;
+    temporal.api.stream.v1.StreamReference stream_ref = 2;
+    // The request ID the callback was attached with. Detaching a callback that is not attached
+    // changes nothing.
+    string request_id = 3;
+    // The identity of the client detaching the callback.
+    string identity = 4;
+}
+
+message DetachStreamCallbackResponse {
+}
+
+message NotifyStreamRequest {
+    string namespace = 1;
+    temporal.api.stream.v1.StreamReference stream_ref = 2;
+    // Where the stream stands after the append this notification reports, in the producer's terms,
+    // such as a stream cursor. Passed on to the callbacks as the progress position. The server
+    // rejects a position longer than 1 KiB of UTF-8.
+    string position = 3;
+    // Orders the notifications of one stream. The notifier keeps the highest counter it has seen
+    // and ignores a lower one, so a producer may send them out of order. Must be positive.
+    int64 counter = 4;
+    // Small details passed on to the callbacks. The server rejects metadata whose keys and values
+    // exceed 2 KiB in total, counted as UTF-8 bytes.
+    map<string, string> metadata = 5;
+    // Closes the stream: the notifier completes every attached callback with `close_result`, or
+    // with `close_failure`, and completes callbacks attached later right away.
+    bool close = 6;
+    // The completion result when `close` is set, such as a summary of the stream. Optional.
+    temporal.api.common.v1.Payload close_result = 7;
+    // The identity of the producer.
+    string identity = 8;
+    // Closes the stream with a failure instead of `close_result`. The notifier completes every
+    // callback as failed, or as canceled when the failure has canceled info. Needs `close`, and
+    // the server rejects a request that sets both `close_result` and `close_failure`.
+    temporal.api.failure.v1.Failure close_failure = 9;
+}
+
+message NotifyStreamResponse {
+}
+
+message DescribeStreamNotifierRequest {
+    string namespace = 1;
+    temporal.api.stream.v1.StreamReference stream_ref = 2;
+}
+
+message DescribeStreamNotifierResponse {
+    // The highest counter the notifier has seen.
+    int64 counter = 1;
+    // The position that came with `counter`.
+    string position = 2;
+    // Whether the stream was closed.
+    bool closed = 3;
+    // The callbacks the notifier holds, in the order they were attached.
+    repeated temporal.api.stream.v1.StreamCallbackInfo callbacks = 4;
+    // The failure the stream closed with, when it closed with one.
+    temporal.api.failure.v1.Failure close_failure = 5;
+}
+
+message PollStreamNotifierRequest {
+    string namespace = 1;
+    temporal.api.stream.v1.StreamReference stream_ref = 2;
+    // The poll returns when the notifier's counter is above this value, or when the stream is
+    // closed. A reader passes the counter of the position its last read reached, so a
+    // notification that landed before the poll makes it return at once.
+    //
+    // (-- api-linter: core::0140::prepositions=disabled
+    //     aip.dev/not-precedent: "after" names the bound the counter must pass. --)
+    int64 after_counter = 3;
+    // The identity of the client that polls.
+    string identity = 4;
+}
+
+message PollStreamNotifierResponse {
+    // The highest counter the notifier has seen. At or below the request's `after_counter` when
+    // the poll reached its wait limit with no change. Then the client reads the stream again.
+    int64 counter = 1;
+    // The position that came with `counter`.
+    string position = 2;
+    // The metadata that came with `counter`.
+    map<string, string> metadata = 3;
+    // Whether the stream was closed.
+    bool closed = 4;
+    // The result the stream closed with, when `closed` is set. Optional.
+    temporal.api.common.v1.Payload close_result = 5;
+    // The failure the stream closed with, when `closed` is set and it closed with one.
+    temporal.api.failure.v1.Failure close_failure = 6;
+}
+
+message NotifyStreamsRequest {
+    string namespace = 1;
+    // One entry per stream. The server rejects a request with more than
+    // `streamnotifier.maxNotifyBatch` entries, or with two entries for one stream.
+    repeated temporal.api.stream.v1.StreamNotification notifications = 2;
+    // The identity of the caller, such as a stream driver.
+    string identity = 3;
+}
+
+message NotifyStreamsResponse {
+    // One result per entry of the request, in the same order. Empty only from a server that
+    // fails the whole call on a bad entry, so an empty list on success means every entry applied.
+    repeated temporal.api.stream.v1.StreamNotificationResult results = 1;
+}
