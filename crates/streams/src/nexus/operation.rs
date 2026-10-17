@@ -662,8 +662,8 @@ mod tests {
     }
 
     fn append(values: &[&str]) -> Vec<u8> {
-        use crate::proto::{AppendRecord, AppendRequest, NamedProducer, append_request};
         use crate::proto::StreamRecordKind;
+        use crate::proto::{AppendRecord, AppendRequest, NamedProducer, append_request};
         use temporalio_common::protos::temporal::api::common::v1::Payload;
         AppendRequest {
             stream: Some(stream("")),

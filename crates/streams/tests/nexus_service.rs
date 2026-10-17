@@ -747,7 +747,8 @@ mod cases {
         assert_eq!(kind_of(&refused).0, "BAD_REQUEST");
         // A Workflow Activity's ref names its Workflow, its run and its Activity.
         for stream in [
-            json!({"kind": "workflow_activity", "workflow_id": id, "activity_id": "1", "topic": "t"}),
+            json!({"kind": "workflow_activity", "workflow_id": id, "activity_id": "1",
+                   "topic": "t"}),
             json!({"kind": "workflow_activity", "workflow_id": "", "activity_id": "1",
                    "chain_run_id": "run-1", "topic": "t"}),
             json!({"kind": "workflow_activity", "workflow_id": id, "chain_run_id": "run-1",

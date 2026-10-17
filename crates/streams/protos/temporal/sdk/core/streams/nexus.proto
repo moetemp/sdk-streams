@@ -29,8 +29,9 @@ service StreamNexusService {
   // Goes on with a call that asked for codec work.
   rpc NexusResume(NexusResumeRequest) returns (NexusStep);
   // Attaches the caller of a stream-returning Nexus operation's start to the stream's notifier,
-  // and answers with the operation token, or the failure the start answers with. The server then delivers the stream's progress and its
-  // close result to the caller's callback. Idempotent by the start's request id.
+  // and answers with the operation token, or the failure the start answers with. The server
+  // then delivers the stream's progress and its close result to the caller's callback.
+  // Idempotent by the start's request id.
   rpc AttachCaller(AttachCallerRequest) returns (AttachCallerResponse);
   // Detaches the caller a token's start attached, from the chain it attached to.
   rpc DetachCaller(DetachCallerRequest) returns (DetachCallerResponse);
