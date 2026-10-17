@@ -1,0 +1,46 @@
+syntax = "proto3";
+
+package temporal.api.notificationservice.v1;
+
+option go_package = "go.temporal.io/api/notificationservice/v1;notificationservice";
+option java_package = "io.temporal.api.notificationservice.v1";
+option java_multiple_files = true;
+option java_outer_classname = "ProgressProto";
+option ruby_package = "Temporalio::Api::NotificationService::V1";
+option csharp_namespace = "Temporalio.Api.NotificationService.V1";
+
+import "temporal/api/common/v1/message.proto";
+import "temporal/api/nexus/v1/progress.proto";
+
+// OnProgressRequest is the request type to the NotificationService's OnProgress operation, which
+// receives the non-terminal progress of the source operation. It may be delivered any number of
+// times before the single OnComplete, in any order, so a handler keeps the highest counter.
+//
+// Information about the source operation is available the same way as for OnCompleteRequest.
+message OnProgressRequest {
+    // The progress of the source operation. `progress.operation` is not set.
+    temporal.api.nexus.v1.NexusOperationProgress progress = 1;
+
+    // User-supplied data which was added to the source invocation. (As applicable.)
+    temporal.api.common.v1.Payload source_context = 2;
+
+    // The handler token of the source operation, when the source is a standalone Nexus operation
+    // that has started. Empty otherwise.
+    string operation_token = 3;
+
+    // The `receiver_state` of the last OnProgressResponse that the server accepted for this
+    // callback. Empty when no progress was accepted.
+    bytes receiver_state = 4;
+}
+
+// OnProgressResponse is the return type of the OnProgress operation.
+message OnProgressResponse {
+    // Opaque state for the handler, such as a read cursor. The server stores it on the callback
+    // and sends it in the next OnProgressRequest and in the OnCompleteRequest. The server refuses
+    // further progress for the callback when the state is larger than its configured limit.
+    bytes receiver_state = 1;
+
+    // Set when the handler did not reach `progress.position`. The server then sends the same
+    // progress again at once, unless newer progress replaced it.
+    bool behind = 2;
+}

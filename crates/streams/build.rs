@@ -9,12 +9,27 @@ const STREAM_API_TYPES: &[&str] = &[
     ".temporal.api.enums.v1.StreamOwnerKind",
 ];
 
+/// The Nexus progress API types, which sdk-rust does not vendor either. The crate generates them
+/// from its copy in `protos/api_nexus`.
+const NEXUS_API_TYPES: &[&str] = &[
+    ".temporal.api.nexus.v1.NexusOperationProgress",
+    ".temporal.api.notificationservice.v1.OnProgressRequest",
+    ".temporal.api.notificationservice.v1.OnProgressResponse",
+    ".temporal.api.workflowservice.v1.ExecuteSyncNexusOperationRequest",
+    ".temporal.api.workflowservice.v1.ExecuteSyncNexusOperationResponse",
+];
+
 const SERDE_ATTRIBUTE: &str =
     "#[cfg_attr(feature = \"serde_serialize\", derive(::serde::Serialize, ::serde::Deserialize))]";
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     println!("cargo:rerun-if-changed=protos");
-    let includes = &["protos/api_stream", "protos", "protos/api_include"];
+    let includes = &[
+        "protos/api_stream",
+        "protos/api_nexus",
+        "protos",
+        "protos/api_include",
+    ];
 
     // The crate's own protos. One type for each API message, so a value moves between this crate
     // and the sdk-rust crates with no conversion. The well-known types map to `prost_types`,
@@ -27,7 +42,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             "::temporalio_common::protos::temporal::api",
         );
     // The longest matching path wins over `.temporal.api`.
-    for path in STREAM_API_TYPES {
+    for path in STREAM_API_TYPES.iter().chain(NEXUS_API_TYPES) {
         builder = builder.extern_path(*path, format!("crate::protos{}", path.replace('.', "::")));
     }
     for package in SERDE_PACKAGES {
@@ -42,8 +57,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         includes,
     )?;
 
-    // The stream API itself. prost generates no type that an extern path names, so this pass
-    // names only the API types the stream API uses from `temporalio-common`.
+    // The stream and Nexus progress API. prost generates no type that an extern path names, so
+    // this pass names only the API types these files use from `temporalio-common`.
     let mut builder = tonic_prost_build::configure()
         .build_server(false)
         .build_client(false);
@@ -57,7 +72,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             format!("::temporalio_common::protos{}", path.replace('.', "::")),
         );
     }
-    for path in STREAM_API_TYPES {
+    for path in STREAM_API_TYPES.iter().chain(NEXUS_API_TYPES) {
         builder = builder.type_attribute(*path, SERDE_ATTRIBUTE);
     }
     builder.compile_protos(
@@ -65,6 +80,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             "protos/api_stream/temporal/api/stream/v1/message.proto",
             "protos/api_stream/temporal/api/enums/v1/stream.proto",
             "protos/api_stream/temporal/api/workflowservice/v1/stream_request_response.proto",
+            "protos/api_nexus/temporal/api/nexus/v1/progress.proto",
+            "protos/api_nexus/temporal/api/notificationservice/v1/progress.proto",
+            "protos/api_nexus/temporal/api/workflowservice/v1/nexus_request_response.proto",
         ],
         includes,
     )?;

@@ -1,0 +1,44 @@
+syntax = "proto3";
+
+package temporal.api.workflowservice.v1;
+
+option go_package = "go.temporal.io/api/workflowservice/v1;workflowservice";
+option java_package = "io.temporal.api.workflowservice.v1";
+option java_multiple_files = true;
+option java_outer_classname = "NexusRequestResponseProto";
+option ruby_package = "Temporalio::Api::WorkflowService::V1";
+option csharp_namespace = "Temporalio.Api.WorkflowService.V1";
+
+import "temporal/api/common/v1/message.proto";
+import "temporal/api/failure/v1/message.proto";
+
+message ExecuteSyncNexusOperationRequest {
+    // The caller namespace. Authorization and the endpoint lookup run against it.
+    string namespace = 1;
+    // The identity of the client who sent this request.
+    string identity = 2;
+    // A unique identifier for this call. Typically UUIDv4. The handler gets it as the Nexus
+    // request ID.
+    string request_id = 3;
+    // Endpoint name, resolved through the cluster's endpoint registry for the caller namespace.
+    string endpoint = 4;
+    // Service name.
+    string service = 5;
+    // Operation name.
+    string operation = 6;
+    // Serialized input to the operation. Passed as the request payload.
+    temporal.api.common.v1.Payload input = 7;
+    // Header to attach to the Nexus request. Keys are lowercased. The server owns the
+    // `temporal-caller-namespace` key and refuses a request that sets it.
+    map<string, string> nexus_header = 8;
+}
+
+message ExecuteSyncNexusOperationResponse {
+    oneof outcome {
+        // The result of an operation that completed.
+        temporal.api.common.v1.Payload result = 1;
+        // The failure of the call. A handler error has `nexus_handler_failure_info`. An operation
+        // that failed or was canceled has `application_failure_info` or `canceled_failure_info`.
+        temporal.api.failure.v1.Failure failure = 2;
+    }
+}

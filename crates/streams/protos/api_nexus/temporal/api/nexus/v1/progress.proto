@@ -1,0 +1,53 @@
+syntax = "proto3";
+
+package temporal.api.nexus.v1;
+
+option go_package = "go.temporal.io/api/nexus/v1;nexus";
+option java_package = "io.temporal.api.nexus.v1";
+option java_multiple_files = true;
+option java_outer_classname = "ProgressProto";
+option ruby_package = "Temporalio::Api::Nexus::V1";
+option csharp_namespace = "Temporalio.Api.Nexus.V1";
+
+// Non-terminal progress of an asynchronous Nexus operation, delivered to the operation's callback
+// with the `running` state before its completion.
+//
+// Progress says that the operation's output moved, not what the output is: the receiver reads the
+// output itself, starting from `position`. Deliveries may arrive out of order or be dropped, so a
+// receiver keeps the one with the highest `counter` and drops any lower one.
+message NexusOperationProgress {
+    // Names a caller Workflow's operation by the values the Workflow already knows. The Workflow
+    // gives the endpoint, service and operation in its schedule command, and gets the token when
+    // the operation starts. A token is unique only within one handler, so the token alone is not
+    // a key.
+    message OperationKey {
+        string endpoint = 1;
+        string service = 2;
+        string operation = 3;
+        // The token from the server's own record of the operation start, not from the handler's
+        // progress request.
+        string operation_token = 4;
+    }
+
+    reserved 1;
+    reserved "scheduled_event_id";
+
+    // The operation this progress belongs to. A handler leaves it unset, since the callback already
+    // identifies the operation. The server sets it when it hands progress to a caller. A oneof, so
+    // a later case can name an operation that no Workflow schedules, such as a standalone one.
+    oneof operation {
+        // The caller Workflow's operation. Set on the progress that the server attaches to a
+        // Workflow Task.
+        OperationKey operation_key = 5;
+    }
+    // Where the operation's output stands after the change this progress reports, in the
+    // handler's terms, such as a stream cursor. Opaque to the server, which rejects a position
+    // longer than 1 KiB of UTF-8.
+    string position = 2;
+    // Orders the progress of one operation. Among progress folded together, the highest counter
+    // is kept. Must be positive.
+    int64 counter = 3;
+    // Small details for the caller. The server rejects progress whose metadata keys and values
+    // exceed 2 KiB in total, counted as UTF-8 bytes.
+    map<string, string> metadata = 4;
+}
