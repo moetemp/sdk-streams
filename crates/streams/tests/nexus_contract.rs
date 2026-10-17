@@ -1,8 +1,9 @@
-//! Core's Nexus calls against the contract they serve, `nexus/temporal_streams.nexusrpc.yaml`.
+//! The service's Nexus calls against the contract they serve,
+//! `nexus/temporal_streams.nexusrpc.yaml`.
 //!
-//! Every SDK generates its models from that file, so what Core accepts and answers must be what it
-//! declares: each input member is accepted, an unknown or missing one is refused, and each output
-//! member is declared, with every required one present.
+//! Every SDK generates its models from that file, so what the service accepts and answers must be
+//! what it declares: each input member is accepted, an unknown or missing one is refused, and each
+//! output member is declared, with every required one present.
 
 mod nexus_support;
 
@@ -133,7 +134,7 @@ fn the_contract_names_the_operations_core_serves() {
         assert_eq!(
             model(&contract, input)["additionalProperties"],
             false,
-            "{input} must refuse unknown members, as Core does"
+            "{input} must refuse unknown members, as the service does"
         );
     }
 }
@@ -141,7 +142,7 @@ fn the_contract_names_the_operations_core_serves() {
 #[test]
 fn a_read_carries_its_state_through_the_generated_long_poll() {
     // The generated caller sends each answer's state back on its next call, so the member it
-    // names must be the optional base64 `state` Core reads and answers.
+    // names must be the optional base64 `state` the service reads and answers.
     let contract = contract();
     let long_poll =
         &contract["services"]["TemporalStreams"]["operations"]["read"]["x-nexus-long-poll"];

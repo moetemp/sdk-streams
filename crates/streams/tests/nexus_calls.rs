@@ -1,5 +1,5 @@
-//! The stream service's Nexus calls as Core serves them: the state a reader carries, the cut, the
-//! codec step and what crosses when a record can't.
+//! The stream service's Nexus calls as the service serves them: the state a reader carries, the
+//! cut, the codec step and what crosses when a record can't.
 //!
 //! The cases run on memory, and on Redis when `STREAMS_REDIS_URL` is set.
 
@@ -77,7 +77,7 @@ fn kind_of(failure: &NexusFailure) -> (&str, bool, &str) {
     )
 }
 
-/// Stores `bytes` as the next entry of the topic, as a writer outside Core could.
+/// Stores `bytes` as the next entry of the topic, as a writer outside the service could.
 async fn raw_entry(store: &Arc<dyn StreamStore>, workflow_id: &str, bytes: Vec<u8>) {
     store
         .append(StoreAppendRequest {
@@ -491,7 +491,7 @@ mod cases {
     pub(crate) async fn a_state_above_its_budget_is_refused_before_it_decodes(
         store: Arc<dyn StreamStore>,
     ) {
-        // A state crosses as caller input, so a forged or buggy one must not stall Core.
+        // A state crosses as caller input, so a forged or buggy one must not stall the service.
         let calls = service(store, NexusOptions::default());
         let wf = workflow();
         write(&calls, &wf, "p", 1, 1, &["one"]).await;
@@ -960,7 +960,8 @@ async fn calls_waiting_for_the_codec_are_bounded() {
 
 #[tokio::test]
 async fn the_store_holds_only_bodies_the_codec_sealed() {
-    // Core holds plaintext in memory during a call only. What it stores went through the codec.
+    // The service holds plaintext in memory during a call only. What it stores went through the
+    // codec.
     let store = memory();
     let calls = service(store.clone(), NexusOptions::default());
     let wf = workflow();
@@ -989,7 +990,7 @@ async fn the_store_holds_only_bodies_the_codec_sealed() {
 
 #[tokio::test(start_paused = true)]
 async fn a_call_that_waits_too_long_for_the_codec_is_dropped_on_a_quiet_process() {
-    // Plaintext lives in Core during a call only, also when no later call comes in.
+    // Plaintext lives in the service during a call only, also when no later call comes in.
     let calls = service(memory(), NexusOptions::default());
     let wf = workflow();
     let step = calls

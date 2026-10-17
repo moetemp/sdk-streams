@@ -8,9 +8,9 @@ import "temporal/api/common/v1/message.proto";
 import "temporal/api/failure/v1/message.proto";
 import "temporal/sdk/core/streams/streams.proto";
 
-// The stream service's Nexus operations, served by Core. Lang forwards each call's input in the
-// N0a contract's JSON transfer form, runs its payload codec when Core asks for it, and hands the
-// failure Core answers with to its Nexus handler. The contract is
+// The stream service's Nexus operations, served in process. Lang forwards each call's input in the
+// N0a contract's JSON transfer form, runs its payload codec when the service asks for it, and hands
+// the failure the service answers with to its Nexus handler. The contract is
 // `crates/streams/nexus/temporal_streams.nexusrpc.yaml`.
 
 // The calls Bridge adds beside `StreamService`, dispatched by name through the same entry.
@@ -41,7 +41,8 @@ service StreamNexusService {
 message NexusCall {
   // The operation's input, the N0a model in its JSON transfer form.
   bytes input = 1;
-  // When the Nexus request times out. Core answers a read in time for its answer to travel back.
+  // When the Nexus request times out. The service answers a read in time for its answer to travel
+  // back.
   google.protobuf.Timestamp deadline = 2;
   NexusLimits limits = 3;
   // The namespace of the lang Worker's client, which streams the call names live in.
@@ -57,8 +58,8 @@ message NexusLimits {
   uint64 max_record_bytes = 2;
 }
 
-// What Core answers a call or a resume with. A codec step comes before the output on a call whose
-// bodies need lang's payload codec, and lang resumes it with the results.
+// What the service answers a call or a resume with. A codec step comes before the output on a call
+// whose bodies need lang's payload codec, and lang resumes it with the results.
 message NexusStep {
   oneof step {
     // The operation's output, the N0a model in its JSON transfer form.
@@ -77,7 +78,7 @@ message CodecWork {
   string namespace = 2;
   string workflow_id = 3;
   repeated temporal.api.common.v1.Payload payloads = 4;
-  // Hand back in `NexusResumeRequest`. Core forgets a continuation 60 s after it asked.
+  // Hand back in `NexusResumeRequest`. The service forgets a continuation 60 s after it asked.
   uint64 continuation = 5;
   // The kind of the stream's owner. For a standalone Activity owner, `workflow_id` is empty and
   // `activity_id` names the Activity, and the codec context has the namespace and the Activity id

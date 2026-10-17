@@ -1,7 +1,7 @@
 //! How a stream call's failure crosses to a Nexus caller.
 //!
 //! The mapping and the class names are N0b's, so a caller in any language raises the class the
-//! store raised, and callers saw no change when the handler moved into Core.
+//! store raised.
 
 use crate::{StreamError, proto::NexusFailure, proto::StreamFailureKind};
 use temporalio_common::protos::temporal::api::{

@@ -1,9 +1,9 @@
-//! The stream service's Nexus operations, served by Core.
+//! The stream service's Nexus operations, served in process.
 //!
 //! Lang forwards each `append`, `read` and `read_range` call as N0a's JSON transfer form and gets
 //! back a [NexusStep]. A call whose bodies need lang's payload codec answers first with
-//! [CodecWork], and lang resumes it with the results. Core runs every rule of the contract, so
-//! each SDK's handler keeps only its authorizer and its codec. The state a reader carries makes
+//! [CodecWork], and lang resumes it with the results. The service runs every rule of the contract,
+//! so each SDK's handler keeps only its authorizer and its codec. The state a reader carries makes
 //! the endpoint stateless, so a read goes on at any handler Worker.
 
 mod failure;

@@ -168,7 +168,7 @@ enum Observed {
 
 impl ReadState {
     /// The state a caller passed back. One with more producers than a read remembers is no state
-    /// Core returned, and trimming it would cost time on the caller's behalf.
+    /// the service returned, and trimming it would cost time on the caller's behalf.
     pub(crate) fn decode_from(state: &[u8]) -> StreamResult<Self> {
         let not_returned = |why: String| {
             StreamError::cursor(format!(

@@ -20,8 +20,8 @@ use base64::Engine;
 use serde::{Deserialize, Serialize};
 use std::{io, sync::Arc, time::SystemTime};
 
-/// Attaches a start's caller to the stream's notifier and mints the operation token.
-/// Answers a failure as the Nexus calls do, so lang's handler raises it with Core's one table.
+/// Attaches a start's caller to the stream's notifier and mints the operation token. Answers a
+/// failure as the Nexus calls do, so lang's handler raises it with the service's one table.
 pub(crate) async fn attach_caller(
     streams: &Streams,
     client: Option<&Arc<dyn NotifierClient>>,
@@ -288,7 +288,7 @@ struct TokenRef {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     activity_id: Option<String>,
     // A ref to the newest chain has none, as the generated SDK writers leave an unset member out.
-    // SDK releases before Core wrote null, which reads the same.
+    // Older SDK releases wrote null, which reads the same.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     chain_run_id: Option<String>,
     kind: String,
@@ -296,7 +296,7 @@ struct TokenRef {
     workflow_id: String,
 }
 
-/// The `kind` of a contract `StreamRef`, by Core's owner kind.
+/// The `kind` of a contract `StreamRef`, by the service's owner kind.
 const KINDS: [(&str, StreamOwnerKind); 3] = [
     ("workflow", StreamOwnerKind::Workflow),
     ("activity", StreamOwnerKind::Activity),

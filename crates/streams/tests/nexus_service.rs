@@ -1,7 +1,7 @@
 //! The stream service's Nexus operations as a caller sees them: what lands, what a read answers,
 //! the limits and the failure classes.
 //!
-//! These are the store cases the Python handler's tests held before Core served the calls. They
+//! These are the store cases of the Python handler's tests. They
 //! run on memory, and on Redis when `STREAMS_REDIS_URL` is set.
 
 mod nexus_support;
@@ -1247,7 +1247,7 @@ fn layered(store: Arc<dyn StreamStore>) -> (Arc<Streams>, NexusCalls) {
     (streams, calls)
 }
 
-/// Core's replay read of the range `answer` carries, for the read that sent `state`.
+/// The service's replay read of the range `answer` carries, for the read that sent `state`.
 fn replay_of(wf: &str, answer: &Value, state: &[u8]) -> ReadRangeRequest {
     use base64::Engine;
     let replay = &answer["replay"];
@@ -1376,7 +1376,7 @@ async fn a_cut_answer_ranges_over_the_records_that_crossed() {
         .unwrap();
     assert_eq!(replayed.records.len(), 2);
     assert_eq!(replayed.cursor, token(&answer));
-    // Core's page went on past the cut, so its digest is not the answer's.
+    // The service's page went on past the cut, so its digest is not the answer's.
     let page = streams
         .read(ReadRequest {
             stream: replay_of(&wf, &answer, &[]).stream,

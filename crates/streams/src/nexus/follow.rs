@@ -1,4 +1,4 @@
-//! The `follow` and `follow_range` operations: Core's follower behind the stream service.
+//! The `follow` and `follow_range` operations: the follower behind the stream service.
 //!
 //! The owner's Worker has the store, so one call expands every link that store holds (DD-209).
 //! Each record's body crosses decoded with its own owner's codec context, so an answer asks lang
