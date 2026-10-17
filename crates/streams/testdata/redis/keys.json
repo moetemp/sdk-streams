@@ -1,0 +1,52 @@
+[
+  {
+    "prefix": "temporal-streams",
+    "namespace": "default",
+    "workflow_id": "wf",
+    "first_run_id": "run-1",
+    "topic": "events",
+    "log": "temporal-streams:{default:wf:run-1}:t:events",
+    "meta": "temporal-streams:{default:wf:run-1}:t:events:meta",
+    "chain": "temporal-streams:{default:wf:run-1}:chain"
+  },
+  {
+    "prefix": "temporal-streams",
+    "namespace": "my-ns",
+    "workflow_id": "order:42",
+    "first_run_id": "01a1-xyz",
+    "topic": "out",
+    "log": "temporal-streams:{my-ns:order%3A42:01a1-xyz}:t:out",
+    "meta": "temporal-streams:{my-ns:order%3A42:01a1-xyz}:t:out:meta",
+    "chain": "temporal-streams:{my-ns:order%3A42:01a1-xyz}:chain"
+  },
+  {
+    "prefix": "p{x}",
+    "namespace": "ns:a",
+    "workflow_id": "wf{b}",
+    "first_run_id": "r:1",
+    "topic": "t/1",
+    "log": "p%7Bx%7D:{ns%3Aa:wf%7Bb%7D:r%3A1}:t:t%2F1",
+    "meta": "p%7Bx%7D:{ns%3Aa:wf%7Bb%7D:r%3A1}:t:t%2F1:meta",
+    "chain": "p%7Bx%7D:{ns%3Aa:wf%7Bb%7D:r%3A1}:chain"
+  },
+  {
+    "prefix": "temporal-streams",
+    "namespace": "ns",
+    "workflow_id": "wörk flow",
+    "first_run_id": "run",
+    "topic": "tópic é",
+    "log": "temporal-streams:{ns:w%C3%B6rk%20flow:run}:t:t%C3%B3pic%20%C3%A9",
+    "meta": "temporal-streams:{ns:w%C3%B6rk%20flow:run}:t:t%C3%B3pic%20%C3%A9:meta",
+    "chain": "temporal-streams:{ns:w%C3%B6rk%20flow:run}:chain"
+  },
+  {
+    "prefix": "pre fix",
+    "namespace": "n%s",
+    "workflow_id": "a~b.c_d-e",
+    "first_run_id": "r",
+    "topic": "x y",
+    "log": "pre%20fix:{n%25s:a~b.c_d-e:r}:t:x%20y",
+    "meta": "pre%20fix:{n%25s:a~b.c_d-e:r}:t:x%20y:meta",
+    "chain": "pre%20fix:{n%25s:a~b.c_d-e:r}:chain"
+  }
+]

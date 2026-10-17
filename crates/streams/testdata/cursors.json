@@ -1,0 +1,29 @@
+[
+  {
+    "namespace": "default",
+    "kind": "workflow",
+    "workflow_id": "wf",
+    "topic": "events",
+    "hash": "ae03546a",
+    "cursor_redis_1_0": "redis:ae03546a:1-0",
+    "cursor_memory_5": "memory:ae03546a:5"
+  },
+  {
+    "namespace": "ns",
+    "kind": "workflow",
+    "workflow_id": "a:b",
+    "topic": "t",
+    "hash": "3c09b635",
+    "cursor_redis_1_0": "redis:3c09b635:1-0",
+    "cursor_memory_5": "memory:3c09b635:5"
+  },
+  {
+    "namespace": "é",
+    "kind": "workflow",
+    "workflow_id": "日本",
+    "topic": "tópic",
+    "hash": "f1d482bb",
+    "cursor_redis_1_0": "redis:f1d482bb:1-0",
+    "cursor_memory_5": "memory:f1d482bb:5"
+  }
+]

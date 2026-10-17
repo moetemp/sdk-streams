@@ -1,0 +1,209 @@
+{
+  "retry_bits": 16,
+  "attempts": [
+    {
+      "prefix": 0,
+      "reruns": 0,
+      "attempt": 1
+    },
+    {
+      "prefix": 3,
+      "reruns": 0,
+      "attempt": 196609
+    },
+    {
+      "prefix": 3,
+      "reruns": 1,
+      "attempt": 196610
+    },
+    {
+      "prefix": 5,
+      "reruns": 65533,
+      "attempt": 393214
+    },
+    {
+      "prefix": 5,
+      "reruns": 65534,
+      "attempt": 393215
+    },
+    {
+      "prefix": 5,
+      "reruns": 70000,
+      "attempt": 393215
+    }
+  ],
+  "supersession": [
+    {
+      "label": "a rerun of the same task",
+      "previous": {
+        "attempt": 196609,
+        "task_started_event_id": 5
+      },
+      "next": {
+        "attempt": 196610,
+        "task_started_event_id": 9,
+        "completed_tasks": [
+          3,
+          0
+        ]
+      },
+      "superseded": true
+    },
+    {
+      "label": "the next task after the attempt completed",
+      "previous": {
+        "attempt": 196609,
+        "task_started_event_id": 5
+      },
+      "next": {
+        "attempt": 327681,
+        "task_started_event_id": 7,
+        "completed_tasks": [
+          5,
+          3,
+          0
+        ]
+      },
+      "superseded": false
+    },
+    {
+      "label": "a rerun that wrote nothing completed, then the next task wrote",
+      "previous": {
+        "attempt": 196609,
+        "task_started_event_id": 5
+      },
+      "next": {
+        "attempt": 589825,
+        "task_started_event_id": 11,
+        "completed_tasks": [
+          9,
+          3,
+          0
+        ]
+      },
+      "superseded": true
+    },
+    {
+      "label": "a completed task that wrote nothing came in between",
+      "previous": {
+        "attempt": 196609,
+        "task_started_event_id": 5
+      },
+      "next": {
+        "attempt": 458753,
+        "task_started_event_id": 9,
+        "completed_tasks": [
+          7,
+          5,
+          3,
+          0
+        ]
+      },
+      "superseded": false
+    },
+    {
+      "label": "a rerun and a later task came in between",
+      "previous": {
+        "attempt": 196609,
+        "task_started_event_id": 5
+      },
+      "next": {
+        "attempt": 786433,
+        "task_started_event_id": 14,
+        "completed_tasks": [
+          12,
+          9,
+          3,
+          0
+        ]
+      },
+      "superseded": true
+    },
+    {
+      "label": "the earlier attempt's task is older than the list",
+      "previous": {
+        "attempt": 196609,
+        "task_started_event_id": 5
+      },
+      "next": {
+        "attempt": 2621441,
+        "task_started_event_id": 42,
+        "completed_tasks": [
+          40,
+          38,
+          36,
+          34,
+          32,
+          30,
+          28,
+          26
+        ]
+      },
+      "superseded": false
+    },
+    {
+      "label": "the earlier record has no started id",
+      "previous": {
+        "attempt": 196609,
+        "task_started_event_id": 0
+      },
+      "next": {
+        "attempt": 589825,
+        "task_started_event_id": 11,
+        "completed_tasks": [
+          9,
+          3,
+          0
+        ]
+      },
+      "superseded": false
+    },
+    {
+      "label": "a rerun of the first task",
+      "previous": {
+        "attempt": 1,
+        "task_started_event_id": 3
+      },
+      "next": {
+        "attempt": 2,
+        "task_started_event_id": 6,
+        "completed_tasks": [
+          0
+        ]
+      },
+      "superseded": true
+    },
+    {
+      "label": "the first task failed and its rerun wrote nothing",
+      "previous": {
+        "attempt": 1,
+        "task_started_event_id": 3
+      },
+      "next": {
+        "attempt": 393217,
+        "task_started_event_id": 8,
+        "completed_tasks": [
+          6,
+          0
+        ]
+      },
+      "superseded": true
+    },
+    {
+      "label": "the first task completed",
+      "previous": {
+        "attempt": 1,
+        "task_started_event_id": 3
+      },
+      "next": {
+        "attempt": 196609,
+        "task_started_event_id": 5,
+        "completed_tasks": [
+          3,
+          0
+        ]
+      },
+      "superseded": false
+    }
+  ]
+}

@@ -1,0 +1,87 @@
+{
+  "retention_ms": 60000,
+  "grace_ms": 120000,
+  "session_field": "hw:1:p:1",
+  "meta_value_after_next_and_gap": "10|1|1791686712743-2|1791686712743-2|ee",
+  "append": [
+    {
+      "label": "first batch",
+      "sequence": 1,
+      "digest": "aa",
+      "records": 3,
+      "outcome": "ok",
+      "first": "1791686712741-0",
+      "last": "1791686712741-2"
+    },
+    {
+      "label": "repeat of newest batch",
+      "sequence": 1,
+      "digest": "aa",
+      "records": 3,
+      "outcome": "ok",
+      "first": "1791686712741-0",
+      "last": "1791686712741-2",
+      "same_ids_as": "first batch"
+    },
+    {
+      "label": "same sequence, other digest",
+      "sequence": 1,
+      "digest": "bb",
+      "records": 3,
+      "outcome": "error",
+      "error_prefix": "STREAMS_DIVERGENT"
+    },
+    {
+      "label": "inside the newest batch",
+      "sequence": 2,
+      "digest": "cc",
+      "records": 1,
+      "outcome": "error",
+      "error_prefix": "STREAMS_STALE"
+    },
+    {
+      "label": "below the newest batch",
+      "sequence": 0,
+      "digest": "cc",
+      "records": 1,
+      "outcome": "error",
+      "error_prefix": "STREAMS_STALE"
+    },
+    {
+      "label": "next batch",
+      "sequence": 4,
+      "digest": "dd",
+      "records": 2,
+      "outcome": "ok",
+      "first": "1791686712743-0",
+      "last": "1791686712743-1"
+    },
+    {
+      "label": "gap after the newest batch",
+      "sequence": 10,
+      "digest": "ee",
+      "records": 1,
+      "outcome": "ok",
+      "first": "1791686712743-2",
+      "last": "1791686712743-2"
+    },
+    {
+      "label": "new batch after close",
+      "sequence": 20,
+      "digest": "ff",
+      "records": 1,
+      "outcome": "error",
+      "error_prefix": "STREAMS_CLOSED"
+    },
+    {
+      "label": "retry of newest batch after close",
+      "sequence": 10,
+      "digest": "ee",
+      "records": 1,
+      "outcome": "ok",
+      "first": "1791686712743-2",
+      "last": "1791686712743-2",
+      "note": "a retry of a landed batch still returns its position"
+    }
+  ]
+}

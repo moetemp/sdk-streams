@@ -1,0 +1,55 @@
+[package]
+name = "temporalio-streams"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.88.0"
+authors = ["Temporal Technologies Inc. <sdk@temporal.io>"]
+license-file = { workspace = true }
+description = "Stream stores for Temporal Workflows: the store trait, cursors and record helpers"
+homepage = "https://temporal.io/"
+repository = "https://github.com/temporalio/sdk-rust"
+keywords = ["temporal", "workflow", "streams"]
+categories = ["development-tools"]
+
+[features]
+default = []
+# The Redis store. Off by default, so a build that needs only the trait takes no Redis client.
+# TLS uses the rustls provider the process installs, the same one Core uses.
+redis = ["dep:redis", "dep:crc16"]
+
+[dependencies]
+async-trait = "0.1"
+crc16 = { version = "0.4", optional = true }
+prost = { workspace = true }
+redis = { version = "1.7", optional = true, default-features = false, features = [
+    "cluster-async",
+    "connection-manager",
+    "script",
+    "streams",
+    "tokio-rustls-comp",
+] }
+sha2 = "0.10"
+thiserror = { workspace = true }
+tokio = { version = "1.47", default-features = false, features = ["sync", "time"] }
+tracing = "0.1"
+
+[dependencies.temporalio-common]
+path = "../common"
+version = "~1.1.0"
+default-features = false
+
+[dev-dependencies]
+serde_json = { workspace = true }
+tracing-subscriber = { version = "0.3", default-features = false, features = ["fmt"] }
+tokio = { version = "1.47", features = [
+    "io-util",
+    "macros",
+    "net",
+    "rt",
+    "rt-multi-thread",
+    "test-util",
+    "time",
+] }
+
+[lints]
+workspace = true
