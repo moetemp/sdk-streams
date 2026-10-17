@@ -42,10 +42,23 @@ interface notification-service {
   record on-complete-response {
   }
 
+  /// @nexus.doc "Names a caller Workflow's operation by the values the Workflow knows."
+  /// @nexus.proto "temporal.api.nexus.v1.NexusOperationProgress.OperationKey"
+  record nexus-operation-progress-operation-key {
+    /// @nexus.doc "The endpoint of the operation."
+    endpoint: option<string>,
+    /// @nexus.doc "The service of the operation."
+    service: option<string>,
+    /// @nexus.doc "The name of the operation."
+    operation: option<string>,
+    /// @nexus.doc "The token from the server's record of the operation start."
+    operation-token: option<string>,
+  }
+
   /// @nexus.doc "The operation that a progress belongs to."
   /// @nexus.proto "temporal.api.nexus.v1.NexusOperationProgress.operation"
   variant nexus-operation-progress-operation {
-    scheduled-event-id(s64),
+    operation-key(nexus-operation-progress-operation-key),
   }
 
   /// @nexus.doc "The non-terminal progress of an operation."
