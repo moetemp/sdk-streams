@@ -1,0 +1,77 @@
+{
+  "topics": [
+    {
+      "namespace": "my-ns",
+      "workflow_id": "order/42",
+      "first_run_id": "run-1",
+      "topic": "out",
+      "prefix": "v1/my-ns/w/order%2F42/run-1/out/"
+    },
+    {
+      "namespace": "my-ns",
+      "workflow_id": "..",
+      "first_run_id": "r.1",
+      "topic": ".hidden",
+      "prefix": "v1/my-ns/w/%2E%2E/r%2E1/%2Ehidden/"
+    },
+    {
+      "namespace": "ns",
+      "owner_kind": 2,
+      "activity_id": "act 1",
+      "first_run_id": "run-a",
+      "topic": "t:1",
+      "prefix": "v1/ns/a/act%201/run-a/t%3A1/"
+    },
+    {
+      "namespace": "ns",
+      "owner_kind": 3,
+      "workflow_id": "wf",
+      "first_run_id": "run-w",
+      "activity_id": "7",
+      "topic": "tool",
+      "prefix": "v1/ns/wa/wf/run-w/7/tool/"
+    }
+  ],
+  "positions": [
+    {
+      "position": "1700000000000-0",
+      "segment": "p/seg-00000001700000000000-00000000000000000000.tsr"
+    },
+    {
+      "position": "5-12",
+      "segment": "p/seg-00000000000000000005-00000000000000000012.tsr"
+    },
+    {
+      "position": "42",
+      "segment": "p/seg-00000000000000000042-00000000000000000000.tsr"
+    }
+  ],
+  "deletes": [
+    {
+      "namespace": "my-ns",
+      "owner_kind": 1,
+      "workflow_id": "order/42",
+      "prefixes": [
+        "v1/my-ns/w/order%2F42/",
+        "v1/my-ns/wa/order%2F42/"
+      ]
+    },
+    {
+      "namespace": "my-ns",
+      "owner_kind": 0,
+      "workflow_id": "wf",
+      "prefixes": [
+        "v1/my-ns/w/wf/",
+        "v1/my-ns/wa/wf/"
+      ]
+    },
+    {
+      "namespace": "my-ns",
+      "owner_kind": 2,
+      "activity_id": "act 1",
+      "prefixes": [
+        "v1/my-ns/a/act%201/"
+      ]
+    }
+  ]
+}

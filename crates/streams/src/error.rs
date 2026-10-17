@@ -14,6 +14,8 @@ pub struct StreamError {
     pub message: String,
     /// The cursor of the record that failed, for [StreamFailureKind::Record].
     pub cursor: Option<String>,
+    /// Who closed the stream, for [StreamFailureKind::Closed], when the close named someone.
+    pub closed_by: Option<String>,
 }
 
 impl StreamError {
@@ -23,6 +25,7 @@ impl StreamError {
             kind,
             message: message.into(),
             cursor: None,
+            closed_by: None,
         }
     }
 
@@ -44,6 +47,12 @@ impl StreamError {
     /// The stream is closed and refuses appends.
     pub fn closed(message: impl Into<String>) -> Self {
         Self::new(StreamFailureKind::Closed, message)
+    }
+
+    /// Names who closed the stream, from the topic's first close. An empty name names no one.
+    pub fn with_closed_by(mut self, closed_by: impl Into<String>) -> Self {
+        self.closed_by = Some(closed_by.into()).filter(|closed_by| !closed_by.is_empty());
+        self
     }
 
     /// The cursor is not valid for this stream.
@@ -77,6 +86,7 @@ impl StreamError {
             kind: StreamFailureKind::Record,
             message: message.into(),
             cursor: Some(cursor.into()),
+            closed_by: None,
         }
     }
 }
@@ -87,6 +97,7 @@ impl From<StreamError> for StreamFailure {
             kind: error.kind as i32,
             message: error.message,
             cursor: error.cursor.unwrap_or_default(),
+            closed_by: error.closed_by.unwrap_or_default(),
         }
     }
 }
@@ -97,6 +108,7 @@ impl From<StreamFailure> for StreamError {
             kind: StreamFailureKind::try_from(failure.kind).unwrap_or(StreamFailureKind::Storage),
             message: failure.message,
             cursor: Some(failure.cursor).filter(|cursor| !cursor.is_empty()),
+            closed_by: Some(failure.closed_by).filter(|closed_by| !closed_by.is_empty()),
         }
     }
 }
@@ -115,6 +127,18 @@ mod tests {
     }
 
     #[test]
+    fn a_close_refusal_carries_who_closed_the_stream() {
+        let error = StreamError::closed("closed").with_closed_by("run-2");
+        let failure = StreamFailure::from(error.clone());
+        assert_eq!(failure.closed_by, "run-2");
+        assert_eq!(StreamError::from(failure), error);
+        assert_eq!(
+            StreamError::closed("closed").with_closed_by("").closed_by,
+            None
+        );
+    }
+
+    #[test]
     fn an_invalid_argument_crosses_as_its_own_kind() {
         let failure = StreamFailure::from(StreamError::invalid_argument("no producer id"));
         assert_eq!(failure.kind, 12);
@@ -130,6 +154,7 @@ mod tests {
             kind: 99,
             message: "new".to_string(),
             cursor: String::new(),
+            closed_by: Default::default(),
         };
         let error = StreamError::from(failure);
         assert_eq!(error.kind, StreamFailureKind::Storage);

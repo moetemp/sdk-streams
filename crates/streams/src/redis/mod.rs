@@ -3,24 +3,29 @@
 mod conn;
 mod errors;
 mod keys;
+mod log;
 mod scripts;
+mod slots;
 
 use crate::{
-    Capabilities, ConditionForms, MAX_BATCH_BYTES, MAX_RECORD_BYTES, StreamError, StreamResult,
-    StreamStore,
+    Capabilities, ConditionForms, MAX_BATCH_BYTES, MAX_RECORD_BYTES, NotificationLog, StreamError,
+    StreamResult, StreamStore,
     proto::{
         ChainId, DeleteOwnerRequest, DeleteOwnerResponse, StoreAppendRequest, StoreAppendResponse,
-        StoreLatestRequest, StoreLatestResponse, StoreReadRequest, StoreReadResponse, StoredRecord,
-        StreamOwnerKind,
+        StoreLatestRequest, StoreLatestResponse, StoreReadRequest, StoreReadResponse, StoredClose,
+        StoredRecord, StreamFailureKind, StreamOwnerKind,
     },
 };
 use conn::{BlockingPool, Shared};
 use errors::{Call, Mapped};
-use keys::{ChainKeys, owner_pattern, session_field};
+use keys::{
+    ChainKeys, activity_owner_pattern, owner_pattern, session_field, workflow_activity_pattern,
+};
+use prost::Message;
 use redis::{Cmd, Script, Value, streams::StreamReadReply};
 use std::{
     collections::HashMap,
-    sync::LazyLock,
+    sync::{Arc, LazyLock},
     time::{Duration, SystemTime, UNIX_EPOCH},
 };
 use tokio::time::Instant;
@@ -29,6 +34,10 @@ const NAME: &str = "redis";
 const RECORD_FIELD: &str = "r";
 const TOMBSTONE_GRACE: Duration = Duration::from_secs(30 * 24 * 60 * 60);
 const CLOSED_FIELD: &str = "closed";
+/// The meta field that holds the topic's first close, a serialized `StoredClose`.
+const CLOSE_FIELD: &str = "close";
+/// The meta field that holds the newest position the archive holds.
+const ARCHIVED_FIELD: &str = "archived";
 const DELETE_BATCH: usize = 500;
 
 const CAPABILITIES: Capabilities = Capabilities {
@@ -38,8 +47,8 @@ const CAPABILITIES: Capabilities = Capabilities {
         fence: false,
     },
     kept_last: true,
-    holds: false,
-    change_feed: false,
+    holds: true,
+    change_feed: true,
     cheap_logs: true,
     delete_owner: true,
     topic_listing: true,
@@ -67,6 +76,20 @@ pub struct RedisStoreOptions {
     pub blocking_reads_per_node: usize,
     /// How long a short call waits for its reply.
     pub response_timeout: Duration,
+    /// How long a positions-only reader's hold lasts after its last read. `None` uses the
+    /// retention.
+    pub floor_lease: Option<Duration>,
+    /// How long a hold lasts after its reader released it.
+    pub floor_release_grace: Duration,
+    /// Each append also writes an entry to its slot's notification stream, which a driver reads.
+    pub notification_log: bool,
+    /// How many doorbells the notification log rings, each a stream that a driver blocks on.
+    pub notify_doorbells: u32,
+    /// With an archive, how long the archive's hold on a topic lasts after the archive last
+    /// moved it. Each topic's first append makes the hold, so retention drops only what the
+    /// archive holds while the archive keeps up. When the archive stops for longer, the hold
+    /// ends and retention goes on. Needs `notification_log`, since a driver archives.
+    pub archive_lease: Option<Duration>,
     /// Runs with no Lua: no dedupe entries, no close flags and no topic meta. Core then takes
     /// the fallbacks of producer state and the kept last position, as on a store that has
     /// only a log. For tests of those fallbacks on a real store.
@@ -83,10 +106,18 @@ impl RedisStoreOptions {
             retention: Duration::from_secs(7 * 24 * 60 * 60),
             blocking_reads_per_node: 256,
             response_timeout: Duration::from_secs(5),
+            floor_lease: None,
+            floor_release_grace: Duration::from_secs(24 * 60 * 60),
+            notification_log: false,
+            notify_doorbells: DEFAULT_NOTIFY_DOORBELLS,
+            archive_lease: None,
             plain: false,
         }
     }
 }
+
+/// How many doorbells a notification log rings when the options don't say.
+pub const DEFAULT_NOTIFY_DOORBELLS: u32 = 16;
 
 /// A [StreamStore] on Redis.
 pub struct RedisStore {
@@ -95,6 +126,10 @@ pub struct RedisStore {
     prefix: String,
     retention_ms: u64,
     grace_ms: u64,
+    floor_lease_ms: u64,
+    floor_release_grace_ms: u64,
+    log: Option<Arc<log::RedisLog>>,
+    archive_lease_ms: Option<u64>,
     plain: bool,
 }
 
@@ -127,6 +162,17 @@ impl RedisStore {
                 options.retention
             )));
         }
+        if options.plain && (options.notification_log || options.archive_lease.is_some()) {
+            return Err(StreamError::refused(
+                "the Redis store in plain mode runs no script, so it keeps no notification log \
+                 and no archive hold",
+            ));
+        }
+        if options.archive_lease.is_some() && !options.notification_log {
+            return Err(StreamError::refused(
+                "an archive needs the notification log, since a driver archives",
+            ));
+        }
         // The scripts trim below `now - retention` as a stream id, which can't be negative.
         let now_ms = SystemTime::now()
             .duration_since(UNIX_EPOCH)
@@ -148,14 +194,81 @@ impl RedisStore {
             options.response_timeout,
         )
         .mapped(Call::Read)?;
+        let log = if options.notification_log {
+            // Doorbell reads block, so they get connections of their own.
+            let doorbell_reads = BlockingPool::new(
+                seed,
+                options.notify_doorbells.max(1) as usize,
+                options.cluster,
+                options.response_timeout,
+            )
+            .mapped(Call::Read)?;
+            Some(Arc::new(log::RedisLog::new(
+                shared.clone(),
+                doorbell_reads,
+                options.key_prefix.clone(),
+                options.notify_doorbells,
+                options.archive_lease.is_some(),
+            )))
+        } else {
+            None
+        };
         Ok(Self {
+            log,
             shared,
             blocking,
             prefix: options.key_prefix,
             retention_ms,
             grace_ms: TOMBSTONE_GRACE.as_millis() as u64,
+            floor_lease_ms: options
+                .floor_lease
+                .map_or(retention_ms, |lease| millis(lease).max(1)),
+            floor_release_grace_ms: millis(options.floor_release_grace),
+            archive_lease_ms: options.archive_lease.map(|lease| millis(lease).max(1)),
             plain: options.plain,
         })
+    }
+
+    /// Names who closed the topic on a refusal, from the topic's first close. The close is kept
+    /// once and never changes, so reading it after the refusal gives the close that refused.
+    async fn with_closed_by(
+        &self,
+        error: StreamError,
+        keys: &ChainKeys,
+        topic: &str,
+    ) -> StreamError {
+        let close: Option<Vec<u8>> = redis::cmd("HGET")
+            .arg(keys.meta(topic))
+            .arg(CLOSE_FIELD)
+            .query_async(&mut self.shared.clone())
+            .await
+            .unwrap_or_default();
+        let closed_by = close
+            .and_then(|bytes| StoredClose::decode(bytes.as_slice()).ok())
+            .map(|close| close.closed_by)
+            .unwrap_or_default();
+        error.with_closed_by(closed_by)
+    }
+
+    /// Takes deleted keys out of their slot's archive marks. A mark of a deleted topic stays
+    /// lowest in its slot, and enough of them stop the slot's other topics from being archived.
+    async fn drop_archive_marks(&self, keys: &[String]) -> StreamResult<()> {
+        if self.archive_lease_ms.is_none() {
+            return Ok(());
+        }
+        let mut by_slot: HashMap<u16, Vec<&String>> = HashMap::new();
+        for key in keys {
+            by_slot.entry(conn::slot(key)).or_default().push(key);
+        }
+        for (slot, keys) in by_slot {
+            let _: u64 = redis::cmd("ZREM")
+                .arg(keys::archive_pending(&self.prefix, slot))
+                .arg(keys)
+                .query_async(&mut self.shared.clone())
+                .await
+                .mapped(Call::Write)?;
+        }
+        Ok(())
     }
 
     /// Appends the batch with `XADD`s in one transaction, each trimming by age as it lands.
@@ -233,8 +346,17 @@ impl RedisStore {
         }
         Ok(StoreReadResponse {
             records: found,
-            closed: false,
+            ..Default::default()
         })
+    }
+
+    fn holds(&self) -> StreamResult<()> {
+        if self.plain {
+            return Err(StreamError::unsupported(
+                "the Redis store in plain mode can't hold records for a positions-only reader",
+            ));
+        }
+        Ok(())
     }
 
     fn producer_state(&self) -> StreamResult<()> {
@@ -423,7 +545,8 @@ fn records(reply: Value) -> StreamResult<Vec<StoredRecord>> {
 const TOPIC_STATE: &str = "\
 return {redis.call('EXISTS', KEYS[1]), redis.call('EXISTS', KEYS[2]), \
 redis.call('HGET', KEYS[2], 'trimmed'), redis.call('HGET', KEYS[2], 'last'), \
-redis.call('HGET', KEYS[3], ARGV[1]), redis.call('HGET', KEYS[4], ARGV[1])}";
+redis.call('HGET', KEYS[3], ARGV[1]), redis.call('HGET', KEYS[4], ARGV[1]), \
+redis.call('HGET', KEYS[2], 'close')}";
 
 static TOPIC_STATE_SCRIPT: LazyLock<Script> = LazyLock::new(|| Script::new(TOPIC_STATE));
 
@@ -442,6 +565,8 @@ struct TopicState {
     last: Option<String>,
     chain_closed: bool,
     topic_closed: bool,
+    /// The topic's first close, when it was closed as a topic.
+    close: Option<StoredClose>,
 }
 
 impl redis::FromRedisValue for TopicState {
@@ -454,8 +579,16 @@ impl redis::FromRedisValue for TopicState {
         let Value::Array(values) = value else {
             return Err(format!("a topic state is a list, not {value:?}").into());
         };
-        let [log, meta, trimmed, last, chain_closed, topic_closed] = values.as_slice() else {
-            return Err(format!("a topic state has six values, not {}", values.len()).into());
+        let [log, meta, trimmed, last, chain_closed, topic_closed, close] = values.as_slice()
+        else {
+            return Err(format!("a topic state has seven values, not {}", values.len()).into());
+        };
+        let close = match close {
+            Value::BulkString(bytes) => Some(
+                StoredClose::decode(bytes.as_slice())
+                    .map_err(|error| format!("a topic's close does not decode: {error}"))?,
+            ),
+            _ => None,
         };
         Ok(Self {
             log_exists: number(log),
@@ -464,6 +597,7 @@ impl redis::FromRedisValue for TopicState {
             last: text(last),
             chain_closed: text(chain_closed).is_some(),
             topic_closed: text(topic_closed).is_some(),
+            close,
         })
     }
 }
@@ -536,6 +670,10 @@ fn wait_of(request: &StoreReadRequest) -> Duration {
     })
 }
 
+fn millis(duration: Duration) -> u64 {
+    u64::try_from(duration.as_millis()).unwrap_or(u64::MAX)
+}
+
 fn hex(bytes: &[u8]) -> String {
     bytes.iter().map(|b| format!("{b:02x}")).collect()
 }
@@ -546,15 +684,24 @@ impl StreamStore for RedisStore {
         NAME
     }
 
+    fn notification_log(&self) -> Option<Arc<dyn NotificationLog>> {
+        self.log.clone().map(|log| log as Arc<dyn NotificationLog>)
+    }
+
     fn capabilities(&self) -> Capabilities {
         if self.plain {
             return Capabilities {
                 producer_state: false,
                 kept_last: false,
+                holds: false,
+                change_feed: false,
                 ..CAPABILITIES
             };
         }
-        CAPABILITIES
+        Capabilities {
+            change_feed: self.log.is_some(),
+            ..CAPABILITIES
+        }
     }
 
     async fn append(&self, request: StoreAppendRequest) -> StreamResult<StoreAppendResponse> {
@@ -568,23 +715,59 @@ impl StreamStore for RedisStore {
             return self.append_plain(&request).await;
         }
         let keys = self.keys(request.chain.as_ref())?;
-        let mut script = scripts::APPEND_SCRIPT.prepare_invoke();
+        let mut script = match (&self.log, self.archive_lease_ms) {
+            (Some(_), Some(_)) => scripts::APPEND_ARCHIVED_SCRIPT.prepare_invoke(),
+            (Some(_), None) => scripts::APPEND_LOGGED_SCRIPT.prepare_invoke(),
+            (None, _) => scripts::APPEND_SCRIPT.prepare_invoke(),
+        };
         script
             .key(keys.log(&request.topic))
             .key(keys.meta(&request.topic))
             .key(keys.chain())
+            .key(keys.floors(&request.topic));
+        if self.log.is_some() {
+            script.key(keys::notifications(&self.prefix, keys.slot()));
+        }
+        if self.archive_lease_ms.is_some() {
+            script.key(keys::archive_pending(&self.prefix, keys.slot()));
+        }
+        if request.chain.as_ref().is_some_and(ChainKeys::keeps_topics) {
+            script.key(keys.topics());
+        }
+        script
             .arg(self.retention_ms)
             .arg(self.grace_ms)
             .arg(session_field(&request.producer_id, request.attempt))
             .arg(request.sequence)
             .arg(hex(&request.digest));
+        if let Some(lease) = self.archive_lease_ms {
+            script.arg(lease);
+        }
         for record in &request.records {
             script.arg(record.as_slice());
         }
-        let (first_position, last_position): (String, String) = script
+        let appended: StreamResult<Vec<String>> = script
             .invoke_async(&mut self.shared.clone())
             .await
-            .mapped(Call::Append)?;
+            .mapped(Call::Append);
+        let answer = match appended {
+            Err(error) if error.kind == StreamFailureKind::Closed => {
+                return Err(self.with_closed_by(error, &keys, &request.topic).await);
+            }
+            appended => appended?,
+        };
+        let [first_position, last_position, rest @ ..] = answer.as_slice() else {
+            return Err(StreamError::storage(format!(
+                "Redis answered the append with {answer:?}"
+            )));
+        };
+        // The entry made a slot's stream non-empty, so a driver may be asleep on its doorbell.
+        if let (Some(log), [length]) = (&self.log, rest)
+            && length == "1"
+        {
+            log.ring(keys.slot()).await;
+        }
+        let (first_position, last_position) = (first_position.clone(), last_position.clone());
         Ok(StoreAppendResponse {
             first_position,
             last_position,
@@ -648,6 +831,7 @@ impl StreamStore for RedisStore {
         Ok(StoreReadResponse {
             records: found,
             closed: state.chain_closed || state.topic_closed,
+            close: state.close.filter(|_| state.topic_closed),
         })
     }
 
@@ -734,6 +918,99 @@ impl StreamStore for RedisStore {
         Ok(Some(trimmed))
     }
 
+    async fn hold_floor(
+        &self,
+        chain: &ChainId,
+        topic: &str,
+        holder: &str,
+        position: &str,
+    ) -> StreamResult<()> {
+        self.holds()?;
+        let keys = ChainKeys::new(&self.prefix, chain);
+        // Redis never stores `0-0`, so `0-1` holds every record, and the trim's exclusive range
+        // below it stays valid. Below it, a crafted `0-0` would fail every later append.
+        let position = if position.is_empty() || entry(position)? < (0, 1) {
+            "0-1"
+        } else {
+            position
+        };
+        scripts::HOLD_SCRIPT
+            .key(keys.floors(topic))
+            .key(keys.log(topic))
+            .key(keys.meta(topic))
+            .arg(holder)
+            .arg(position)
+            .arg(self.floor_lease_ms)
+            .arg(self.grace_ms)
+            .arg(crate::MAX_FLOOR_HOLDERS)
+            .invoke_async::<i64>(&mut self.shared.clone())
+            .await
+            .mapped(Call::Write)
+            .map(drop)
+    }
+
+    async fn release_floor(&self, chain: &ChainId, topic: &str, holder: &str) -> StreamResult<()> {
+        self.holds()?;
+        let keys = ChainKeys::new(&self.prefix, chain);
+        let mut script = scripts::RELEASE_SCRIPT.key(keys.floors(topic));
+        // The archive releases once it holds a closed topic to its end, so the topic leaves the
+        // set to archive in the same step.
+        if holder == crate::ARCHIVE_HOLDER && self.archive_lease_ms.is_some() {
+            script.key(keys::archive_pending(&self.prefix, keys.slot()));
+        }
+        script
+            .arg(holder)
+            .arg(self.floor_release_grace_ms)
+            .arg(keys.log(topic))
+            .invoke_async::<i64>(&mut self.shared.clone())
+            .await
+            .mapped(Call::Write)
+            .map(drop)
+    }
+
+    async fn advance_archive(
+        &self,
+        chain: &ChainId,
+        topic: &str,
+        position: &str,
+    ) -> StreamResult<()> {
+        self.holds()?;
+        let Some(lease) = self.archive_lease_ms else {
+            return Err(StreamError::unsupported("this store keeps no archive hold"));
+        };
+        entry(position)?;
+        let keys = ChainKeys::new(&self.prefix, chain);
+        scripts::ADVANCE_SCRIPT
+            .key(keys.floors(topic))
+            .key(keys.log(topic))
+            .key(keys.meta(topic))
+            .key(keys::archive_pending(&self.prefix, keys.slot()))
+            .arg(crate::ARCHIVE_HOLDER)
+            .arg(position)
+            .arg(lease)
+            .arg(self.grace_ms)
+            .invoke_async::<i64>(&mut self.shared.clone())
+            .await
+            .mapped(Call::Write)
+            .map(drop)
+    }
+
+    async fn archived(&self, chain: &ChainId, topic: &str) -> StreamResult<Option<String>> {
+        if self.archive_lease_ms.is_none() {
+            return Ok(None);
+        }
+        let (exists, archived): (bool, Option<String>) = redis::pipe()
+            .exists(ChainKeys::new(&self.prefix, chain).meta(topic))
+            .hget(
+                ChainKeys::new(&self.prefix, chain).meta(topic),
+                ARCHIVED_FIELD,
+            )
+            .query_async(&mut self.shared.clone())
+            .await
+            .mapped(Call::Read)?;
+        Ok(exists.then(|| archived.unwrap_or_default()))
+    }
+
     async fn close_chain(&self, chain: &ChainId) -> StreamResult<()> {
         self.producer_state()?;
         let keys = ChainKeys::new(&self.prefix, chain);
@@ -747,16 +1024,39 @@ impl StreamStore for RedisStore {
     }
 
     async fn close_topic(&self, chain: &ChainId, topic: &str) -> StreamResult<()> {
-        self.producer_state()?;
-        let meta = ChainKeys::new(&self.prefix, chain).meta(topic);
-        // The meta is the topic's tombstone, so the mark lives as long as the topic is known.
-        redis::pipe()
-            .atomic()
-            .hset(&meta, CLOSED_FIELD, "1")
-            .pexpire(&meta, (self.retention_ms + self.grace_ms) as i64)
-            .query_async::<()>(&mut self.shared.clone())
+        self.close_topic_with(chain, topic, StoredClose::default())
             .await
-            .mapped(Call::Write)
+            .map(drop)
+    }
+
+    async fn close_topic_with(
+        &self,
+        chain: &ChainId,
+        topic: &str,
+        close: StoredClose,
+    ) -> StreamResult<StoredClose> {
+        let keys = ChainKeys::new(&self.prefix, chain);
+        if self.plain {
+            crate::close::write_close(self, chain, topic, &close).await?;
+            return Ok(close);
+        }
+        // The meta is the topic's tombstone, so the mark and the outcome live as long as the topic
+        // is known.
+        let mut script = scripts::CLOSE_SCRIPT.key(keys.meta(topic));
+        // A closed topic gets nothing new, so the archive takes it first.
+        if self.archive_lease_ms.is_some() {
+            script.key(keys::archive_pending(&self.prefix, keys.slot()));
+        }
+        let stored = script
+            .arg(close.encode_to_vec())
+            .arg(self.retention_ms + self.grace_ms)
+            .arg(keys.log(topic))
+            .invoke_async::<Vec<u8>>(&mut self.shared.clone())
+            .await
+            .mapped(Call::Write)?;
+        StoredClose::decode(stored.as_slice()).map_err(|error| {
+            StreamError::storage(format!("a topic's close does not decode: {error}"))
+        })
     }
 
     async fn retire_producer(
@@ -775,6 +1075,29 @@ impl StreamStore for RedisStore {
             .query_async::<()>(&mut self.shared.clone())
             .await
             .mapped(Call::Write)
+    }
+
+    async fn written_topics(&self, chain: &ChainId) -> StreamResult<Vec<String>> {
+        if !ChainKeys::keeps_topics(chain) {
+            return Ok(Vec::new());
+        }
+        let keys = ChainKeys::new(&self.prefix, chain);
+        let logs: Vec<String> = redis::cmd("SMEMBERS")
+            .arg(keys.topics())
+            .query_async(&mut self.shared.clone())
+            .await
+            .mapped(Call::Read)?;
+        let mut topics = logs
+            .iter()
+            .map(|log| match keys::chain_of_log(&self.prefix, log) {
+                Some((of, topic)) if of == *chain => Ok(topic),
+                _ => Err(StreamError::storage(format!(
+                    "the topic set of a Workflow Activity holds {log:?}, which is no log key of it"
+                ))),
+            })
+            .collect::<StreamResult<Vec<_>>>()?;
+        topics.sort();
+        Ok(topics)
     }
 
     async fn list_topics(&self, chain: &ChainId) -> StreamResult<Vec<String>> {
@@ -803,22 +1126,38 @@ impl StreamStore for RedisStore {
     }
 
     async fn delete_owner(&self, request: DeleteOwnerRequest) -> StreamResult<DeleteOwnerResponse> {
-        if request.owner_kind != StreamOwnerKind::Workflow as i32 {
-            return Err(StreamError::unsupported(format!(
-                "this release keeps streams of Workflows only, not owner kind {}",
-                request.owner_kind
-            )));
-        }
-        // A Workflow id's chains hash to different slots, so every primary is scanned. Some keys
+        let patterns = match StreamOwnerKind::try_from(request.owner_kind) {
+            Ok(StreamOwnerKind::Workflow) => vec![
+                owner_pattern(&self.prefix, &request.namespace, &request.workflow_id),
+                workflow_activity_pattern(&self.prefix, &request.namespace, &request.workflow_id),
+            ],
+            Ok(StreamOwnerKind::Activity) => vec![activity_owner_pattern(
+                &self.prefix,
+                &request.namespace,
+                &request.activity_id,
+            )],
+            _ => {
+                return Err(StreamError::unsupported(format!(
+                    "this release keeps streams of Workflows and standalone Activities only, not \
+                     owner kind {}",
+                    request.owner_kind
+                )));
+            }
+        };
+        // An owner id's chains hash to different slots, so every primary is scanned. Some keys
         // may be gone when a later step fails, which is why a failure leaves the outcome unknown.
-        let pattern = owner_pattern(&self.prefix, &request.namespace, &request.workflow_id);
         let mut deleted = 0;
-        for node in self.shared.primaries().await.mapped(Call::Write)? {
+        let nodes = self.shared.primaries().await.mapped(Call::Write)?;
+        for (node, pattern) in nodes
+            .iter()
+            .flat_map(|node| patterns.iter().map(move |pattern| (node, pattern)))
+            .collect::<Vec<_>>()
+        {
             let mut cursor = "0".to_string();
             loop {
                 let (next, keys) = self
                     .shared
-                    .scan(node.as_ref(), &cursor, &pattern)
+                    .scan(node.as_ref(), &cursor, pattern)
                     .await
                     .mapped(Call::Write)?;
                 for batch in keys.chunks(DELETE_BATCH) {
@@ -828,6 +1167,7 @@ impl StreamStore for RedisStore {
                         .await
                         .mapped(Call::Write)?;
                     deleted += removed;
+                    self.drop_archive_marks(batch).await?;
                 }
                 if next == "0" {
                     break;
@@ -919,6 +1259,7 @@ mod tests {
             namespace: "ns".to_string(),
             workflow_id: workflow_id.to_string(),
             first_run_id: "run-1".to_string(),
+            ..Default::default()
         }
     }
 
@@ -993,7 +1334,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn in_plain_mode_a_repeat_lands_again_and_no_close_flag_is_kept() {
+    async fn in_plain_mode_a_repeat_lands_again_and_a_close_is_a_record() {
         let Ok(url) = std::env::var("STREAMS_REDIS_URL") else {
             return;
         };
@@ -1015,12 +1356,15 @@ mod tests {
         assert_eq!(read.records.len(), 2);
         assert!(!read.closed);
         assert_eq!(store.list_topics(&chain(&run)).await.unwrap(), ["out"]);
-        for error in [
-            store.close_chain(&chain(&run)).await.unwrap_err(),
-            store.close_topic(&chain(&run), "out").await.unwrap_err(),
-        ] {
-            assert_eq!(error.kind, StreamFailureKind::Unsupported);
-        }
+        let error = store.close_chain(&chain(&run)).await.unwrap_err();
+        assert_eq!(error.kind, StreamFailureKind::Unsupported);
+        // A topic close is a `CLOSE` record, which lands after the two copies.
+        store.close_topic(&chain(&run), "out").await.unwrap();
+        let read = store
+            .read(waiting_read(&run, Duration::ZERO))
+            .await
+            .unwrap();
+        assert_eq!(read.records.len(), 3);
         // A read after a position the log never held answers what follows, as a plain log does.
         let missing = StoreReadRequest {
             after_position: "1-0".to_string(),

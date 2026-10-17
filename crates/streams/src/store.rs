@@ -2,7 +2,7 @@ use crate::{
     StreamError, StreamResult,
     proto::{
         ChainId, DeleteOwnerRequest, DeleteOwnerResponse, StoreAppendRequest, StoreAppendResponse,
-        StoreLatestRequest, StoreLatestResponse, StoreReadRequest, StoreReadResponse,
+        StoreLatestRequest, StoreLatestResponse, StoreReadRequest, StoreReadResponse, StoredClose,
     },
 };
 use std::time::Duration;
@@ -172,6 +172,74 @@ fn unsupported<T>(what: &str) -> StreamResult<T> {
     Err(StreamError::unsupported(format!("this store can't {what}")))
 }
 
+/// The most bytes a close's outcome takes in the store, `closed_by` included. A store keeps it
+/// with the stream as it keeps a record, so it gets the bound one record gets.
+pub const MAX_CLOSE_BYTES: usize = 1536 * 1024;
+
+/// The floor holder that stands for the archive in a hot store. Readers can't use it, since a
+/// reader's release would end the archive's hold.
+pub const ARCHIVE_HOLDER: &str = "archive";
+
+/// The most live floor holders one topic keeps. Every append reads them all, and each pins
+/// records against retention, so one topic's readers can't fill the store.
+pub const MAX_FLOOR_HOLDERS: usize = 1_000;
+
+/// The result a stream closes with when its owner gave none: a `binary/null` payload, which every
+/// SDK's converter reads as no value. A payload with no encoding fails a caller that expects a
+/// typed result.
+pub fn empty_close_result() -> crate::proto::Payload {
+    crate::proto::Payload {
+        metadata: [("encoding".to_string(), b"binary/null".to_vec())].into(),
+        ..Default::default()
+    }
+}
+
+/// What a closed stream's waiters see: the readers and callbacks its notifier holds.
+// One is built per close, so the size of a failure doesn't matter.
+#[allow(clippy::large_enum_variant)]
+#[derive(Debug, Clone, PartialEq)]
+pub enum CloseOutcome {
+    /// The stream ended with this payload, after lang's codec.
+    Result(crate::proto::Payload),
+    /// The stream ended with this failure, or as canceled when it has canceled info.
+    Failure(temporalio_common::protos::temporal::api::failure::v1::Failure),
+}
+
+impl CloseOutcome {
+    /// The result, or `None` for a failure.
+    pub fn result(&self) -> Option<crate::proto::Payload> {
+        match self {
+            CloseOutcome::Result(result) => Some(result.clone()),
+            CloseOutcome::Failure(_) => None,
+        }
+    }
+
+    /// What the waiters of a stream closed with `close` see. A close with no outcome gives them
+    /// [empty_close_result].
+    pub fn of(close: &StoredClose) -> Self {
+        match (&close.failure, &close.result) {
+            (Some(failure), _) => CloseOutcome::Failure(failure.clone()),
+            (None, Some(result)) => CloseOutcome::Result(result.clone()),
+            (None, None) => CloseOutcome::Result(empty_close_result()),
+        }
+    }
+}
+
+impl From<CloseOutcome> for StoredClose {
+    fn from(outcome: CloseOutcome) -> Self {
+        match outcome {
+            CloseOutcome::Result(result) => StoredClose {
+                result: Some(result),
+                ..Default::default()
+            },
+            CloseOutcome::Failure(failure) => StoredClose {
+                failure: Some(failure),
+                ..Default::default()
+            },
+        }
+    }
+}
+
 /// A store that holds streams, keyed by their owner's run chain.
 ///
 /// A store moves serialized `temporal.sdk.streams.v1.StreamRecord`s with encoded bodies and deals
@@ -252,9 +320,29 @@ pub trait StreamStore: Send + Sync {
     }
 
     /// Marks one topic of a chain closed, like [StreamStore::close_chain] for that topic alone.
+    /// A store without producer state appends a `CLOSE` record instead, which ends every read
+    /// there but refuses no append.
     async fn close_topic(&self, chain: &ChainId, topic: &str) -> StreamResult<()> {
-        let _ = (chain, topic);
-        unsupported("keep close flags")
+        crate::close::write_close(self, chain, topic, &StoredClose::default()).await
+    }
+
+    /// Like [StreamStore::close_topic], with the close's outcome and who closed it. A store that
+    /// keeps the outcome keeps the topic's first close only, and a read of the closed topic
+    /// answers it. Answers the close the store keeps, so a wrapper tells the stream's notifier the
+    /// same close a reader sees. A store that keeps none answers `close`. Without producer state
+    /// the `CLOSE` record carries the outcome, and the first record wins for every reader.
+    async fn close_topic_with(
+        &self,
+        chain: &ChainId,
+        topic: &str,
+        close: StoredClose,
+    ) -> StreamResult<StoredClose> {
+        if self.capabilities().producer_state {
+            self.close_topic(chain, topic).await?;
+        } else {
+            crate::close::write_close(self, chain, topic, &close).await?;
+        }
+        Ok(close)
     }
 
     /// Drops the newest-batch record [StreamStore::append] keeps for one producer attempt on a
@@ -279,10 +367,95 @@ pub trait StreamStore: Send + Sync {
         unsupported("list the topics of a chain")
     }
 
-    /// Deletes every stream of one owner, across all its chains.
+    /// The topics that producers wrote on a Workflow Activity's chain, so the scheduling
+    /// Workflow's Core can close each one when the Activity ends. A topic enters the set with
+    /// every batch, and a topic that no producer wrote is not in it. Other
+    /// chains keep no set and answer empty. A store that keeps no set lists the chain's topics.
+    async fn written_topics(&self, chain: &ChainId) -> StreamResult<Vec<String>> {
+        self.list_topics(chain).await
+    }
+
+    /// Deletes every stream of one owner, across all its chains. A Workflow's delete also deletes
+    /// the streams of every Activity it scheduled.
     async fn delete_owner(&self, request: DeleteOwnerRequest) -> StreamResult<DeleteOwnerResponse> {
         let _ = request;
         unsupported("delete the streams of an owner")
+    }
+
+    /// Holds the records of a topic after `position` against retention for `holder`, a
+    /// positions-only reader that must find them again on replay. The store keeps the lowest
+    /// position a holder held, and renews the holder's lease. An empty position holds the whole
+    /// topic. A store that can't hold refuses, so a positions-only read fails at once and not
+    /// at replay. A new holder past [MAX_FLOOR_HOLDERS] live ones on the topic is refused.
+    async fn hold_floor(
+        &self,
+        chain: &ChainId,
+        topic: &str,
+        holder: &str,
+        position: &str,
+    ) -> StreamResult<()> {
+        let _ = (chain, topic, holder, position);
+        Err(crate::StreamError::unsupported(
+            "this store can't hold records for a positions-only reader",
+        ))
+    }
+
+    /// Ends `holder`'s hold after the store's release grace, so a replay right after the reader
+    /// ended still finds its records. A holder the store doesn't know is no failure.
+    async fn release_floor(&self, chain: &ChainId, topic: &str, holder: &str) -> StreamResult<()> {
+        let _ = (chain, topic, holder);
+        Err(crate::StreamError::unsupported(
+            "this store can't hold records for a positions-only reader",
+        ))
+    }
+
+    /// Moves the archive's hold on a topic to `position`, once the archive holds every record up
+    /// to it. Unlike [StreamStore::hold_floor], this hold moves forward, so retention drops only
+    /// what the archive holds. It also renews the archive's lease, and [StreamStore::archived]
+    /// answers `position` from then on. A store with no archive hold refuses.
+    async fn advance_archive(
+        &self,
+        chain: &ChainId,
+        topic: &str,
+        position: &str,
+    ) -> StreamResult<()> {
+        let _ = (chain, topic, position);
+        Err(crate::StreamError::unsupported(
+            "this store keeps no archive hold",
+        ))
+    }
+
+    /// The newest position the archive holds for a topic, as [StreamStore::advance_archive] last
+    /// set it, or empty when the archive holds none yet. `None` when the store knows nothing of
+    /// the topic, or keeps no archive hold.
+    async fn archived(&self, chain: &ChainId, topic: &str) -> StreamResult<Option<String>> {
+        let _ = (chain, topic);
+        Ok(None)
+    }
+
+    /// Closes one topic of a chain in the store, then tells the topic's notifier on the server,
+    /// which completes every attached callback with the outcome. The store closes first, so a
+    /// reader the completion reaches always finds the stream's end. A store that sends no
+    /// notifications only closes the topic. Fails as refused when the server will never take the
+    /// close, and with another kind when trying again may help.
+    async fn close_stream(
+        &self,
+        chain: &ChainId,
+        topic: &str,
+        close: StoredClose,
+    ) -> StreamResult<()> {
+        self.close_topic_with(chain, topic, close).await.map(drop)
+    }
+
+    /// Waits until the notifications this store sent are out. A store that sends none returns at
+    /// once.
+    async fn flush_notifications(&self) {}
+
+    /// The store's notification log, when each append writes an entry to it in the same step.
+    /// Producers then send no notifications and a driver reads the log. A store without one
+    /// keeps the default, and each producer notifies after its append.
+    fn notification_log(&self) -> Option<std::sync::Arc<dyn crate::NotificationLog>> {
+        None
     }
 }
 

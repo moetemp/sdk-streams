@@ -18,12 +18,10 @@ use std::{
     },
     time::Duration,
 };
-use temporalio_common::protos::temporal::api::{
-    common::v1::Payload, enums::v1::WorkflowExecutionStatus,
-};
+use temporalio_common::protos::temporal::api::common::v1::Payload;
 use temporalio_streams::{
-    OwnerClient, OwnerDescription, OwnerError, ReadTarget, RedisStore, RedisStoreOptions,
-    StreamStore, Streams, StreamsOptions, mint_cursor,
+    OwnerClient, OwnerDescription, OwnerError, OwnerId, OwnerStatus, ReadTarget, RedisStore,
+    RedisStoreOptions, StreamStore, Streams, StreamsOptions, mint_cursor,
     proto::{
         AppendRecord, AppendRequest, ChainId, NamedProducer, ReadRequest, StoreAppendRequest,
         StreamAddress, StreamFailureKind, StreamOwnerKind, StreamRecordKind,
@@ -104,6 +102,7 @@ impl Both {
             namespace: NAMESPACE.to_string(),
             workflow_id: self.workflow_id.clone(),
             first_run_id: FIRST_RUN.to_string(),
+            ..Default::default()
         }
     }
 
@@ -194,6 +193,7 @@ fn json_record(value: &Value) -> AppendRecord {
         kind: StreamRecordKind::Data as i32,
         content_hash: Sha256::digest(payload.encode_to_vec()).to_vec(),
         body: Some(payload),
+        ..Default::default()
     }
 }
 
@@ -271,13 +271,13 @@ impl OwnerClient for Running {
     async fn describe(
         &self,
         _namespace: &str,
-        _workflow_id: &str,
+        _owner: OwnerId<'_>,
         _run_id: &str,
     ) -> Result<OwnerDescription, OwnerError> {
         Ok(OwnerDescription {
             run_id: FIRST_RUN.to_string(),
             first_run_id: FIRST_RUN.to_string(),
-            status: WorkflowExecutionStatus::Running,
+            status: OwnerStatus::Running,
         })
     }
 }
@@ -303,6 +303,7 @@ impl Both {
                 workflow_id: self.workflow_id.clone(),
                 run_id: String::new(),
                 topic: "events".to_string(),
+                ..Default::default()
             }),
             producer: Some(Producer::Named(NamedProducer {
                 producer_id: "p".to_string(),

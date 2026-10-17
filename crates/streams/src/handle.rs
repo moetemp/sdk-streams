@@ -4,18 +4,19 @@
 //! where the contract says so, and mints and checks cursors. Stores only move records.
 
 use crate::{
-    BEGINNING, END, ReadTarget, StreamError, StreamResult, StreamStore, WORKFLOW_OWNER_KIND,
-    activity_producer_id, append_batch, check_append_digest, check_store_limits, close_topic,
-    mint_cursor,
-    owner::{OwnerClient, OwnerDescription, OwnerError},
+    BEGINNING, END, MAX_CLOSE_BYTES, ReadTarget, StreamError, StreamResult, StreamStore,
+    activity_attempt, activity_producer_id, append_batch, chain_owner, check_append_digest,
+    check_store_limits, close_topic, cursor_position, mint_cursor,
+    owner::{OwnerClient, OwnerDescription, OwnerError, OwnerId, OwnerStatus},
     proto::{
         ActivityProducer, AppendRequest, AppendResponse, ChainId, CloseRequest, CloseResponse,
         DeleteOwnerRequest, DeleteOwnerResponse, LatestRequest, LatestResponse, NamedProducer,
-        ReadRequest, ReadResponse, RetireProducerRequest, RetireProducerResponse,
-        StoreAppendRequest, StoreLatestRequest, StreamAddress, StreamFailureKind, StreamOwnerKind,
-        append_request, retire_producer_request,
+        ReadRangeRequest, ReadRequest, ReadResponse, ReleaseFloorRequest, ReleaseFloorResponse,
+        RetireProducerRequest, RetireProducerResponse, StoreAppendRequest, StoreLatestRequest,
+        StoredClose, StreamAddress, StreamFailureKind, StreamOwnerKind, append_request,
+        read_record, retire_producer_request,
     },
-    reader::{ReadState, read_with},
+    reader::{ReadState, read_bounded, read_with},
     stored_append_record, stream_hash,
 };
 use prost::Message;
@@ -24,8 +25,23 @@ use std::{
     sync::{Arc, Mutex},
     time::Duration,
 };
-use temporalio_common::protos::temporal::api::enums::v1::WorkflowExecutionStatus;
 use tokio::time::Instant;
+
+/// The longest `floor_holder` a read takes.
+const MAX_FLOOR_HOLDER_BYTES: usize = 512;
+
+/// A reader that named itself as the archive could end the archive's hold.
+fn refuse_archive_holder(holder: &str) -> StreamResult<()> {
+    if holder == crate::ARCHIVE_HOLDER {
+        return Err(StreamError::invalid_argument(format!(
+            "the floor holder {holder:?} is the archive's"
+        )));
+    }
+    Ok(())
+}
+
+/// The longest `closed_by` a close takes.
+const MAX_CLOSED_BY_BYTES: usize = 256;
 
 /// The longest a producer writes without asking whether its owner's chain ended.
 pub const OWNER_RECHECK: Duration = Duration::from_secs(60);
@@ -73,11 +89,49 @@ impl StreamsOptions {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+enum Kind {
+    Workflow,
+    Activity,
+    WorkflowActivity,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 struct OwnerKey {
     namespace: String,
-    workflow_id: String,
+    kind: Kind,
+    /// The Workflow id, the standalone Activity id, or the Workflow that scheduled a Workflow
+    /// Activity.
+    id: String,
+    /// A Workflow Activity's id. Empty for other kinds.
+    activity_id: String,
+    /// The pinned run. A Workflow Activity always names its scheduling run.
     run_id: String,
+}
+
+impl OwnerKey {
+    fn owner(&self) -> OwnerId<'_> {
+        match self.kind {
+            Kind::Workflow => OwnerId::Workflow(&self.id),
+            Kind::Activity => OwnerId::Activity(&self.id),
+            Kind::WorkflowActivity => OwnerId::WorkflowActivity {
+                workflow_id: &self.id,
+                activity_id: &self.activity_id,
+            },
+        }
+    }
+
+    /// The owner as error texts name it.
+    fn label(&self) -> String {
+        match self.kind {
+            Kind::Workflow => format!("Workflow {:?}", self.id),
+            Kind::Activity => format!("Activity {:?}", self.id),
+            Kind::WorkflowActivity => format!(
+                "Activity {:?} of run {:?} of Workflow {:?}",
+                self.activity_id, self.run_id, self.id
+            ),
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
@@ -88,31 +142,35 @@ struct ProducerKey {
 }
 
 #[derive(Debug, Clone)]
-struct Checked {
-    first_run_id: String,
+pub(crate) struct Checked {
+    pub(crate) first_run_id: String,
     at: Instant,
 }
 
 /// Remembers when each key was last checked, forgetting the oldest when full.
 #[derive(Debug)]
-struct Remembered<K> {
+pub(crate) struct Remembered<K> {
     entries: Mutex<HashMap<K, Checked>>,
     limit: usize,
 }
 
 impl<K: std::hash::Hash + Eq + Clone> Remembered<K> {
-    fn new(limit: usize) -> Self {
+    pub(crate) fn new(limit: usize) -> Self {
         Self {
             entries: Mutex::default(),
             limit: limit.max(1),
         }
     }
 
-    fn get(&self, key: &K) -> Option<Checked> {
+    pub(crate) fn get(&self, key: &K) -> Option<Checked> {
         self.entries.lock().unwrap().get(key).cloned()
     }
 
-    fn put(&self, key: K, first_run_id: &str, fresh_for: Duration) {
+    pub(crate) fn forget(&self, key: &K) {
+        self.entries.lock().unwrap().remove(key);
+    }
+
+    pub(crate) fn put(&self, key: K, first_run_id: &str, fresh_for: Duration) {
         let mut entries = self.entries.lock().unwrap();
         if entries.len() >= self.limit && !entries.contains_key(&key) {
             entries.retain(|_, checked| checked.at.elapsed() < fresh_for);
@@ -132,10 +190,6 @@ impl<K: std::hash::Hash + Eq + Clone> Remembered<K> {
                 at: Instant::now(),
             },
         );
-    }
-
-    fn forget(&self, key: &K) {
-        self.entries.lock().unwrap().remove(key);
     }
 }
 
@@ -193,10 +247,11 @@ impl Streams {
     /// Appends one batch for one producer attempt.
     ///
     /// The first batch for an owner, and the first after [StreamsOptions::owner_recheck], asks
-    /// whether the owner's chain ended. All producers of the owner share that check. If it did,
-    /// or Temporal no longer holds the owner, or a new chain took the Workflow id, the producer
-    /// closes the chain, or its own topic on a store without close flags, and the batch is
-    /// refused as closed.
+    /// whether the owner's chain ended. All producers of the owner share that check. If it did, or
+    /// Temporal no longer holds the owner, or a new chain took the owner id, the producer closes
+    /// the chain, or its own topic on a store without close flags, and the batch is refused as
+    /// closed. A standalone Activity run is a chain of one run, so a new run of the Activity id
+    /// ends the earlier run's streams.
     pub async fn append(&self, request: AppendRequest) -> StreamResult<AppendResponse> {
         let stream = address(request.stream.as_ref())?;
         let (producer_id, attempt) = match &request.producer {
@@ -276,7 +331,8 @@ impl Streams {
     /// the interval over. So many readers parked on a quiet stream don't load the server. Once
     /// the owner ended, or the store marked the stream closed, the read delivers what is left
     /// and answers `done`. A read pinned to a run ends when that run closes, even if the chain
-    /// continued as new. A read whose owner Temporal doesn't know yet answers empty within
+    /// continued as new. An empty answer carries the notification counter of its position as
+    /// `wake_after`. A read whose owner Temporal doesn't know yet answers empty within
     /// [StreamsOptions::owner_start_grace], so it can start before its owner does.
     pub async fn read(&self, request: ReadRequest) -> StreamResult<ReadResponse> {
         let stream = address(request.stream.as_ref())?;
@@ -307,8 +363,13 @@ impl Streams {
             topic: stream.topic.clone(),
             stream_hash: self.hash(stream),
         };
+        if !request.floor_holder.is_empty() {
+            self.hold_floor(&target, &request.after, &request.floor_holder)
+                .await?;
+        }
         let minimum = self.options.owner_check_min;
         let mut page_request = request.clone();
+        let mut topic_close = None;
         let response = loop {
             let now = unix_ms();
             if state.check_interval_ms == 0 {
@@ -323,8 +384,11 @@ impl Streams {
                 remaining.min(until_check)
             };
             page_request.wait = wait.try_into().ok();
-            let (mut page, closed) =
+            let (mut page, closed, close) =
                 read_with(&*self.store, &target, &page_request, &mut state).await?;
+            if close.is_some() {
+                topic_close = close;
+            }
             page_request.after = page.cursor.clone();
             if !page.records.is_empty() {
                 state.check_interval_ms = millis(minimum);
@@ -338,10 +402,18 @@ impl Streams {
             }
             if state.owner_ended {
                 page.done = true;
+                page.wake_after = 0;
+                // A reader can reach the end before a close wake does, so the end carries what the
+                // stream closed with.
+                if let Some(close) = topic_close.take() {
+                    page.close_result = close.result;
+                    page.close_failure = close.failure;
+                    page.closed_by = close.closed_by;
+                }
                 break page;
             }
             if unix_ms() >= state.next_check_ms {
-                state.owner_ended = self.owner_ended(stream, &target.chain).await?;
+                state.owner_ended = self.owner_ended(stream, &target.chain, &mut state).await?;
                 state.check_interval_ms = (state.check_interval_ms * 2)
                     .clamp(millis(minimum), millis(self.options.owner_check_max));
                 state.next_check_ms = unix_ms() + state.check_interval_ms;
@@ -359,6 +431,237 @@ impl Streams {
             state: state.encode_to_vec(),
             ..response
         })
+    }
+
+    /// Holds the records after `after` against retention for `holder`, a positions-only reader.
+    /// A store that can't hold serves the reader only when it declares a replay horizon, and
+    /// refuses it otherwise, so the read fails at once and not at replay.
+    async fn hold_floor(&self, target: &ReadTarget, after: &str, holder: &str) -> StreamResult<()> {
+        let capabilities = self.store.capabilities();
+        if !capabilities.holds {
+            if capabilities.replay_horizon.is_some() {
+                return Ok(());
+            }
+            return Err(StreamError::unsupported(
+                "a positions-only read needs a store that holds records for a replay or declares \
+                 a replay horizon, and this store does neither",
+            ));
+        }
+        if holder.len() > MAX_FLOOR_HOLDER_BYTES {
+            return Err(StreamError::invalid_argument(format!(
+                "a floor holder is at most {MAX_FLOOR_HOLDER_BYTES} bytes, not {}",
+                holder.len()
+            )));
+        }
+        refuse_archive_holder(holder)?;
+        let position = if after == END {
+            self.store
+                .latest(StoreLatestRequest {
+                    chain: Some(target.chain.clone()),
+                    topic: target.topic.clone(),
+                })
+                .await?
+                .position
+        } else {
+            cursor_position(after, self.store.name(), &target.stream_hash)?
+                .unwrap_or_default()
+                .to_string()
+        };
+        self.store
+            .hold_floor(&target.chain, &target.topic, holder, &position)
+            .await
+    }
+
+    /// Reads again the exact range of an earlier answer and checks it against that answer's
+    /// digest (RR-2). It runs the read that the answer came from, with the same input state and
+    /// the start that read found, so it gives the same supersessions and stale marks, and it waits
+    /// for nothing and checks no owner. Records with other content fail as a mismatch. Records the store no longer holds
+    /// fail as lost (REC-01).
+    pub async fn read_range(&self, request: ReadRangeRequest) -> StreamResult<ReadResponse> {
+        let stream = address(request.stream.as_ref())?;
+        if request.chain_first_run_id.is_empty() {
+            return Err(StreamError::invalid_argument(
+                "a replay read needs the chain its read read",
+            ));
+        }
+        if request.after == END {
+            return Err(StreamError::invalid_argument(
+                "a replay read starts at the read's resolved start_cursor, not at $end",
+            ));
+        }
+        let mut state = ReadState::decode_from(&request.state)?;
+        if state.first_run_id.is_empty() {
+            state.first_run_id = request.chain_first_run_id.clone();
+        }
+        if request.start_from_end {
+            state.started = true;
+        }
+        let target = ReadTarget {
+            chain: chain_of(stream, &request.chain_first_run_id),
+            topic: stream.topic.clone(),
+            stream_hash: self.hash(stream),
+        };
+        if !request.floor_holder.is_empty() {
+            self.hold_floor(&target, &request.after, &request.floor_holder)
+                .await?;
+        }
+        let expected = request.stored_records as usize;
+        let lost = |message: String| {
+            StreamError::new(
+                StreamFailureKind::ReplayRangeLost,
+                format!("REC-01: {message}"),
+            )
+        };
+        let mismatch =
+            |message: String| StreamError::new(StreamFailureKind::ReplayMismatch, message);
+        let page = if expected == 0 {
+            ReadResponse {
+                cursor: request.after.clone(),
+                records_digest: crate::reader::records_digest(&[]),
+                chain_first_run_id: request.chain_first_run_id.clone(),
+                start_cursor: request.after.clone(),
+                ..Default::default()
+            }
+        } else {
+            // Up to the recorded end, not a record count, since copies and control records the
+            // read dropped can put the store's page edges elsewhere.
+            let mut records = vec![];
+            let mut after = request.after.clone();
+            let mut start_cursor = None;
+            loop {
+                let page_request = ReadRequest {
+                    stream: Some(stream.clone()),
+                    after: after.clone(),
+                    max_records: request.stored_records.max(1),
+                    ..Default::default()
+                };
+                let page = match read_bounded(
+                    &*self.store,
+                    &target,
+                    &page_request,
+                    &mut state,
+                    Some(&request.to),
+                )
+                .await
+                {
+                    Ok((page, _, _)) => page,
+                    Err(error)
+                        if matches!(
+                            error.kind,
+                            StreamFailureKind::Expired | StreamFailureKind::NotFound
+                        ) =>
+                    {
+                        return Err(lost(error.message));
+                    }
+                    Err(error) => return Err(error),
+                };
+                start_cursor.get_or_insert(page.start_cursor);
+                let moved = page.cursor != after;
+                records.extend(page.records);
+                after = page.cursor;
+                let stored = records
+                    .iter()
+                    .filter(|record| matches!(record.record, Some(read_record::Record::Stored(_))))
+                    .count();
+                if after == request.to || !moved || stored > expected {
+                    break;
+                }
+            }
+            ReadResponse {
+                cursor: after,
+                records_digest: crate::reader::records_digest(&records),
+                records,
+                chain_first_run_id: request.chain_first_run_id.clone(),
+                start_cursor: start_cursor.unwrap_or_default(),
+                ..Default::default()
+            }
+        };
+        let stored = page
+            .records
+            .iter()
+            .filter(|record| matches!(record.record, Some(read_record::Record::Stored(_))))
+            .count();
+        if stored < expected {
+            return Err(lost(format!(
+                "the store holds {stored} of the {expected} records after {:?} that the read got",
+                request.after
+            )));
+        }
+        if stored > expected
+            || page.cursor != request.to
+            || page.records_digest != request.records_digest
+        {
+            // A read from the beginning has no position to check, so a trim since the read shows
+            // as other records, which end elsewhere or differ.
+            if request.after.is_empty()
+                && self
+                    .store
+                    .dropped_after(&target.chain, &target.topic, "")
+                    .await?
+                    .is_some()
+            {
+                return Err(lost(
+                    "retention trimmed the start of the stream, which the read began at"
+                        .to_string(),
+                ));
+            }
+            // A store that replicates late can lose acked records in a failover. The record the
+            // read ended at is gone then, and records written since read as other records.
+            if let Some(end) = cursor_position(&request.to, self.store.name(), &target.stream_hash)?
+                && self
+                    .store
+                    .record_at(&target.chain, &target.topic, end)
+                    .await?
+                    .is_none()
+            {
+                return Err(lost(format!(
+                    "the store no longer holds the record at {:?} that the read ended at",
+                    request.to
+                )));
+            }
+            if stored > expected {
+                return Err(mismatch(format!(
+                    "the replayed read holds {stored} records up to {:?}, not the {expected} the \
+                     read got",
+                    request.to
+                )));
+            }
+            if page.cursor != request.to {
+                return Err(mismatch(format!(
+                    "the replayed read ends at {:?}, not at {:?}",
+                    page.cursor, request.to
+                )));
+            }
+            return Err(mismatch(
+                "the replayed records differ from the records the read got".to_string(),
+            ));
+        }
+        Ok(ReadResponse {
+            state: state.encode_to_vec(),
+            ..page
+        })
+    }
+
+    /// Ends a positions-only reader's hold after the store's release grace.
+    pub async fn release_floor(
+        &self,
+        request: ReleaseFloorRequest,
+    ) -> StreamResult<ReleaseFloorResponse> {
+        let stream = address(request.stream.as_ref())?;
+        if request.chain_first_run_id.is_empty() || request.floor_holder.is_empty() {
+            return Err(StreamError::invalid_argument(
+                "a release needs the chain and the floor holder",
+            ));
+        }
+        refuse_archive_holder(&request.floor_holder)?;
+        self.store
+            .release_floor(
+                &chain_of(stream, &request.chain_first_run_id),
+                &stream.topic,
+                &request.floor_holder,
+            )
+            .await?;
+        Ok(ReleaseFloorResponse {})
     }
 
     /// The chain a read follows, or `None` when Temporal doesn't know its owner yet, within
@@ -398,18 +701,40 @@ impl Streams {
     }
 
     /// Whether the owner a read follows ended. Following the chain, a run that continued as
-    /// new is not the end, and a new chain on the Workflow id is. A reader only ends its own read,
-    /// so it needs no write access. Producers and the owner's Worker close the chain.
-    async fn owner_ended(&self, stream: &StreamAddress, chain: &ChainId) -> StreamResult<bool> {
+    /// new is not the end, and a new chain on the Workflow id is. A Workflow Activity that its
+    /// running run no longer lists as pending ends the read only after
+    /// [StreamsOptions::owner_start_grace] from the first check that found it so, since a
+    /// Workflow can write a link to the stream before the server takes the Activity's schedule.
+    /// A reader only ends its own read, so it needs no write access. Producers and the owner's
+    /// Worker close the chain.
+    async fn owner_ended(
+        &self,
+        stream: &StreamAddress,
+        chain: &ChainId,
+        state: &mut ReadState,
+    ) -> StreamResult<bool> {
         let key = owner_key(stream);
         match self.describe(&key, &key.run_id).await {
-            // The chain came from this Workflow, so History has since dropped it, or a failover
+            Ok(described) if key.kind == Kind::WorkflowActivity => match described.status {
+                OwnerStatus::Running => {
+                    state.owner_missing_since_ms = 0;
+                    Ok(false)
+                }
+                OwnerStatus::ActivityGone => {
+                    let now = unix_ms();
+                    if state.owner_missing_since_ms == 0 {
+                        state.owner_missing_since_ms = now;
+                    }
+                    let gone_for = now.saturating_sub(state.owner_missing_since_ms);
+                    Ok(gone_for >= millis(self.options.owner_start_grace))
+                }
+                OwnerStatus::ContinuedAsNew | OwnerStatus::Ended => Ok(true),
+            },
+            // The chain came from this owner, so Temporal has since dropped it, or a failover
             // hides it for a while.
             Err(OwnerError::NotFound(_)) => Ok(self.gone_for_good(chain)),
             Err(error) => Err(describe_failed(&error)),
-            Ok(described) if !key.run_id.is_empty() => {
-                Ok(described.status != WorkflowExecutionStatus::Running)
-            }
+            Ok(described) if !key.run_id.is_empty() => Ok(described.status != OwnerStatus::Running),
             Ok(latest) => Ok(latest.chain_ended() || latest.first_run_id != chain.first_run_id),
         }
     }
@@ -435,11 +760,46 @@ impl Streams {
     }
 
     /// Closes one stream, so reads end. With close flags, producers' new batches are refused.
-    /// Without them, a batch that lands after the close is one no reader delivers.
+    /// Without them, a batch that lands after the close is one no reader delivers. With a result
+    /// or a failure, the stream's notifier closes too, and fails the call when the server doesn't
+    /// take it, since the close completes every callback attached there.
     pub async fn close(&self, request: CloseRequest) -> StreamResult<CloseResponse> {
         let stream = address(request.stream.as_ref())?;
+        if request.result.is_some() && request.failure.is_some() {
+            return Err(StreamError::invalid_argument(
+                "a close carries a result or a failure, not both",
+            ));
+        }
+        if request.closed_by.len() > MAX_CLOSED_BY_BYTES {
+            return Err(StreamError::invalid_argument(format!(
+                "closed_by is at most {MAX_CLOSED_BY_BYTES} bytes, not {}",
+                request.closed_by.len()
+            )));
+        }
+        let has_outcome = request.result.is_some() || request.failure.is_some();
+        let close = StoredClose {
+            result: request.result,
+            failure: request.failure,
+            closed_by: request.closed_by,
+        };
+        if close.encoded_len() > MAX_CLOSE_BYTES {
+            return Err(StreamError::invalid_argument(format!(
+                "a close's outcome is at most {MAX_CLOSE_BYTES} bytes, not {}",
+                close.encoded_len()
+            )));
+        }
         let chain = self.chain(stream).await?;
-        close_topic(&*self.store, &chain, &stream.topic, "", 0).await?;
+        if has_outcome {
+            self.store
+                .close_stream(&chain, &stream.topic, close)
+                .await?
+        } else if self.store.capabilities().producer_state {
+            self.store
+                .close_topic_with(&chain, &stream.topic, close)
+                .await?;
+        } else {
+            close_topic(&*self.store, &chain, &stream.topic, &close.closed_by, 0).await?;
+        }
         Ok(CloseResponse {})
     }
 
@@ -488,22 +848,31 @@ impl Streams {
         &self,
         request: DeleteOwnerRequest,
     ) -> StreamResult<DeleteOwnerResponse> {
-        if request.owner_kind != StreamOwnerKind::Workflow as i32 {
-            return Err(StreamError::unsupported(format!(
-                "this release keeps streams of Workflows only, not owner kind {}",
-                request.owner_kind
-            )));
-        }
-        if request.namespace.is_empty() || request.workflow_id.is_empty() {
+        let (id, other) = match StreamOwnerKind::try_from(request.owner_kind) {
+            Ok(StreamOwnerKind::Workflow) => (&request.workflow_id, &request.activity_id),
+            Ok(StreamOwnerKind::Activity) => (&request.activity_id, &request.workflow_id),
+            Ok(StreamOwnerKind::WorkflowActivity) => {
+                return Err(StreamError::invalid_argument(
+                    "a Workflow Activity's streams go with its Workflow's delete",
+                ));
+            }
+            _ => return Err(unsupported_kind(request.owner_kind)),
+        };
+        if request.namespace.is_empty() || id.is_empty() {
             return Err(StreamError::invalid_argument(
-                "a delete needs the namespace and the owner's Workflow id",
+                "a delete needs the namespace and the owner's id of its kind",
+            ));
+        }
+        if !other.is_empty() {
+            return Err(StreamError::invalid_argument(
+                "a delete names the owner's id of its kind only",
             ));
         }
         self.store.delete_owner(request).await
     }
 
     /// The chain a producer writes on. A producer attempt stays on the chain it began on, and
-    /// is refused once a new chain took the Workflow id.
+    /// is refused once a new chain took the owner id.
     async fn producer_chain(&self, key: ProducerKey, writer: Writer<'_>) -> StreamResult<ChainId> {
         let chain = self.owner_chain(&key.owner, writer).await?;
         if let Some(began) = self.producers.get(&key)
@@ -527,15 +896,29 @@ impl Streams {
         {
             return Ok(chain_of_key(owner, &checked.first_run_id));
         }
-        let chain = if owner.run_id.is_empty() {
+        let chain = if owner.kind == Kind::WorkflowActivity {
+            // A Workflow Activity writes only while it runs, so a run that no longer lists it as
+            // pending refuses at once.
+            let chain = chain_of_key(owner, &owner.run_id);
+            match self.describe(owner, &owner.run_id).await {
+                Err(OwnerError::NotFound(_)) if known.is_some() => {
+                    return Err(self.closed(&chain, gone_text(owner), writer).await);
+                }
+                Err(error) => return Err(not_found(owner, error)),
+                Ok(described) if described.status != OwnerStatus::Running => {
+                    return Err(self.closed(&chain, "has ended", writer).await);
+                }
+                Ok(_) => chain,
+            }
+        } else if owner.run_id.is_empty() {
             // The latest run names the chain and tells whether it ended, in one call.
             let latest = self.describe(owner, "").await;
             if let (Err(OwnerError::NotFound(_)), Some(checked)) = (&latest, &known) {
-                // The chain came from this Workflow, so History has since dropped it.
+                // The chain came from this owner, so Temporal has since dropped it.
                 let gone = chain_of_key(owner, &checked.first_run_id);
                 return Err(self.gone(&gone, writer).await);
             }
-            let latest = latest.map_err(not_found)?;
+            let latest = latest.map_err(|error| not_found(owner, error))?;
             let chain = chain_of_key(owner, &first_run_id(owner, &latest)?);
             if latest.chain_ended() {
                 return Err(self.closed(&chain, "has closed", writer).await);
@@ -550,10 +933,10 @@ impl Streams {
             let pinned = self
                 .describe(owner, &owner.run_id)
                 .await
-                .map_err(not_found)?;
+                .map_err(|error| not_found(owner, error))?;
             let chain = chain_of_key(owner, &first_run_id(owner, &pinned)?);
             // A running run is its chain's latest, so it answers the end check too.
-            if pinned.status != WorkflowExecutionStatus::Running {
+            if pinned.status != OwnerStatus::Running {
                 self.refuse_if_ended(&chain, writer).await?;
             }
             chain
@@ -563,15 +946,11 @@ impl Streams {
     }
 
     /// Closes the chain and refuses when its latest run ended, when Temporal no longer holds it,
-    /// or when a new chain took its Workflow id.
+    /// or when a new chain took its owner id.
     async fn refuse_if_ended(&self, chain: &ChainId, writer: Writer<'_>) -> StreamResult<()> {
-        let key = OwnerKey {
-            namespace: chain.namespace.clone(),
-            workflow_id: chain.workflow_id.clone(),
-            run_id: String::new(),
-        };
+        let key = chain_owner_key(chain);
         match self.describe(&key, "").await {
-            // The chain came from this Workflow, so History has since dropped it.
+            // The chain came from this owner, so Temporal has since dropped it.
             Err(OwnerError::NotFound(_)) => Err(self.gone(chain, writer).await),
             Err(error) => Err(describe_failed(&error)),
             Ok(latest) if latest.chain_ended() || latest.first_run_id != chain.first_run_id => {
@@ -586,7 +965,8 @@ impl Streams {
     /// as a storage failure, which the caller retries.
     async fn gone(&self, chain: &ChainId, writer: Writer<'_>) -> StreamError {
         if self.gone_for_good(chain) {
-            self.closed(chain, "is gone from History", writer).await
+            self.closed(chain, gone_text(&chain_owner_key(chain)), writer)
+                .await
         } else {
             missing(chain)
         }
@@ -595,11 +975,7 @@ impl Streams {
     /// Whether Temporal answered that `chain`'s owner is gone twice, at least
     /// [StreamsOptions::owner_recheck] apart, with no answer that holds it in between.
     fn gone_for_good(&self, chain: &ChainId) -> bool {
-        let key = OwnerKey {
-            namespace: chain.namespace.clone(),
-            workflow_id: chain.workflow_id.clone(),
-            run_id: String::new(),
-        };
+        let key = chain_owner_key(chain);
         let recheck = self.options.owner_recheck;
         match self.missing.get(&key) {
             Some(seen) if seen.first_run_id == chain.first_run_id => seen.at.elapsed() >= recheck,
@@ -623,22 +999,43 @@ impl Streams {
             return error;
         }
         StreamError::closed(format!(
-            "the Workflow {:?} that owns this stream {how}",
-            chain.workflow_id
+            "the {} that owns this stream {how}",
+            chain_owner_key(chain).label()
         ))
     }
 
+    /// The run chain a checked stream address names now. A pinned run's chain comes from the
+    /// owner cache, since it never changes. The latest run's chain comes from a fresh describe,
+    /// for a caller that must not land on a chain that already ended.
+    pub(crate) async fn chain_now(&self, stream: &StreamAddress) -> StreamResult<ChainId> {
+        let key = owner_key(stream);
+        if !key.run_id.is_empty() {
+            return self.chain(stream).await;
+        }
+        let described = self
+            .describe(&key, "")
+            .await
+            .map_err(|error| not_found(&key, error))?;
+        let first_run_id = first_run_id(&key, &described)?;
+        self.chains
+            .put(key, &first_run_id, self.options.owner_recheck);
+        Ok(chain_of(stream, &first_run_id))
+    }
+
     /// The chain a stream address names now.
-    async fn chain(&self, stream: &StreamAddress) -> StreamResult<ChainId> {
+    pub(crate) async fn chain(&self, stream: &StreamAddress) -> StreamResult<ChainId> {
         let key = owner_key(stream);
         // A pinned run's chain never changes. The latest run's chain changes when a new chain
-        // takes the Workflow id.
+        // takes the owner id.
         if let Some(checked) = self.chains.get(&key)
             && (!key.run_id.is_empty() || checked.at.elapsed() < self.options.owner_recheck)
         {
             return Ok(chain_of(stream, &checked.first_run_id));
         }
-        let described = self.describe(&key, &key.run_id).await.map_err(not_found)?;
+        let described = self
+            .describe(&key, &key.run_id)
+            .await
+            .map_err(|error| not_found(&key, error))?;
         let first_run_id = first_run_id(&key, &described)?;
         self.chains
             .put(key, &first_run_id, self.options.owner_recheck);
@@ -652,49 +1049,108 @@ impl Streams {
     ) -> Result<OwnerDescription, OwnerError> {
         let described = self
             .owner
-            .describe(&owner.namespace, &owner.workflow_id, run_id)
+            .describe(&owner.namespace, owner.owner(), run_id)
             .await;
         if described.is_ok() {
             self.missing.forget(&OwnerKey {
-                namespace: owner.namespace.clone(),
-                workflow_id: owner.workflow_id.clone(),
                 run_id: String::new(),
+                ..owner.clone()
             });
         }
         described
     }
 
     fn hash(&self, stream: &StreamAddress) -> String {
-        stream_hash(
-            &stream.namespace,
-            WORKFLOW_OWNER_KIND,
-            &stream.workflow_id,
-            &stream.topic,
-        )
+        let chain = chain_of(stream, "");
+        let (kind, id) = chain_owner(&chain);
+        stream_hash(&stream.namespace, kind, &id, &stream.topic)
     }
 
     fn cursor(&self, stream: &StreamAddress, position: &str) -> String {
         mint_cursor(self.store.name(), &self.hash(stream), position)
     }
+
+    /// The notification counter and the cursor of the newest record of `stream` on `chain`, or
+    /// zero and an empty cursor when it holds none.
+    pub(crate) async fn newest(
+        &self,
+        stream: &StreamAddress,
+        chain: &ChainId,
+    ) -> StreamResult<(i64, String)> {
+        let position = self
+            .store
+            .latest(StoreLatestRequest {
+                chain: Some(chain.clone()),
+                topic: stream.topic.clone(),
+            })
+            .await?
+            .position;
+        if position.is_empty() {
+            return Ok((0, String::new()));
+        }
+        let counter = crate::progress_counter(&position).unwrap_or(0);
+        Ok((counter, self.cursor(stream, &position)))
+    }
 }
 
 /// The address of a stream this release keeps, checked.
-fn address(stream: Option<&StreamAddress>) -> StreamResult<&StreamAddress> {
+pub(crate) fn address(stream: Option<&StreamAddress>) -> StreamResult<&StreamAddress> {
     let stream =
         stream.ok_or_else(|| StreamError::invalid_argument("a stream call needs its stream"))?;
-    if stream.owner_kind != StreamOwnerKind::Workflow as i32 {
-        return Err(StreamError::unsupported(format!(
-            "this release keeps streams of Workflows only, not owner kind {}",
-            stream.owner_kind
-        )));
-    }
-    if stream.namespace.is_empty() || stream.workflow_id.is_empty() {
-        return Err(StreamError::invalid_argument(
-            "a stream needs its namespace and its owner's Workflow id",
-        ));
+    match StreamOwnerKind::try_from(stream.owner_kind) {
+        Ok(StreamOwnerKind::Workflow) => {
+            if stream.namespace.is_empty() || stream.workflow_id.is_empty() {
+                return Err(StreamError::invalid_argument(
+                    "a stream needs its namespace and its owner's Workflow id",
+                ));
+            }
+            if !stream.activity_id.is_empty() {
+                return Err(StreamError::invalid_argument(
+                    "a stream that a Workflow owns names no Activity id",
+                ));
+            }
+        }
+        Ok(StreamOwnerKind::Activity) => {
+            if stream.namespace.is_empty() || stream.activity_id.is_empty() {
+                return Err(StreamError::invalid_argument(
+                    "a stream needs its namespace and its owner's Activity id",
+                ));
+            }
+            if !stream.workflow_id.is_empty() {
+                return Err(StreamError::invalid_argument(
+                    "a stream that an Activity owns names no Workflow id",
+                ));
+            }
+        }
+        Ok(StreamOwnerKind::WorkflowActivity) => {
+            if stream.namespace.is_empty()
+                || stream.workflow_id.is_empty()
+                || stream.activity_id.is_empty()
+            {
+                return Err(StreamError::invalid_argument(
+                    "a stream that a Workflow Activity owns needs its namespace, its Workflow id \
+                     and its Activity id",
+                ));
+            }
+            if stream.run_id.is_empty() {
+                // An Activity id names nothing across runs, since ids such as `1` repeat after
+                // Continue-as-New.
+                return Err(StreamError::invalid_argument(
+                    "a stream that a Workflow Activity owns needs the run that scheduled it",
+                ));
+            }
+        }
+        _ => return Err(unsupported_kind(stream.owner_kind)),
     }
     check_topic(&stream.topic)?;
     Ok(stream)
+}
+
+fn unsupported_kind(owner_kind: i32) -> StreamError {
+    StreamError::unsupported(format!(
+        "this release keeps streams of Workflows, standalone Activities and Workflow Activities \
+         only, not owner kind {owner_kind}"
+    ))
 }
 
 /// Refuses a topic no store keys reliably, by the rules the Workflow publish also applies.
@@ -719,7 +1175,7 @@ fn producer(
             }
             (named.producer_id.clone(), named.attempt)
         }
-        (None, Some(activity)) => (activity_producer_id(activity), i64::from(activity.attempt)),
+        (None, Some(activity)) => (activity_producer_id(activity), activity_attempt(activity)?),
         (None, None) => return Err(StreamError::invalid_argument("a call needs its producer")),
     };
     if attempt < 1 {
@@ -767,44 +1223,113 @@ fn millis(duration: Duration) -> u64 {
     u64::try_from(duration.as_millis()).unwrap_or(u64::MAX)
 }
 
+fn kind_of(owner_kind: i32) -> Kind {
+    match StreamOwnerKind::try_from(owner_kind) {
+        Ok(StreamOwnerKind::Activity) => Kind::Activity,
+        Ok(StreamOwnerKind::WorkflowActivity) => Kind::WorkflowActivity,
+        _ => Kind::Workflow,
+    }
+}
+
 fn owner_key(stream: &StreamAddress) -> OwnerKey {
+    let kind = kind_of(stream.owner_kind);
+    let (id, activity_id) = match kind {
+        Kind::Workflow => (&stream.workflow_id, ""),
+        Kind::Activity => (&stream.activity_id, ""),
+        Kind::WorkflowActivity => (&stream.workflow_id, stream.activity_id.as_str()),
+    };
     OwnerKey {
         namespace: stream.namespace.clone(),
-        workflow_id: stream.workflow_id.clone(),
+        kind,
+        id: id.clone(),
+        activity_id: activity_id.to_string(),
         run_id: stream.run_id.clone(),
     }
 }
 
-fn chain_of(stream: &StreamAddress, first_run_id: &str) -> ChainId {
+/// The latest run of the owner of `chain`, or a Workflow Activity's scheduling run.
+fn chain_owner_key(chain: &ChainId) -> OwnerKey {
+    let kind = kind_of(chain.owner_kind);
+    let (id, activity_id, run_id) = match kind {
+        Kind::Workflow => (&chain.workflow_id, "", ""),
+        Kind::Activity => (&chain.activity_id, "", ""),
+        Kind::WorkflowActivity => (
+            &chain.workflow_id,
+            chain.activity_id.as_str(),
+            chain.first_run_id.as_str(),
+        ),
+    };
+    OwnerKey {
+        namespace: chain.namespace.clone(),
+        kind,
+        id: id.clone(),
+        activity_id: activity_id.to_string(),
+        run_id: run_id.to_string(),
+    }
+}
+
+/// The chain of `stream`'s owner that starts at `first_run_id`.
+pub(crate) fn chain_of(stream: &StreamAddress, first_run_id: &str) -> ChainId {
     chain_of_key(&owner_key(stream), first_run_id)
 }
 
 fn chain_of_key(owner: &OwnerKey, first_run_id: &str) -> ChainId {
-    ChainId {
-        namespace: owner.namespace.clone(),
-        workflow_id: owner.workflow_id.clone(),
-        first_run_id: first_run_id.to_string(),
+    // A Workflow chain keeps the kind unset, as every chain from before the Activity kind does,
+    // so the two compare equal.
+    match owner.kind {
+        Kind::Workflow => ChainId {
+            namespace: owner.namespace.clone(),
+            workflow_id: owner.id.clone(),
+            first_run_id: first_run_id.to_string(),
+            ..Default::default()
+        },
+        Kind::Activity => ChainId {
+            namespace: owner.namespace.clone(),
+            first_run_id: first_run_id.to_string(),
+            owner_kind: StreamOwnerKind::Activity as i32,
+            activity_id: owner.id.clone(),
+            ..Default::default()
+        },
+        // The scheduling run keys a Workflow Activity, whatever chain that run is in.
+        Kind::WorkflowActivity => ChainId {
+            namespace: owner.namespace.clone(),
+            workflow_id: owner.id.clone(),
+            first_run_id: owner.run_id.clone(),
+            owner_kind: StreamOwnerKind::WorkflowActivity as i32,
+            activity_id: owner.activity_id.clone(),
+        },
+    }
+}
+
+/// How a refusal says that Temporal no longer holds the owner.
+fn gone_text(owner: &OwnerKey) -> &'static str {
+    match owner.kind {
+        Kind::Activity => "is gone from Temporal",
+        Kind::Workflow | Kind::WorkflowActivity => "is gone from History",
     }
 }
 
 fn first_run_id(owner: &OwnerKey, described: &OwnerDescription) -> StreamResult<String> {
+    if owner.kind == Kind::WorkflowActivity {
+        return Ok(owner.run_id.clone());
+    }
     if described.first_run_id.is_empty() {
-        // The Workflow's own output is keyed by the chain's first run, so an empty one would
-        // split the stream in two without an error.
+        // The owner's own output is keyed by the chain's first run, so an empty one would split
+        // the stream in two without an error.
         return Err(StreamError::unsupported(format!(
-            "Temporal did not report the first run id of Workflow {:?}, which streams are \
-             keyed by",
-            owner.workflow_id
+            "Temporal did not report the first run id of {}, which streams are keyed by",
+            owner.label()
         )));
     }
     Ok(described.first_run_id.clone())
 }
 
-fn not_found(error: OwnerError) -> StreamError {
+fn not_found(owner: &OwnerKey, error: OwnerError) -> StreamError {
     match error {
         OwnerError::NotFound(message) => StreamError::not_found(format!(
-            "the Workflow that owns the stream was not found, and its stream is keyed by its \
-             run chain: {message}"
+            "the {} that owns the stream was not found, and its stream is keyed by its run \
+             chain: {message}",
+            owner.label()
         )),
         error => describe_failed(&error),
     }
@@ -812,9 +1337,9 @@ fn not_found(error: OwnerError) -> StreamError {
 
 fn missing(chain: &ChainId) -> StreamError {
     StreamError::storage(format!(
-        "Temporal doesn't hold the Workflow {:?} that owns this stream for now, so the call \
-         fails until it holds it again or answers the same after a recheck",
-        chain.workflow_id
+        "Temporal doesn't hold the owner {:?} of this stream for now, so the call fails until \
+         it holds it again or answers the same after a recheck",
+        chain_owner_key(chain).id
     ))
 }
 
@@ -838,14 +1363,18 @@ mod tests {
     use sha2::{Digest, Sha256};
     use std::sync::atomic::{AtomicUsize, Ordering};
     use temporalio_common::protos::temporal::api::{
-        common::v1::Payload, enums::v1::WorkflowExecutionStatus,
+        common::v1::Payload,
+        enums::v1::{ActivityExecutionStatus, WorkflowExecutionStatus},
     };
 
-    /// Temporal as the tests need it: the latest run of each Workflow id, and pinned runs.
+    /// Temporal as the tests need it: the latest run of each owner, and pinned runs. A Workflow
+    /// owner is keyed by its id, and an Activity owner by `activity/<id>`.
     #[derive(Default)]
     struct Owners {
         latest: Mutex<HashMap<String, Result<OwnerDescription, OwnerError>>>,
         runs: Mutex<HashMap<String, OwnerDescription>>,
+        /// The Activities each run lists as pending, by run id and Activity id.
+        pending: Mutex<std::collections::HashSet<(String, String)>>,
         describes: AtomicUsize,
     }
 
@@ -854,7 +1383,7 @@ mod tests {
             let described = OwnerDescription {
                 run_id: run_id.to_string(),
                 first_run_id: first_run_id.to_string(),
-                status: WorkflowExecutionStatus::Running,
+                status: OwnerStatus::Running,
             };
             self.runs
                 .lock()
@@ -866,8 +1395,28 @@ mod tests {
                 .insert(workflow_id.to_string(), Ok(described));
         }
 
+        /// Starts run `run_id` of Activity `activity_id`, which is its own chain.
+        fn activity_run(&self, activity_id: &str, run_id: &str) {
+            self.run(&format!("activity/{activity_id}"), run_id, run_id);
+        }
+
         fn end(&self, workflow_id: &str, status: WorkflowExecutionStatus) {
-            if let Some(Ok(latest)) = self.latest.lock().unwrap().get_mut(workflow_id) {
+            self.end_as(workflow_id, OwnerStatus::of_workflow(status));
+        }
+
+        fn end_activity(&self, activity_id: &str, status: ActivityExecutionStatus) {
+            let status = OwnerStatus::of_activity(status);
+            let key = format!("activity/{activity_id}");
+            if let Some(Ok(latest)) = self.latest.lock().unwrap().get(&key)
+                && let Some(run) = self.runs.lock().unwrap().get_mut(&latest.run_id)
+            {
+                run.status = status;
+            }
+            self.end_as(&key, status);
+        }
+
+        fn end_as(&self, key: &str, status: OwnerStatus) {
+            if let Some(Ok(latest)) = self.latest.lock().unwrap().get_mut(key) {
                 latest.status = status;
             }
         }
@@ -882,6 +1431,17 @@ mod tests {
         fn describes(&self) -> usize {
             self.describes.load(Ordering::Relaxed)
         }
+
+        /// Sets whether run `run_id` lists Activity `activity_id` as pending.
+        fn pending(&self, run_id: &str, activity_id: &str, pending: bool) {
+            let key = (run_id.to_string(), activity_id.to_string());
+            let mut all = self.pending.lock().unwrap();
+            if pending {
+                all.insert(key);
+            } else {
+                all.remove(&key);
+            }
+        }
     }
 
     #[async_trait::async_trait]
@@ -889,10 +1449,34 @@ mod tests {
         async fn describe(
             &self,
             _namespace: &str,
-            workflow_id: &str,
+            owner: OwnerId<'_>,
             run_id: &str,
         ) -> Result<OwnerDescription, OwnerError> {
             self.describes.fetch_add(1, Ordering::Relaxed);
+            let workflow_id = &match owner {
+                OwnerId::Workflow(id) => id.to_string(),
+                OwnerId::Activity(id) => format!("activity/{id}"),
+                OwnerId::WorkflowActivity { activity_id, .. } => {
+                    let run = self
+                        .runs
+                        .lock()
+                        .unwrap()
+                        .get(run_id)
+                        .cloned()
+                        .ok_or_else(|| OwnerError::NotFound(run_id.to_string()))?;
+                    let pending = self
+                        .pending
+                        .lock()
+                        .unwrap()
+                        .contains(&(run_id.to_string(), activity_id.to_string()));
+                    let status = match run.status {
+                        OwnerStatus::Running if pending => OwnerStatus::Running,
+                        OwnerStatus::Running => OwnerStatus::ActivityGone,
+                        _ => OwnerStatus::Ended,
+                    };
+                    return Ok(OwnerDescription { status, ..run });
+                }
+            };
             if !run_id.is_empty() {
                 return self
                     .runs
@@ -948,6 +1532,7 @@ mod tests {
             workflow_id: "wf".to_string(),
             run_id: String::new(),
             topic: topic.to_string(),
+            ..Default::default()
         }
     }
 
@@ -959,6 +1544,7 @@ mod tests {
                 ..Default::default()
             }),
             content_hash: Sha256::digest(value.as_bytes()).to_vec(),
+            ..Default::default()
         }
     }
 
@@ -980,6 +1566,7 @@ mod tests {
             namespace: "ns".to_string(),
             workflow_id: "wf".to_string(),
             first_run_id: first_run_id.to_string(),
+            ..Default::default()
         }
     }
 
@@ -1043,6 +1630,7 @@ mod tests {
             run_id: "run-1".to_string(),
             activity_id: "fetch".to_string(),
             attempt: 2,
+            ..Default::default()
         }));
         setup.streams.append(request).await.unwrap();
         let read = setup
@@ -1384,15 +1972,35 @@ mod tests {
             OwnerDescription {
                 run_id: String::new(),
                 first_run_id: String::new(),
-                status,
+                status: OwnerStatus::of_workflow(status),
             }
             .chain_ended()
         };
         for status in [Completed, Failed, Canceled, Terminated, TimedOut] {
             assert!(ended(status), "{status:?}");
         }
-        for status in [Running, ContinuedAsNew, Unspecified] {
+        for status in [Running, ContinuedAsNew, Unspecified, Paused] {
             assert!(!ended(status), "{status:?}");
+        }
+        assert_eq!(OwnerStatus::of_workflow(Paused), OwnerStatus::Running);
+    }
+
+    #[test]
+    fn only_a_terminal_activity_status_ends_its_run() {
+        use ActivityExecutionStatus::*;
+        for status in [Completed, Failed, Canceled, Terminated, TimedOut] {
+            assert_eq!(
+                OwnerStatus::of_activity(status),
+                OwnerStatus::Ended,
+                "{status:?}"
+            );
+        }
+        for status in [Running, Paused, Unspecified] {
+            assert_eq!(
+                OwnerStatus::of_activity(status),
+                OwnerStatus::Running,
+                "{status:?}"
+            );
         }
     }
 
@@ -1451,6 +2059,9 @@ mod tests {
             .streams
             .close(CloseRequest {
                 stream: Some(stream("out")),
+                result: None,
+                failure: None,
+                closed_by: Default::default(),
             })
             .await
             .unwrap();
@@ -1489,6 +2100,7 @@ mod tests {
             .streams
             .close(CloseRequest {
                 stream: Some(stream("out")),
+                ..Default::default()
             })
             .await
             .unwrap();
@@ -1569,6 +2181,7 @@ mod tests {
             .streams
             .close(CloseRequest {
                 stream: Some(stream("out")),
+                ..Default::default()
             })
             .await
             .unwrap();
@@ -1733,6 +2346,495 @@ mod tests {
         panic!("the read never ended");
     }
 
+    fn gave_up() -> temporalio_common::protos::temporal::api::failure::v1::Failure {
+        temporalio_common::protos::temporal::api::failure::v1::Failure {
+            message: "the agent gave up".to_string(),
+            ..Default::default()
+        }
+    }
+
+    #[tokio::test]
+    async fn a_reader_that_reaches_the_end_sees_the_first_close() {
+        let setup = setup(quick());
+        setup.streams.append(append("p", 1, "1")).await.unwrap();
+        setup
+            .streams
+            .close(CloseRequest {
+                stream: Some(stream("out")),
+                failure: Some(gave_up()),
+                closed_by: "run-1".to_string(),
+                ..Default::default()
+            })
+            .await
+            .unwrap();
+        setup
+            .streams
+            .close(CloseRequest {
+                stream: Some(stream("out")),
+                closed_by: "run-2".to_string(),
+                ..Default::default()
+            })
+            .await
+            .unwrap();
+        let (delivered, end) = read_to_end(&setup.streams, Duration::from_millis(50)).await;
+        assert_eq!(delivered, 1);
+        assert!(end.done);
+        assert_eq!(end.close_failure, Some(gave_up()));
+        assert_eq!(end.close_result, None);
+        assert_eq!(end.closed_by, "run-1", "the first close stays");
+        let refused = setup.streams.append(append("q", 1, "2")).await.unwrap_err();
+        assert_eq!(refused.kind, StreamFailureKind::Closed);
+        assert_eq!(refused.closed_by.as_deref(), Some("run-1"));
+    }
+
+    #[tokio::test]
+    async fn a_reader_whose_owner_ended_with_no_close_sees_no_outcome() {
+        let setup = setup(quick());
+        setup.streams.append(append("p", 1, "1")).await.unwrap();
+        setup.owners.end("wf", WorkflowExecutionStatus::Completed);
+        let (_, end) = read_to_end(&setup.streams, Duration::from_millis(50)).await;
+        assert!(end.done);
+        assert_eq!(
+            (end.close_result, end.close_failure, end.closed_by.as_str()),
+            (None, None, "")
+        );
+    }
+
+    #[tokio::test]
+    async fn a_close_too_large_to_keep_is_refused_and_closes_nothing() {
+        let setup = setup(quick());
+        for close in [
+            CloseRequest {
+                stream: Some(stream("out")),
+                closed_by: "x".repeat(MAX_CLOSED_BY_BYTES + 1),
+                ..Default::default()
+            },
+            CloseRequest {
+                stream: Some(stream("out")),
+                result: Some(Payload {
+                    data: vec![0; MAX_CLOSE_BYTES],
+                    ..Default::default()
+                }),
+                ..Default::default()
+            },
+        ] {
+            let error = setup.streams.close(close).await.unwrap_err();
+            assert_eq!(error.kind, StreamFailureKind::InvalidArgument);
+        }
+        setup.streams.append(append("p", 1, "1")).await.unwrap();
+    }
+
+    /// The replay read that repeats the live `read` of `request` that answered `page`.
+    fn replay_of(request: &ReadRequest, page: &ReadResponse) -> ReadRangeRequest {
+        ReadRangeRequest {
+            stream: Some(stream("out")),
+            chain_first_run_id: page.chain_first_run_id.clone(),
+            after: page.start_cursor.clone(),
+            to: page.cursor.clone(),
+            stored_records: page
+                .records
+                .iter()
+                .filter(|r| matches!(r.record, Some(read_record::Record::Stored(_))))
+                .count() as u32,
+            state: request.state.clone(),
+            records_digest: page.records_digest.clone(),
+            floor_holder: String::new(),
+            start_from_end: request.after == crate::END,
+        }
+    }
+
+    #[tokio::test]
+    async fn a_replay_reads_to_the_recorded_end_past_dropped_copies() {
+        let setup = setup_on(without_producer_state(), StreamsOptions::default());
+        setup.streams.append(append("p", 1, "1")).await.unwrap();
+        // The answer was lost, so the producer sent the batch again.
+        setup.streams.append(append("p", 1, "1")).await.unwrap();
+        setup.streams.append(append("p", 2, "2")).await.unwrap();
+        let request = ReadRequest {
+            stream: Some(stream("out")),
+            max_records: 3,
+            ..Default::default()
+        };
+        let page = setup.streams.read(request.clone()).await.unwrap();
+        assert_eq!(page.records.len(), 2);
+        let replayed = setup
+            .streams
+            .read_range(replay_of(&request, &page))
+            .await
+            .unwrap();
+        assert_eq!(replayed.cursor, page.cursor);
+        assert_eq!(replayed.records_digest, page.records_digest);
+        assert_eq!(replayed.records, page.records);
+    }
+
+    #[tokio::test]
+    async fn a_replay_whose_end_retention_dropped_is_lost_not_a_mismatch() {
+        let setup = setup(StreamsOptions::default());
+        setup.streams.append(append("p", 1, "1")).await.unwrap();
+        setup.streams.append(append("p", 2, "2")).await.unwrap();
+        let request = ReadRequest {
+            stream: Some(stream("out")),
+            ..Default::default()
+        };
+        let page = setup.streams.read(request.clone()).await.unwrap();
+        // A lapsed floor let retention take both records, and the stream went on.
+        setup.store.truncate(&chain("run-1"), "out", 0);
+        setup.streams.append(append("p", 3, "3")).await.unwrap();
+        setup.streams.append(append("p", 4, "4")).await.unwrap();
+        setup.streams.append(append("p", 5, "5")).await.unwrap();
+        let error = setup
+            .streams
+            .read_range(replay_of(&request, &page))
+            .await
+            .unwrap_err();
+        assert_eq!(error.kind, StreamFailureKind::ReplayRangeLost, "{error}");
+    }
+
+    #[tokio::test]
+    async fn a_positions_only_read_needs_holds_or_a_replay_horizon() {
+        let no_holds = crate::Capabilities {
+            holds: false,
+            ..MemoryStore::new().capabilities()
+        };
+        let request = ReadRequest {
+            stream: Some(stream("out")),
+            floor_holder: "reader-run/1".to_string(),
+            ..Default::default()
+        };
+        let setup = setup_on(
+            MemoryStore::with_capabilities(no_holds),
+            StreamsOptions::default(),
+        );
+        setup.streams.append(append("p", 1, "1")).await.unwrap();
+        let error = setup.streams.read(request.clone()).await.unwrap_err();
+        assert_eq!(error.kind, StreamFailureKind::Unsupported);
+        let with_horizon = crate::Capabilities {
+            replay_horizon: Some(Duration::from_secs(30 * 24 * 60 * 60)),
+            ..no_holds
+        };
+        let setup = setup_on(
+            MemoryStore::with_capabilities(with_horizon),
+            StreamsOptions::default(),
+        );
+        setup.streams.append(append("p", 1, "1")).await.unwrap();
+        let page = setup.streams.read(request).await.unwrap();
+        assert_eq!(page.records.len(), 1);
+    }
+
+    #[tokio::test]
+    async fn without_close_flags_a_close_record_carries_its_outcome_to_readers() {
+        let setup = setup_on(without_producer_state(), quick());
+        setup.streams.append(append("p", 1, "1")).await.unwrap();
+        let result = Payload {
+            data: b"done".to_vec(),
+            ..Default::default()
+        };
+        setup
+            .streams
+            .close(CloseRequest {
+                stream: Some(stream("out")),
+                result: Some(result.clone()),
+                ..Default::default()
+            })
+            .await
+            .unwrap();
+        // A second close lands too, and readers keep the first.
+        setup
+            .streams
+            .close(CloseRequest {
+                stream: Some(stream("out")),
+                ..Default::default()
+            })
+            .await
+            .unwrap();
+        let (delivered, end) = read_to_end(&setup.streams, Duration::from_secs(5)).await;
+        assert_eq!(delivered, 1);
+        assert!(end.done);
+        assert_eq!(end.close_result, Some(result));
+    }
+
+    fn attempt(producer: &str, attempt: i64, sequence: i64, value: &str) -> AppendRequest {
+        AppendRequest {
+            producer: Some(Producer::Named(NamedProducer {
+                producer_id: producer.to_string(),
+                attempt,
+            })),
+            ..append(producer, sequence, value)
+        }
+    }
+
+    /// A read after the stream's first record, with its replay request.
+    async fn first_page(setup: &Setup, holder: &str) -> (ReadRequest, ReadResponse) {
+        let first = setup.streams.append(append("p", 1, "1")).await.unwrap();
+        setup.streams.append(append("p", 2, "2")).await.unwrap();
+        // A newer attempt makes the read synthesize a supersession.
+        setup.streams.append(attempt("p", 2, 1, "3")).await.unwrap();
+        let request = ReadRequest {
+            floor_holder: holder.to_string(),
+            ..read_after(&first.last_cursor, &[], Duration::ZERO)
+        };
+        let page = setup.streams.read(request.clone()).await.unwrap();
+        (request, page)
+    }
+
+    #[tokio::test]
+    async fn a_replay_read_gives_the_records_the_read_got() {
+        let setup = setup(quick());
+        let (request, page) = first_page(&setup, "").await;
+        assert!(
+            page.records
+                .iter()
+                .any(|r| matches!(r.record, Some(read_record::Record::Superseded(_)))),
+            "{page:?}"
+        );
+        assert_eq!(page.chain_first_run_id, "run-1");
+        assert_eq!(page.start_cursor, request.after);
+        assert_eq!(page.records_digest.len(), 32);
+        // More records after the range change nothing in it.
+        setup.streams.append(attempt("p", 2, 2, "4")).await.unwrap();
+        let replayed = setup
+            .streams
+            .read_range(replay_of(&request, &page))
+            .await
+            .unwrap();
+        assert_eq!(replayed.records, page.records);
+        assert_eq!(replayed.cursor, page.cursor);
+        assert_eq!(replayed.records_digest, page.records_digest);
+    }
+
+    #[tokio::test]
+    async fn a_replay_read_of_a_read_from_the_end_gives_the_records_the_read_got() {
+        let setup = setup(quick());
+        setup.streams.append(attempt("p", 1, 1, "1")).await.unwrap();
+        let request = read_after(crate::END, &[], Duration::from_secs(5));
+        // The read finds its start at the end, then a newer attempt of the producer there lands.
+        let (page, _) = tokio::join!(setup.streams.read(request.clone()), async {
+            tokio::time::sleep(Duration::from_millis(50)).await;
+            setup.streams.append(attempt("p", 2, 1, "2")).await.unwrap();
+        });
+        let page = page.unwrap();
+        assert_eq!(page.records.len(), 1, "no supersession, {page:?}");
+        let replay = replay_of(&request, &page);
+        assert!(replay.start_from_end);
+        let replayed = setup.streams.read_range(replay).await.unwrap();
+        assert_eq!(replayed.records, page.records);
+    }
+
+    #[tokio::test]
+    async fn a_replay_read_crosses_archive_segments_and_the_hot_store() {
+        let hot = Arc::new(MemoryStore::new().holding_for_archive());
+        let root = std::env::temp_dir().join(format!("streams-replay-{}", std::process::id()));
+        let archive = Arc::new(crate::LocalFileArchive::new(&root));
+        let owners = Arc::new(Owners::default());
+        owners.run("wf", "run-1", "run-1");
+        let tiered = Arc::new(crate::TieredStore::new(hot.clone(), archive.clone()));
+        let streams = Streams::new(tiered, owners, quick());
+        streams.append(append("p", 1, "1")).await.unwrap();
+        streams.append(append("p", 2, "2")).await.unwrap();
+        let chain = ChainId {
+            namespace: "ns".to_string(),
+            workflow_id: "wf".to_string(),
+            first_run_id: "run-1".to_string(),
+            ..Default::default()
+        };
+        // One record per segment, so the range spans two segments and then the hot store.
+        let limits = crate::SegmentLimits {
+            records: 1,
+            ..Default::default()
+        };
+        crate::archive_topic(&*hot, &*archive, &chain, "out", limits, true)
+            .await
+            .unwrap();
+        streams.append(append("p", 3, "3")).await.unwrap();
+        let request = read_after(crate::BEGINNING, &[], Duration::ZERO);
+        let page = streams.read(request.clone()).await.unwrap();
+        assert_eq!(page.records.len(), 3, "{page:?}");
+        hot.truncate(&chain, "out", 0);
+        let replayed = streams
+            .read_range(replay_of(&request, &page))
+            .await
+            .unwrap();
+        assert_eq!(replayed.records, page.records);
+        assert_eq!(replayed.records_digest, page.records_digest);
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[tokio::test]
+    async fn a_replay_read_needs_no_owner() {
+        let setup = setup(quick());
+        let (request, page) = first_page(&setup, "").await;
+        // History dropped the owner, as for a Replayer with only the store.
+        setup.owners.end("wf", WorkflowExecutionStatus::Completed);
+        let before = setup.owners.describes();
+        setup
+            .streams
+            .read_range(replay_of(&request, &page))
+            .await
+            .unwrap();
+        assert_eq!(setup.owners.describes(), before);
+    }
+
+    #[tokio::test]
+    async fn a_replay_read_with_other_records_is_a_mismatch() {
+        let setup = setup(quick());
+        let (request, page) = first_page(&setup, "").await;
+        let mut other_digest = replay_of(&request, &page);
+        other_digest.records_digest[0] ^= 1;
+        let mut other_end = replay_of(&request, &page);
+        other_end.stored_records -= 1;
+        for replay in [other_digest, other_end] {
+            let error = setup.streams.read_range(replay).await.unwrap_err();
+            assert_eq!(error.kind, StreamFailureKind::ReplayMismatch, "{error}");
+        }
+    }
+
+    #[tokio::test]
+    async fn a_replay_read_of_records_retention_dropped_is_rec_01() {
+        let setup = setup(quick());
+        let (request, page) = first_page(&setup, "").await;
+        setup.store.truncate(&chain("run-1"), "out", 1);
+        let error = setup
+            .streams
+            .read_range(replay_of(&request, &page))
+            .await
+            .unwrap_err();
+        assert_eq!(error.kind, StreamFailureKind::ReplayRangeLost, "{error}");
+        assert!(error.message.starts_with("REC-01"), "{error}");
+    }
+
+    #[tokio::test]
+    async fn a_replay_read_from_a_trimmed_start_is_rec_01() {
+        let setup = setup(quick());
+        setup.streams.append(append("p", 1, "1")).await.unwrap();
+        setup.streams.append(append("p", 2, "2")).await.unwrap();
+        let request = read_after("", &[], Duration::ZERO);
+        let page = setup.streams.read(request.clone()).await.unwrap();
+        assert_eq!(page.start_cursor, "");
+        // Later records stand where the range began, so the replay finds as many as it wants.
+        setup.store.truncate(&chain("run-1"), "out", 0);
+        for sequence in 3..=4 {
+            setup
+                .streams
+                .append(append("p", sequence, &sequence.to_string()))
+                .await
+                .unwrap();
+        }
+        let error = setup
+            .streams
+            .read_range(replay_of(&request, &page))
+            .await
+            .unwrap_err();
+        assert_eq!(error.kind, StreamFailureKind::ReplayRangeLost, "{error}");
+    }
+
+    #[tokio::test]
+    async fn a_floor_keeps_what_a_positions_only_reader_read_until_it_is_released() {
+        let setup = setup(quick());
+        let (request, page) = first_page(&setup, "reader-run/1").await;
+        setup.store.truncate(&chain("run-1"), "out", 1);
+        let replayed = setup
+            .streams
+            .read_range(ReadRangeRequest {
+                floor_holder: "reader-run/1".to_string(),
+                ..replay_of(&request, &page)
+            })
+            .await
+            .unwrap();
+        assert_eq!(replayed.records, page.records, "the floor kept the range");
+        setup
+            .streams
+            .release_floor(ReleaseFloorRequest {
+                stream: Some(stream("out")),
+                chain_first_run_id: "run-1".to_string(),
+                floor_holder: "reader-run/1".to_string(),
+            })
+            .await
+            .unwrap();
+        setup.store.truncate(&chain("run-1"), "out", 1);
+        let error = setup
+            .streams
+            .read_range(replay_of(&request, &page))
+            .await
+            .unwrap_err();
+        assert_eq!(error.kind, StreamFailureKind::ReplayRangeLost, "{error}");
+    }
+
+    #[tokio::test]
+    async fn a_replay_read_needs_its_chain_and_a_resolved_start() {
+        let setup = setup(quick());
+        let (request, page) = first_page(&setup, "").await;
+        for replay in [
+            ReadRangeRequest {
+                chain_first_run_id: String::new(),
+                ..replay_of(&request, &page)
+            },
+            ReadRangeRequest {
+                after: crate::END.to_string(),
+                ..replay_of(&request, &page)
+            },
+        ] {
+            let error = setup.streams.read_range(replay).await.unwrap_err();
+            assert_eq!(error.kind, StreamFailureKind::InvalidArgument, "{error}");
+        }
+    }
+
+    #[tokio::test]
+    async fn an_empty_read_waits_for_a_counter_above_its_position() {
+        let setup = setup(StreamsOptions::default());
+        let empty = setup
+            .streams
+            .read(read_after("", &[], Duration::from_millis(20)))
+            .await
+            .unwrap();
+        assert!(empty.records.is_empty() && !empty.done);
+        assert_eq!(empty.wake_after, 0, "an empty stream wakes on any counter");
+        setup.streams.append(append("p", 1, "1")).await.unwrap();
+        let landed = setup.streams.append(append("p", 2, "2")).await.unwrap();
+        let page = setup
+            .streams
+            .read(read_after(
+                &landed.last_cursor,
+                &[],
+                Duration::from_millis(20),
+            ))
+            .await
+            .unwrap();
+        assert!(page.records.is_empty());
+        let at = |cursor: &str| {
+            crate::cursor_position(
+                cursor,
+                setup.store.name(),
+                &setup.streams.hash(&stream("out")),
+            )
+            .unwrap()
+            .unwrap()
+            .to_string()
+        };
+        assert_eq!(
+            Some(page.wake_after),
+            crate::progress_counter(&at(&landed.last_cursor))
+        );
+        let next = setup.streams.append(append("p", 3, "3")).await.unwrap();
+        assert!(
+            crate::progress_counter(&at(&next.last_cursor)).unwrap() > page.wake_after,
+            "the next record's notification wakes the reader"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_read_that_finds_its_owner_ended_answers_done_with_no_wake_counter() {
+        let setup = setup(quick());
+        setup.streams.append(append("p", 1, "1")).await.unwrap();
+        setup.owners.end("wf", WorkflowExecutionStatus::Completed);
+        let page = setup
+            .streams
+            .read(read_after(END, &[], Duration::from_secs(5)))
+            .await
+            .unwrap();
+        assert!(page.done);
+        assert_eq!(page.wake_after, 0);
+    }
+
     #[tokio::test]
     async fn a_read_ends_when_its_owner_chain_ends_and_writes_nothing() {
         let setup = setup(quick());
@@ -1782,7 +2884,7 @@ mod tests {
             .unwrap()
             .get_mut("run-1")
             .unwrap()
-            .status = WorkflowExecutionStatus::ContinuedAsNew;
+            .status = OwnerStatus::ContinuedAsNew;
         setup.owners.run("wf", "run-2", "run-1");
         let mut request = read_after("", &[], Duration::from_secs(5));
         request.stream.as_mut().unwrap().run_id = "run-1".to_string();
@@ -1964,6 +3066,9 @@ mod tests {
             .streams
             .close(CloseRequest {
                 stream: Some(stream("out")),
+                result: None,
+                failure: None,
+                closed_by: Default::default(),
             })
             .await
             .unwrap();
@@ -1982,6 +3087,7 @@ mod tests {
             namespace: "ns".to_string(),
             owner_kind: StreamOwnerKind::Workflow as i32,
             workflow_id: "wf".to_string(),
+            ..Default::default()
         };
         assert!(
             setup
@@ -2069,5 +3175,830 @@ mod tests {
             );
         }
         assert_eq!(setup.owners.describes(), 0);
+    }
+
+    /// A stream of standalone Activity `act`, whose run `act-run-1` is running.
+    fn activity_stream(topic: &str) -> StreamAddress {
+        StreamAddress {
+            namespace: "ns".to_string(),
+            owner_kind: StreamOwnerKind::Activity as i32,
+            activity_id: "act".to_string(),
+            topic: topic.to_string(),
+            ..Default::default()
+        }
+    }
+
+    fn activity_chain(run_id: &str) -> ChainId {
+        ChainId {
+            namespace: "ns".to_string(),
+            first_run_id: run_id.to_string(),
+            owner_kind: StreamOwnerKind::Activity as i32,
+            activity_id: "act".to_string(),
+            ..Default::default()
+        }
+    }
+
+    fn activity_setup() -> Setup {
+        let setup = setup(quick());
+        setup.owners.activity_run("act", "act-run-1");
+        setup
+    }
+
+    fn activity_append(sequence: i64, value: &str) -> AppendRequest {
+        AppendRequest {
+            stream: Some(activity_stream("out")),
+            producer: Some(Producer::Activity(ActivityProducer {
+                run_id: "act-run-1".to_string(),
+                activity_id: "act".to_string(),
+                attempt: 1,
+                ..Default::default()
+            })),
+            ..append("", sequence, value)
+        }
+    }
+
+    fn activity_read(after: &str, state: &[u8], wait: Duration) -> ReadRequest {
+        ReadRequest {
+            stream: Some(activity_stream("out")),
+            ..read_after(after, state, wait)
+        }
+    }
+
+    async fn read_activity_to_end(
+        streams: &Streams,
+        request: ReadRequest,
+    ) -> (usize, ReadResponse) {
+        let mut delivered = 0;
+        let mut request = request;
+        for _ in 0..50 {
+            let page = streams.read(request.clone()).await.unwrap();
+            delivered += page.records.len();
+            if page.done {
+                return (delivered, page);
+            }
+            request.after = page.cursor;
+            request.state = page.state;
+        }
+        panic!("the read never ended");
+    }
+
+    async fn activity_chain_closed(store: &MemoryStore, run_id: &str) -> bool {
+        store
+            .read(StoreReadRequest {
+                chain: Some(activity_chain(run_id)),
+                topic: "out".to_string(),
+                max_records: 1,
+                ..Default::default()
+            })
+            .await
+            .unwrap()
+            .closed
+    }
+
+    #[tokio::test]
+    async fn an_activity_writes_its_own_stream_on_the_chain_of_its_run() {
+        let setup = activity_setup();
+        let landed = setup.streams.append(activity_append(1, "1")).await.unwrap();
+        let held = setup
+            .store
+            .latest(StoreLatestRequest {
+                chain: Some(activity_chain("act-run-1")),
+                topic: "out".to_string(),
+            })
+            .await
+            .unwrap();
+        assert_eq!(held.position, "0");
+        let read = setup
+            .streams
+            .read(activity_read("", &[], Duration::ZERO))
+            .await
+            .unwrap();
+        assert_eq!(read.records.len(), 1);
+        assert_eq!(read.records[0].cursor, landed.last_cursor);
+        assert_eq!(read.chain_first_run_id, "act-run-1");
+        // A Workflow with the same id owns other streams, and their cursors don't mix.
+        setup.owners.run("act", "run-1", "run-1");
+        let mut workflow = stream("out");
+        workflow.workflow_id = "act".to_string();
+        let workflow_read = setup
+            .streams
+            .read(ReadRequest {
+                stream: Some(workflow.clone()),
+                ..Default::default()
+            })
+            .await
+            .unwrap();
+        assert!(workflow_read.records.is_empty());
+        let error = setup
+            .streams
+            .read(ReadRequest {
+                stream: Some(workflow),
+                after: landed.last_cursor,
+                ..Default::default()
+            })
+            .await
+            .unwrap_err();
+        assert_eq!(error.kind, StreamFailureKind::Cursor, "{error}");
+    }
+
+    #[tokio::test]
+    async fn an_activity_address_names_the_activity_only() {
+        let setup = activity_setup();
+        let mut no_id = activity_stream("out");
+        no_id.activity_id.clear();
+        let mut with_workflow = activity_stream("out");
+        with_workflow.workflow_id = "wf".to_string();
+        let mut workflow_with_activity = stream("out");
+        workflow_with_activity.activity_id = "act".to_string();
+        for bad in [no_id, with_workflow, workflow_with_activity] {
+            assert_eq!(
+                kind(
+                    setup
+                        .streams
+                        .latest(LatestRequest { stream: Some(bad) })
+                        .await
+                ),
+                StreamFailureKind::InvalidArgument
+            );
+        }
+        assert_eq!(setup.owners.describes(), 0);
+    }
+
+    #[tokio::test]
+    async fn an_activity_read_ends_done_when_the_run_reaches_a_terminal_status() {
+        let setup = activity_setup();
+        setup.streams.append(activity_append(1, "1")).await.unwrap();
+        setup
+            .owners
+            .end_activity("act", ActivityExecutionStatus::Failed);
+        let (delivered, end) = read_activity_to_end(
+            &setup.streams,
+            activity_read("", &[], Duration::from_secs(5)),
+        )
+        .await;
+        assert_eq!(delivered, 1);
+        assert!(end.done);
+        // A reader writes nothing, so the producers' owner check closes the chain.
+        assert!(!activity_chain_closed(&setup.store, "act-run-1").await);
+    }
+
+    #[tokio::test]
+    async fn an_activity_read_that_retries_and_pauses_stays_open() {
+        let setup = activity_setup();
+        setup
+            .owners
+            .end_activity("act", ActivityExecutionStatus::Paused);
+        let idle = setup
+            .streams
+            .read(activity_read("", &[], Duration::from_millis(200)))
+            .await
+            .unwrap();
+        assert!(!idle.done);
+        assert!(!activity_chain_closed(&setup.store, "act-run-1").await);
+    }
+
+    #[tokio::test]
+    async fn an_activity_read_before_the_run_exists_waits_the_grace() {
+        let setup = before_owner_starts(Duration::from_secs(60));
+        let empty = setup
+            .streams
+            .read(activity_read(END, &[], Duration::ZERO))
+            .await
+            .unwrap();
+        assert!(empty.records.is_empty() && !empty.done);
+        setup.owners.activity_run("act", "act-run-1");
+        setup.streams.append(activity_append(1, "1")).await.unwrap();
+        let read = setup
+            .streams
+            .read(activity_read(&empty.cursor, &empty.state, Duration::ZERO))
+            .await
+            .unwrap();
+        assert_eq!(read.records.len(), 1);
+        let late = before_owner_starts(Duration::ZERO);
+        let error = late
+            .streams
+            .read(activity_read("", &[], Duration::from_secs(5)))
+            .await
+            .unwrap_err();
+        assert_eq!(error.kind, StreamFailureKind::NotFound);
+        assert!(error.message.contains("Activity \"act\""), "{error}");
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn an_activity_producer_is_refused_once_the_run_ended() {
+        let setup = activity_setup();
+        setup.streams.append(activity_append(1, "1")).await.unwrap();
+        setup
+            .owners
+            .end_activity("act", ActivityExecutionStatus::Completed);
+        tokio::time::advance(OWNER_RECHECK + Duration::from_secs(1)).await;
+        let error = setup
+            .streams
+            .append(activity_append(2, "2"))
+            .await
+            .unwrap_err();
+        assert_eq!(error.kind, StreamFailureKind::Closed);
+        assert!(error.message.contains("Activity \"act\""), "{error}");
+        assert!(activity_chain_closed(&setup.store, "act-run-1").await);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_new_run_of_the_activity_id_ends_the_earlier_runs_streams() {
+        let setup = activity_setup();
+        setup.streams.append(activity_append(1, "1")).await.unwrap();
+        setup.owners.activity_run("act", "act-run-2");
+        tokio::time::advance(OWNER_RECHECK + Duration::from_secs(1)).await;
+        assert_eq!(
+            kind(setup.streams.append(activity_append(2, "2")).await),
+            StreamFailureKind::Closed
+        );
+        assert!(activity_chain_closed(&setup.store, "act-run-1").await);
+        // A producer of the new run writes on the new run's chain.
+        let mut next = activity_append(1, "3");
+        if let Some(Producer::Activity(activity)) = &mut next.producer {
+            activity.run_id = "act-run-2".to_string();
+        }
+        setup.streams.append(next).await.unwrap();
+        assert!(!activity_chain_closed(&setup.store, "act-run-2").await);
+    }
+
+    #[tokio::test]
+    async fn an_activity_read_pinned_to_a_run_reads_that_run() {
+        let setup = activity_setup();
+        setup.streams.append(activity_append(1, "1")).await.unwrap();
+        setup.owners.activity_run("act", "act-run-2");
+        let mut pinned = activity_read("", &[], Duration::ZERO);
+        pinned.stream.as_mut().unwrap().run_id = "act-run-1".to_string();
+        let page = setup.streams.read(pinned).await.unwrap();
+        assert_eq!(page.records.len(), 1);
+        assert_eq!(page.chain_first_run_id, "act-run-1");
+    }
+
+    #[tokio::test]
+    async fn an_activity_read_follows_the_newest_run_at_its_start_until_a_newer_run() {
+        let setup = activity_setup();
+        setup.streams.append(activity_append(1, "1")).await.unwrap();
+        let first = setup
+            .streams
+            .read(activity_read("", &[], Duration::ZERO))
+            .await
+            .unwrap();
+        assert_eq!(first.chain_first_run_id, "act-run-1");
+        setup.owners.activity_run("act", "act-run-2");
+        let (delivered, end) = read_activity_to_end(
+            &setup.streams,
+            activity_read(&first.cursor, &first.state, Duration::from_secs(5)),
+        )
+        .await;
+        assert_eq!(delivered, 0);
+        assert!(end.done);
+        assert!(!activity_chain_closed(&setup.store, "act-run-1").await);
+    }
+
+    #[tokio::test]
+    async fn an_activity_owner_delete_removes_only_that_activitys_streams() {
+        let setup = activity_setup();
+        setup.streams.append(activity_append(1, "1")).await.unwrap();
+        setup.streams.append(append("p", 1, "1")).await.unwrap();
+        let request = DeleteOwnerRequest {
+            namespace: "ns".to_string(),
+            owner_kind: StreamOwnerKind::Activity as i32,
+            activity_id: "act".to_string(),
+            ..Default::default()
+        };
+        assert!(
+            setup
+                .streams
+                .delete_owner(request.clone())
+                .await
+                .unwrap()
+                .deleted
+                > 0
+        );
+        let gone = setup
+            .store
+            .latest(StoreLatestRequest {
+                chain: Some(activity_chain("act-run-1")),
+                topic: "out".to_string(),
+            })
+            .await
+            .unwrap();
+        assert_eq!(gone.position, "");
+        let kept = setup
+            .store
+            .latest(StoreLatestRequest {
+                chain: Some(chain("run-1")),
+                topic: "out".to_string(),
+            })
+            .await
+            .unwrap();
+        assert_eq!(kept.position, "0");
+        for bad in [
+            DeleteOwnerRequest {
+                activity_id: String::new(),
+                ..request.clone()
+            },
+            DeleteOwnerRequest {
+                workflow_id: "wf".to_string(),
+                ..request.clone()
+            },
+        ] {
+            assert_eq!(
+                kind(setup.streams.delete_owner(bad).await),
+                StreamFailureKind::InvalidArgument
+            );
+        }
+    }
+
+    /// The start of 2026-10-14 in Unix milliseconds.
+    const DAY_START_MS: i64 = 1_791_936_000_000;
+
+    /// Attempt `attempt` of Activity `fetch` of run `run-1` of `wf`, started `after_ms` past
+    /// [DAY_START_MS], writing `value` at `sequence` on the Workflow's stream.
+    fn timed(attempt: i32, after_ms: i64, sequence: i64, value: &str) -> AppendRequest {
+        let mut activity = ActivityProducer {
+            workflow_id: "wf".to_string(),
+            run_id: "run-1".to_string(),
+            activity_id: "fetch".to_string(),
+            attempt,
+            ..Default::default()
+        };
+        let started = activity
+            .attempt_started_time
+            .get_or_insert_with(Default::default);
+        let ms = DAY_START_MS + after_ms;
+        started.seconds = ms / 1000;
+        started.nanos = (ms % 1000) as i32 * 1_000_000;
+        AppendRequest {
+            producer: Some(Producer::Activity(activity)),
+            ..append("", sequence, value)
+        }
+    }
+
+    fn key(attempt: i64, after_ms: i64) -> i64 {
+        (DAY_START_MS + after_ms) << 11 | attempt
+    }
+
+    /// The read's records, as each stored record's value and attempt, or a supersession's two
+    /// attempts with an empty value.
+    async fn shape(
+        setup: &Setup,
+        after: &str,
+        state: &[u8],
+    ) -> (Vec<(String, i64, i64, bool)>, ReadResponse) {
+        let page = setup
+            .streams
+            .read(read_after(after, state, Duration::ZERO))
+            .await
+            .unwrap();
+        let shape = page
+            .records
+            .iter()
+            .map(|record| match &record.record {
+                Some(read_record::Record::Stored(stored)) => (
+                    String::from_utf8(stored.body.clone().unwrap().data).unwrap(),
+                    stored.attempt,
+                    0,
+                    record.stale,
+                ),
+                Some(read_record::Record::Superseded(superseded)) => (
+                    String::new(),
+                    superseded.previous_attempt,
+                    superseded.attempt,
+                    record.stale,
+                ),
+                None => panic!("an empty record"),
+            })
+            .collect();
+        (shape, page)
+    }
+
+    #[tokio::test]
+    async fn a_timed_activity_attempt_writes_its_start_and_attempt_as_its_key() {
+        let setup = setup(quick());
+        setup.streams.append(timed(3, 0, 1, "a")).await.unwrap();
+        let (records, _) = shape(&setup, "", &[]).await;
+        assert_eq!(records, [("a".to_string(), key(3, 0), 0, false)]);
+        let mut late = timed(70_000, 0, 1, "b");
+        if let Some(Producer::Activity(activity)) = &mut late.producer {
+            activity.activity_id = "other".to_string();
+        }
+        setup.streams.append(late).await.unwrap();
+        let (records, _) = shape(&setup, "", &[]).await;
+        assert_eq!(records[1].1, key(crate::MAX_KEYED_ACTIVITY_ATTEMPT, 0));
+        assert_eq!(crate::MAX_KEYED_ACTIVITY_ATTEMPT, 2047);
+        // A JSON number holds the key exactly, so the Nexus contract's models take it.
+        assert!(records[1].1 < 1 << 53);
+        let before_1970 = timed(1, -DAY_START_MS - 1000, 1, "c");
+        // 2^42 ms is in May 2109, and a key past it would need more than 53 bits.
+        let after_2109 = timed(1, (1 << 42) - DAY_START_MS, 1, "d");
+        for refused in [before_1970, after_2109] {
+            assert_eq!(
+                kind(setup.streams.append(refused).await),
+                StreamFailureKind::InvalidArgument
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn an_activity_retry_supersedes_the_earlier_attempt() {
+        let setup = setup(quick());
+        setup.streams.append(timed(1, 0, 1, "a1")).await.unwrap();
+        setup
+            .streams
+            .append(timed(2, 1_000, 1, "b1"))
+            .await
+            .unwrap();
+        let (records, _) = shape(&setup, "", &[]).await;
+        assert_eq!(
+            records,
+            [
+                ("a1".to_string(), key(1, 0), 0, false),
+                (String::new(), key(1, 0), key(2, 1_000), false),
+                ("b1".to_string(), key(2, 1_000), 0, false),
+            ]
+        );
+    }
+
+    #[tokio::test]
+    async fn a_reset_activity_attempt_supersedes_with_no_divergence_and_no_drop() {
+        let setup = setup(quick());
+        for (attempt, after_ms) in [(1, 0), (2, 1_000), (3, 2_000)] {
+            setup
+                .streams
+                .append(timed(attempt, after_ms, 1, &format!("attempt {attempt}")))
+                .await
+                .unwrap();
+        }
+        // A reset sets the Temporal attempt back to 1, and the reset attempt starts later.
+        setup
+            .streams
+            .append(timed(1, 3_000, 1, "reset"))
+            .await
+            .unwrap();
+        let (records, _) = shape(&setup, "", &[]).await;
+        assert_eq!(
+            records.last().unwrap(),
+            &("reset".to_string(), key(1, 3_000), 0, false)
+        );
+        assert_eq!(
+            records[records.len() - 2],
+            (String::new(), key(3, 2_000), key(1, 3_000), false)
+        );
+        // With no start time the reset attempt would repeat attempt 1 with other content.
+        let mut untimed = timed(1, 0, 1, "reset");
+        if let Some(Producer::Activity(activity)) = &mut untimed.producer {
+            activity.attempt_started_time = None;
+        }
+        setup.streams.append(untimed.clone()).await.unwrap();
+        untimed.digest = vec![1; 32];
+        assert_eq!(
+            kind(setup.streams.append(untimed).await),
+            StreamFailureKind::ProducerDivergent
+        );
+    }
+
+    #[tokio::test]
+    async fn an_activity_attempt_that_writes_after_a_newer_one_started_is_stale() {
+        let setup = setup(quick());
+        setup.streams.append(timed(1, 0, 1, "a1")).await.unwrap();
+        setup
+            .streams
+            .append(timed(2, 1_000, 1, "b1"))
+            .await
+            .unwrap();
+        let (_, page) = shape(&setup, "", &[]).await;
+        // The first attempt timed out but keeps writing.
+        setup.streams.append(timed(1, 0, 2, "a2")).await.unwrap();
+        let (records, _) = shape(&setup, &page.cursor, &page.state).await;
+        assert_eq!(records, [("a2".to_string(), key(1, 0), 0, true)]);
+    }
+
+    /// A stream of Activity `tool` that run `run-1` of Workflow `wf` scheduled.
+    fn wfa_stream(topic: &str) -> StreamAddress {
+        StreamAddress {
+            namespace: "ns".to_string(),
+            owner_kind: StreamOwnerKind::WorkflowActivity as i32,
+            workflow_id: "wf".to_string(),
+            run_id: "run-1".to_string(),
+            activity_id: "tool".to_string(),
+            topic: topic.to_string(),
+        }
+    }
+
+    fn wfa_chain(run_id: &str) -> ChainId {
+        ChainId {
+            namespace: "ns".to_string(),
+            workflow_id: "wf".to_string(),
+            first_run_id: run_id.to_string(),
+            owner_kind: StreamOwnerKind::WorkflowActivity as i32,
+            activity_id: "tool".to_string(),
+        }
+    }
+
+    /// Run `run-1` of `wf` lists `tool` as pending.
+    fn wfa_setup(options: StreamsOptions) -> Setup {
+        let setup = setup(options);
+        setup.owners.pending("run-1", "tool", true);
+        setup
+    }
+
+    fn wfa_append(sequence: i64, value: &str) -> AppendRequest {
+        AppendRequest {
+            stream: Some(wfa_stream("out")),
+            producer: Some(Producer::Activity(ActivityProducer {
+                workflow_id: "wf".to_string(),
+                run_id: "run-1".to_string(),
+                activity_id: "tool".to_string(),
+                attempt: 1,
+                ..Default::default()
+            })),
+            ..append("", sequence, value)
+        }
+    }
+
+    fn wfa_read(after: &str, state: &[u8], wait: Duration) -> ReadRequest {
+        ReadRequest {
+            stream: Some(wfa_stream("out")),
+            ..read_after(after, state, wait)
+        }
+    }
+
+    fn end_run(setup: &Setup, run_id: &str) {
+        setup
+            .owners
+            .runs
+            .lock()
+            .unwrap()
+            .get_mut(run_id)
+            .unwrap()
+            .status = OwnerStatus::Ended;
+    }
+
+    async fn wfa_chain_closed(store: &MemoryStore, run_id: &str) -> bool {
+        store
+            .read(StoreReadRequest {
+                chain: Some(wfa_chain(run_id)),
+                topic: "out".to_string(),
+                max_records: 1,
+                ..Default::default()
+            })
+            .await
+            .unwrap()
+            .closed
+    }
+
+    #[tokio::test]
+    async fn a_workflow_activity_writes_its_own_stream_keyed_by_its_run() {
+        let setup = wfa_setup(quick());
+        let landed = setup.streams.append(wfa_append(1, "1")).await.unwrap();
+        let held = setup
+            .store
+            .latest(StoreLatestRequest {
+                chain: Some(wfa_chain("run-1")),
+                topic: "out".to_string(),
+            })
+            .await
+            .unwrap();
+        assert_eq!(held.position, "0");
+        assert_eq!(
+            setup
+                .store
+                .written_topics(&wfa_chain("run-1"))
+                .await
+                .unwrap(),
+            ["out"]
+        );
+        let read = setup
+            .streams
+            .read(wfa_read("", &[], Duration::ZERO))
+            .await
+            .unwrap();
+        assert_eq!(read.records.len(), 1);
+        assert_eq!(read.records[0].cursor, landed.last_cursor);
+        assert_eq!(read.chain_first_run_id, "run-1");
+        // Activity ids repeat after Continue-as-New, so the next run's `tool` is another stream.
+        setup.owners.run("wf", "run-2", "run-1");
+        setup.owners.pending("run-2", "tool", true);
+        let mut next = wfa_stream("out");
+        next.run_id = "run-2".to_string();
+        let error = setup
+            .streams
+            .read(ReadRequest {
+                stream: Some(next),
+                after: landed.last_cursor.clone(),
+                ..Default::default()
+            })
+            .await
+            .unwrap_err();
+        assert_eq!(error.kind, StreamFailureKind::Cursor, "{error}");
+        // The Workflow's own stream on the same topic is another stream too.
+        let error = setup
+            .streams
+            .read(ReadRequest {
+                stream: Some(stream("out")),
+                after: landed.last_cursor,
+                ..Default::default()
+            })
+            .await
+            .unwrap_err();
+        assert_eq!(error.kind, StreamFailureKind::Cursor, "{error}");
+    }
+
+    #[tokio::test]
+    async fn a_workflow_activity_address_needs_its_workflow_run_and_activity() {
+        let setup = wfa_setup(quick());
+        let mut bad = Vec::new();
+        for clear in [
+            |s: &mut StreamAddress| s.workflow_id.clear(),
+            |s: &mut StreamAddress| s.run_id.clear(),
+            |s: &mut StreamAddress| s.activity_id.clear(),
+            |s: &mut StreamAddress| s.namespace.clear(),
+        ] {
+            let mut stream = wfa_stream("out");
+            clear(&mut stream);
+            bad.push(stream);
+        }
+        for bad in bad {
+            assert_eq!(
+                kind(
+                    setup
+                        .streams
+                        .latest(LatestRequest { stream: Some(bad) })
+                        .await
+                ),
+                StreamFailureKind::InvalidArgument
+            );
+        }
+        assert_eq!(setup.owners.describes(), 0);
+    }
+
+    #[tokio::test]
+    async fn a_workflow_activity_read_ends_done_at_a_stored_close() {
+        let setup = wfa_setup(quick());
+        setup.streams.append(wfa_append(1, "1")).await.unwrap();
+        setup
+            .streams
+            .close(CloseRequest {
+                stream: Some(wfa_stream("out")),
+                closed_by: "tool@run-1".to_string(),
+                ..Default::default()
+            })
+            .await
+            .unwrap();
+        let (delivered, end) =
+            read_activity_to_end(&setup.streams, wfa_read("", &[], Duration::from_secs(5))).await;
+        assert_eq!(delivered, 1);
+        assert!(end.done);
+        assert_eq!(end.closed_by, "tool@run-1");
+    }
+
+    #[tokio::test]
+    async fn a_workflow_activity_read_ends_at_once_when_its_run_closed() {
+        let setup = wfa_setup(quick());
+        setup.streams.append(wfa_append(1, "1")).await.unwrap();
+        end_run(&setup, "run-1");
+        let started = std::time::Instant::now();
+        let (delivered, end) =
+            read_activity_to_end(&setup.streams, wfa_read("", &[], Duration::from_secs(5))).await;
+        assert_eq!(delivered, 1);
+        assert!(end.done);
+        assert!(started.elapsed() < Duration::from_secs(2));
+        // A pinned run's end marks nothing closed, as for other pinned reads.
+        assert!(!wfa_chain_closed(&setup.store, "run-1").await);
+    }
+
+    #[tokio::test]
+    async fn a_gone_workflow_activity_ends_a_read_only_after_the_grace() {
+        let grace = Duration::from_millis(400);
+        let setup = wfa_setup(StreamsOptions {
+            owner_start_grace: grace,
+            ..quick()
+        });
+        setup.streams.append(wfa_append(1, "1")).await.unwrap();
+        setup.owners.pending("run-1", "tool", false);
+        let first = setup
+            .streams
+            .read(wfa_read("", &[], Duration::ZERO))
+            .await
+            .unwrap();
+        let started = std::time::Instant::now();
+        let idle = setup
+            .streams
+            .read(wfa_read(
+                &first.cursor,
+                &first.state,
+                Duration::from_millis(150),
+            ))
+            .await
+            .unwrap();
+        assert!(!idle.done);
+        let (delivered, end) = read_activity_to_end(
+            &setup.streams,
+            wfa_read(&idle.cursor, &idle.state, Duration::from_secs(5)),
+        )
+        .await;
+        assert_eq!(delivered, 0);
+        assert!(end.done);
+        assert!(started.elapsed() >= grace - Duration::from_millis(100));
+    }
+
+    #[tokio::test]
+    async fn a_workflow_activity_read_before_its_schedule_stays_open() {
+        let setup = setup(quick());
+        let idle = setup
+            .streams
+            .read(wfa_read("", &[], Duration::from_millis(150)))
+            .await
+            .unwrap();
+        assert!(idle.records.is_empty() && !idle.done);
+        setup.owners.pending("run-1", "tool", true);
+        setup.streams.append(wfa_append(1, "1")).await.unwrap();
+        let read = setup
+            .streams
+            .read(wfa_read(&idle.cursor, &idle.state, Duration::ZERO))
+            .await
+            .unwrap();
+        assert_eq!(read.records.len(), 1);
+    }
+
+    #[tokio::test]
+    async fn a_workflow_activity_read_of_a_missing_run_waits_the_grace() {
+        let setup = before_owner_starts(Duration::ZERO);
+        let error = setup
+            .streams
+            .read(wfa_read("", &[], Duration::from_secs(5)))
+            .await
+            .unwrap_err();
+        assert_eq!(error.kind, StreamFailureKind::NotFound);
+        assert!(error.message.contains("Activity \"tool\""), "{error}");
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_workflow_activity_producer_is_refused_once_the_activity_is_gone() {
+        let setup = wfa_setup(quick());
+        setup.streams.append(wfa_append(1, "1")).await.unwrap();
+        setup.owners.pending("run-1", "tool", false);
+        tokio::time::advance(OWNER_RECHECK + Duration::from_secs(1)).await;
+        let error = setup.streams.append(wfa_append(2, "2")).await.unwrap_err();
+        assert_eq!(error.kind, StreamFailureKind::Closed);
+        assert!(error.message.contains("Activity \"tool\""), "{error}");
+        assert!(wfa_chain_closed(&setup.store, "run-1").await);
+    }
+
+    #[tokio::test]
+    async fn a_workflow_activity_producer_of_a_closed_run_is_refused() {
+        let setup = wfa_setup(quick());
+        end_run(&setup, "run-1");
+        assert_eq!(
+            kind(setup.streams.append(wfa_append(1, "1")).await),
+            StreamFailureKind::Closed
+        );
+    }
+
+    #[tokio::test]
+    async fn a_workflow_delete_removes_the_streams_of_its_workflow_activities() {
+        let setup = wfa_setup(quick());
+        setup.streams.append(wfa_append(1, "1")).await.unwrap();
+        let mut request = DeleteOwnerRequest {
+            namespace: "ns".to_string(),
+            owner_kind: StreamOwnerKind::WorkflowActivity as i32,
+            workflow_id: "wf".to_string(),
+            ..Default::default()
+        };
+        assert_eq!(
+            kind(setup.streams.delete_owner(request.clone()).await),
+            StreamFailureKind::InvalidArgument
+        );
+        request.owner_kind = StreamOwnerKind::Workflow as i32;
+        // A Workflow whose id only starts with `wf` keeps its Activities' streams.
+        setup.owners.run("wf2", "run-9", "run-9");
+        setup.owners.pending("run-9", "tool", true);
+        let mut other = wfa_append(1, "1");
+        other.stream.as_mut().unwrap().workflow_id = "wf2".to_string();
+        other.stream.as_mut().unwrap().run_id = "run-9".to_string();
+        setup.streams.append(other).await.unwrap();
+        assert!(setup.streams.delete_owner(request).await.unwrap().deleted > 0);
+        let gone = setup
+            .store
+            .latest(StoreLatestRequest {
+                chain: Some(wfa_chain("run-1")),
+                topic: "out".to_string(),
+            })
+            .await
+            .unwrap();
+        assert_eq!(gone.position, "");
+        let kept = setup
+            .store
+            .latest(StoreLatestRequest {
+                chain: Some(ChainId {
+                    workflow_id: "wf2".to_string(),
+                    ..wfa_chain("run-9")
+                }),
+                topic: "out".to_string(),
+            })
+            .await
+            .unwrap();
+        assert_eq!(kept.position, "0");
     }
 }

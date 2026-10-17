@@ -1,0 +1,98 @@
+[
+  {
+    "name": "first attempt",
+    "attempt": 1,
+    "started_time": {
+      "seconds": 1791936000,
+      "nanos": 0
+    },
+    "key": "3669884928000001"
+  },
+  {
+    "name": "a retry starts later and keys higher",
+    "attempt": 2,
+    "started_time": {
+      "seconds": 1791936002,
+      "nanos": 500000000
+    },
+    "key": "3669884933120002"
+  },
+  {
+    "name": "the start time keeps whole milliseconds only",
+    "attempt": 3,
+    "started_time": {
+      "seconds": 1791936005,
+      "nanos": 999999
+    },
+    "key": "3669884938240003"
+  },
+  {
+    "name": "a reset attempt 1 starts later than attempt 3 and keys higher",
+    "attempt": 1,
+    "started_time": {
+      "seconds": 1791936009,
+      "nanos": 0
+    },
+    "key": "3669884946432001"
+  },
+  {
+    "name": "an attempt past 2047 keys as 2047",
+    "attempt": 3000,
+    "started_time": {
+      "seconds": 1791936010,
+      "nanos": 1000000
+    },
+    "key": "3669884948484095"
+  },
+  {
+    "name": "no start time writes the Temporal attempt",
+    "attempt": 4,
+    "started_time": null,
+    "key": "4"
+  },
+  {
+    "name": "an attempt below one is refused",
+    "attempt": 0,
+    "started_time": {
+      "seconds": 1791936000,
+      "nanos": 0
+    },
+    "key": null
+  },
+  {
+    "name": "a start time at the epoch is refused",
+    "attempt": 1,
+    "started_time": {
+      "seconds": 0,
+      "nanos": 0
+    },
+    "key": null
+  },
+  {
+    "name": "a start time before the epoch is refused",
+    "attempt": 1,
+    "started_time": {
+      "seconds": -1,
+      "nanos": 0
+    },
+    "key": null
+  },
+  {
+    "name": "a start time at 2^42 ms, in May 2109, is refused",
+    "attempt": 1,
+    "started_time": {
+      "seconds": 4398046511,
+      "nanos": 104000000
+    },
+    "key": null
+  },
+  {
+    "name": "the last millisecond before 2^42 ms keys below 2^53",
+    "attempt": 2047,
+    "started_time": {
+      "seconds": 4398046511,
+      "nanos": 103000000
+    },
+    "key": "9007199254740991"
+  }
+]

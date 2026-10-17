@@ -18,8 +18,8 @@ use temporalio_common::protos::temporal::api::{
 };
 use temporalio_streams::{
     BEGINNING, CHAIN_LOG, Capabilities, MemoryStore, OwnerClient, OwnerDescription, OwnerError,
-    ReadTarget, StreamError, StreamResult, StreamStore, Streams, StreamsOptions, close_chain,
-    proto::*, read_page, stream_hash,
+    OwnerId, OwnerStatus, ReadTarget, StreamError, StreamResult, StreamStore, Streams,
+    StreamsOptions, close_chain, proto::*, read_page, stream_hash,
 };
 
 /// A store that forwards to another and injects the faults a test asks for. It also counts
@@ -160,18 +160,18 @@ impl StreamStore for Faulty {
 
 /// Temporal, with one Workflow whose only run is `run-1`.
 struct Owner {
-    status: Mutex<Result<WorkflowExecutionStatus, ()>>,
+    status: Mutex<Result<OwnerStatus, ()>>,
 }
 
 impl Owner {
     fn running() -> Arc<Self> {
         Arc::new(Self {
-            status: Mutex::new(Ok(WorkflowExecutionStatus::Running)),
+            status: Mutex::new(Ok(OwnerStatus::Running)),
         })
     }
 
     fn end(&self, status: WorkflowExecutionStatus) {
-        *self.status.lock().unwrap() = Ok(status);
+        *self.status.lock().unwrap() = Ok(OwnerStatus::of_workflow(status));
     }
 
     fn forget(&self) {
@@ -184,7 +184,7 @@ impl OwnerClient for Owner {
     async fn describe(
         &self,
         _: &str,
-        workflow_id: &str,
+        _: OwnerId<'_>,
         _: &str,
     ) -> Result<OwnerDescription, OwnerError> {
         match *self.status.lock().unwrap() {
@@ -193,7 +193,7 @@ impl OwnerClient for Owner {
                 first_run_id: "run-1".to_string(),
                 status,
             }),
-            Err(()) => Err(OwnerError::NotFound(workflow_id.to_string())),
+            Err(()) => Err(OwnerError::NotFound("gone".to_string())),
         }
     }
 }
@@ -212,6 +212,7 @@ fn new_stream() -> StreamAddress {
         ),
         run_id: String::new(),
         topic: "out".to_string(),
+        ..Default::default()
     }
 }
 
@@ -220,6 +221,7 @@ fn chain(stream: &StreamAddress) -> ChainId {
         namespace: stream.namespace.clone(),
         workflow_id: stream.workflow_id.clone(),
         first_run_id: "run-1".to_string(),
+        ..Default::default()
     }
 }
 
@@ -275,6 +277,7 @@ fn data(value: &str) -> AppendRecord {
             ..Default::default()
         }),
         content_hash: Sha256::digest(value.as_bytes()).to_vec(),
+        ..Default::default()
     }
 }
 
@@ -383,6 +386,7 @@ async fn a_copy_after_a_close_is_not_delivered() {
         streams
             .close(CloseRequest {
                 stream: Some(stream.clone()),
+                ..Default::default()
             })
             .await
             .unwrap();

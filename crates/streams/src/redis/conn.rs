@@ -120,6 +120,27 @@ impl Shared {
         }
     }
 
+    /// Runs `pipeline`, which holds `count` commands that all answer, on `node`, or on the server
+    /// when the store talks to one.
+    pub(crate) async fn query_pipeline_on<T: redis::FromRedisValue>(
+        &self,
+        node: Option<&Node>,
+        pipeline: Pipeline,
+        count: usize,
+    ) -> RedisResult<T> {
+        match (self.clone(), node) {
+            (Shared::Cluster(mut conn), Some((host, port))) => {
+                let routing = SingleNodeRoutingInfo::ByAddress {
+                    host: host.clone(),
+                    port: *port,
+                };
+                let replies = conn.route_pipeline(pipeline, 0, count, routing).await?;
+                redis::from_redis_value(Value::Array(replies)).map_err(RedisError::from)
+            }
+            (mut shared, _) => pipeline.query_async(&mut shared).await,
+        }
+    }
+
     /// Runs `cmd` on the server, or on every primary of a cluster, and answers each reply with
     /// the node that sent it. Each primary holds its own share of the keys and its own settings.
     pub(crate) async fn on_each_primary(&self, cmd: Cmd) -> RedisResult<Vec<(String, Value)>> {
@@ -151,7 +172,7 @@ impl Shared {
 }
 
 /// The node a key lives on, for a store that talks to one.
-type Node = (String, u16);
+pub(crate) type Node = (String, u16);
 
 struct NodePool {
     info: ConnectionInfo,

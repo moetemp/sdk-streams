@@ -48,5 +48,101 @@
     "log": "pre%20fix:{n%25s:a~b.c_d-e:r}:t:x%20y",
     "meta": "pre%20fix:{n%25s:a~b.c_d-e:r}:t:x%20y:meta",
     "chain": "pre%20fix:{n%25s:a~b.c_d-e:r}:chain"
+  },
+  {
+    "prefix": "temporal-streams",
+    "namespace": "default",
+    "owner_kind": "activity",
+    "activity_id": "gen-1",
+    "first_run_id": "run-1",
+    "topic": "tokens",
+    "log": "temporal-streams:{default:!a:gen-1:run-1}:t:tokens",
+    "meta": "temporal-streams:{default:!a:gen-1:run-1}:t:tokens:meta",
+    "chain": "temporal-streams:{default:!a:gen-1:run-1}:chain"
+  },
+  {
+    "prefix": "p{x}",
+    "namespace": "ns:a",
+    "owner_kind": "activity",
+    "activity_id": "act:1{b}!",
+    "first_run_id": "r:1",
+    "topic": "t/1",
+    "log": "p%7Bx%7D:{ns%3Aa:!a:act%3A1%7Bb%7D%21:r%3A1}:t:t%2F1",
+    "meta": "p%7Bx%7D:{ns%3Aa:!a:act%3A1%7Bb%7D%21:r%3A1}:t:t%2F1:meta",
+    "chain": "p%7Bx%7D:{ns%3Aa:!a:act%3A1%7Bb%7D%21:r%3A1}:chain"
+  },
+  {
+    "prefix": "temporal-streams",
+    "namespace": "ns",
+    "owner_kind": "activity",
+    "activity_id": "!a",
+    "first_run_id": "run",
+    "topic": "out",
+    "log": "temporal-streams:{ns:!a:%21a:run}:t:out",
+    "meta": "temporal-streams:{ns:!a:%21a:run}:t:out:meta",
+    "chain": "temporal-streams:{ns:!a:%21a:run}:chain"
+  },
+  {
+    "prefix": "temporal-streams",
+    "namespace": "ns",
+    "owner_kind": "activity",
+    "activity_id": "wörk é",
+    "first_run_id": "01a1-xyz",
+    "topic": "tópic",
+    "log": "temporal-streams:{ns:!a:w%C3%B6rk%20%C3%A9:01a1-xyz}:t:t%C3%B3pic",
+    "meta": "temporal-streams:{ns:!a:w%C3%B6rk%20%C3%A9:01a1-xyz}:t:t%C3%B3pic:meta",
+    "chain": "temporal-streams:{ns:!a:w%C3%B6rk%20%C3%A9:01a1-xyz}:chain"
+  },
+  {
+    "prefix": "temporal-streams",
+    "namespace": "default",
+    "owner_kind": "workflow_activity",
+    "workflow_id": "agent",
+    "first_run_id": "run-1",
+    "activity_id": "tool-42",
+    "topic": "tokens",
+    "log": "temporal-streams:{default:!wa:agent:run-1:tool-42}:t:tokens",
+    "meta": "temporal-streams:{default:!wa:agent:run-1:tool-42}:t:tokens:meta",
+    "chain": "temporal-streams:{default:!wa:agent:run-1:tool-42}:chain",
+    "topics": "temporal-streams:{default:!wa:agent:run-1:tool-42}:topics"
+  },
+  {
+    "prefix": "p{x}",
+    "namespace": "ns:a",
+    "owner_kind": "workflow_activity",
+    "workflow_id": "wf:1{b}!",
+    "first_run_id": "r:1",
+    "activity_id": "act/1",
+    "topic": "t/1",
+    "log": "p%7Bx%7D:{ns%3Aa:!wa:wf%3A1%7Bb%7D%21:r%3A1:act%2F1}:t:t%2F1",
+    "meta": "p%7Bx%7D:{ns%3Aa:!wa:wf%3A1%7Bb%7D%21:r%3A1:act%2F1}:t:t%2F1:meta",
+    "chain": "p%7Bx%7D:{ns%3Aa:!wa:wf%3A1%7Bb%7D%21:r%3A1:act%2F1}:chain",
+    "topics": "p%7Bx%7D:{ns%3Aa:!wa:wf%3A1%7Bb%7D%21:r%3A1:act%2F1}:topics"
+  },
+  {
+    "prefix": "temporal-streams",
+    "namespace": "ns",
+    "owner_kind": "workflow_activity",
+    "workflow_id": "!wa",
+    "first_run_id": "run",
+    "activity_id": "!a",
+    "topic": "out",
+    "log": "temporal-streams:{ns:!wa:%21wa:run:%21a}:t:out",
+    "meta": "temporal-streams:{ns:!wa:%21wa:run:%21a}:t:out:meta",
+    "chain": "temporal-streams:{ns:!wa:%21wa:run:%21a}:chain",
+    "topics": "temporal-streams:{ns:!wa:%21wa:run:%21a}:topics"
+  },
+  {
+    "prefix": "temporal-streams",
+    "namespace": "ns",
+    "owner_kind": "workflow_activity",
+    "workflow_id": "wörk",
+    "first_run_id": "01a1-xyz",
+    "activity_id": "1",
+    "topic": "tópic",
+    "log": "temporal-streams:{ns:!wa:w%C3%B6rk:01a1-xyz:1}:t:t%C3%B3pic",
+    "meta": "temporal-streams:{ns:!wa:w%C3%B6rk:01a1-xyz:1}:t:t%C3%B3pic:meta",
+    "chain": "temporal-streams:{ns:!wa:w%C3%B6rk:01a1-xyz:1}:chain",
+    "topics": "temporal-streams:{ns:!wa:w%C3%B6rk:01a1-xyz:1}:topics"
   }
 ]

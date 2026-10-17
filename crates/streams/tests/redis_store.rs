@@ -87,6 +87,7 @@ fn chain() -> ChainId {
         namespace: "ns".to_string(),
         workflow_id: unique("wf"),
         first_run_id: "run-1".to_string(),
+        ..Default::default()
     }
 }
 
@@ -319,6 +320,7 @@ async fn ids_with_separators_and_braces_keep_their_own_keys() {
         namespace: "ns".to_string(),
         workflow_id: format!("{}:{{b}}", unique("a")),
         first_run_id: "c".to_string(),
+        ..Default::default()
     };
     let (head, tail) = one.workflow_id.split_once(':').unwrap();
     let other = ChainId {
@@ -759,13 +761,13 @@ impl temporalio_streams::OwnerClient for OneOwner {
     async fn describe(
         &self,
         _namespace: &str,
-        _workflow_id: &str,
+        _owner: temporalio_streams::OwnerId<'_>,
         _run_id: &str,
     ) -> Result<temporalio_streams::OwnerDescription, temporalio_streams::OwnerError> {
         Ok(temporalio_streams::OwnerDescription {
             run_id: "run-1".to_string(),
             first_run_id: "run-1".to_string(),
-            status: *self.status.lock().unwrap(),
+            status: temporalio_streams::OwnerStatus::of_workflow(*self.status.lock().unwrap()),
         })
     }
 }
@@ -806,6 +808,7 @@ async fn a_new_producer_marks_an_ended_chain_closed_until_it_expires() {
             workflow_id: chain.workflow_id.clone(),
             run_id: String::new(),
             topic: "events".to_string(),
+            ..Default::default()
         }),
         producer: Some(Producer::Named(NamedProducer {
             producer_id: producer.to_string(),
@@ -1244,7 +1247,7 @@ async fn an_evicting_primary_of_a_cluster_is_warned_about() {
 }
 
 #[tokio::test]
-async fn the_documented_acl_is_the_python_sdks() {
+async fn the_documented_acl_is_the_python_sdks_with_cores_additions() {
     // One rule set for every SDK, so an application's ACL keeps working across the move.
     let Ok(checkout) = std::env::var("STREAMS_BROOK_PY") else {
         eprintln!("set STREAMS_BROOK_PY to compare the documented ACL with the Python SDK's");
@@ -1263,8 +1266,13 @@ async fn the_documented_acl_is_the_python_sdks() {
     )
     .unwrap();
     // A cluster client asks the topology with `CLUSTER SLOTS`, which the Python SDK's page left
-    // out. It is the one rule Core adds.
+    // out. Core also adds the set calls of a Workflow Activity's topic set.
     let mut expected = rules(&python);
+    let hscan = expected.iter().position(|rule| rule == "+hscan").unwrap();
+    expected.splice(
+        hscan + 1..hscan + 1,
+        ["+sadd".to_string(), "+smembers".to_string()],
+    );
     expected.push("+cluster|slots".to_string());
     assert_eq!(rules(include_str!("../docs/redis.md")), expected);
 }
@@ -1274,6 +1282,7 @@ fn delete_request(workflow_id: &str) -> temporalio_streams::proto::DeleteOwnerRe
         namespace: "ns".to_string(),
         owner_kind: temporalio_streams::proto::StreamOwnerKind::Workflow as i32,
         workflow_id: workflow_id.to_string(),
+        ..Default::default()
     }
 }
 
@@ -1425,6 +1434,7 @@ async fn a_delete_reaches_every_primary_of_a_cluster() {
             namespace: "ns".to_string(),
             workflow_id: workflow_id.clone(),
             first_run_id: format!("run-{run}"),
+            ..Default::default()
         };
         store
             .append(append(&chain, "p", 1, 1, b"\x01"))
@@ -1484,6 +1494,700 @@ async fn a_delete_reaches_every_primary_of_a_cluster() {
     }
 }
 
+/// Records the stream notifications it was sent.
+#[derive(Default)]
+struct Recorder(std::sync::Mutex<Vec<temporalio_streams::StreamNotification>>);
+
+#[async_trait::async_trait]
+impl temporalio_streams::NotifierClient for Recorder {
+    async fn notify(
+        &self,
+        notification: temporalio_streams::StreamNotification,
+    ) -> Result<(), temporalio_streams::NotifyError> {
+        self.0.lock().unwrap().push(notification);
+        Ok(())
+    }
+}
+
+#[tokio::test]
+async fn notification_counters_come_from_redis_entry_ids_and_grow_with_the_stream() {
+    let Some(setup) = setup().await else { return };
+    let recorder = Arc::new(Recorder::default());
+    let store = temporalio_streams::NotifyingStore::new(
+        Arc::new(setup.store),
+        Arc::new(temporalio_streams::Notifier::new(recorder.clone(), 10)),
+    );
+    let chain = chain();
+    let mut positions: Vec<String> = vec![];
+    for sequence in [1, 3] {
+        let digest = [sequence as u8];
+        let landed = store
+            .append(append(&chain, "p", sequence, 2, &digest))
+            .await
+            .unwrap();
+        positions.push(landed.last_position);
+        store.flush_notifications().await;
+    }
+    // A Workflow appends through a Local Activity as its own producer, so it notifies the same way.
+    let landed = store
+        .append(append(&chain, "__temporal_local_1@run-1", 1, 1, &[9]))
+        .await
+        .unwrap();
+    positions.push(landed.last_position);
+    store.flush_notifications().await;
+
+    let counters: Vec<i64> = recorder
+        .0
+        .lock()
+        .unwrap()
+        .iter()
+        .map(|n| n.counter)
+        .collect();
+    let expected: Vec<i64> = positions
+        .iter()
+        .map(|position| {
+            let (milliseconds, sequence) = position.split_once('-').expect("an entry id");
+            (milliseconds.parse::<i64>().unwrap() << 20) | sequence.parse::<i64>().unwrap()
+        })
+        .collect();
+    assert_eq!(counters, expected);
+    assert!(
+        counters.windows(2).all(|pair| pair[0] < pair[1]),
+        "{counters:?}"
+    );
+}
+
+async fn floored(lease: Duration, release_grace: Duration) -> Option<Setup> {
+    let url = url()?;
+    Some(
+        setup_with(&url, &url, &unique("floor"), |options| {
+            options.retention = Duration::from_millis(200);
+            options.floor_lease = Some(lease);
+            options.floor_release_grace = release_grace;
+        })
+        .await,
+    )
+}
+
+async fn sequences(setup: &mut Setup, chain: &ChainId) -> Vec<i64> {
+    let log = log_key(&setup.prefix, chain, "events");
+    let entries: Vec<(String, HashMap<String, Vec<u8>>)> =
+        setup.raw.xrange_all(&log).await.unwrap();
+    entries
+        .iter()
+        .map(|(_, fields)| StreamRecord::decode(&*fields["r"]).unwrap().sequence)
+        .collect()
+}
+
+#[tokio::test]
+async fn a_floor_keeps_records_past_retention_until_its_release_grace_ends() {
+    let Some(mut setup) = floored(Duration::from_secs(60), Duration::from_millis(300)).await else {
+        return;
+    };
+    let chain = chain();
+    let first = setup
+        .store
+        .append(append(&chain, "p", 1, 1, b"\x01"))
+        .await
+        .unwrap();
+    setup
+        .store
+        .append(append(&chain, "p", 2, 1, b"\x02"))
+        .await
+        .unwrap();
+    setup
+        .store
+        .hold_floor(&chain, "events", "reader-run/1", &first.first_position)
+        .await
+        .unwrap();
+    let log = log_key(&setup.prefix, &chain, "events");
+    let ttl: i64 = setup.raw.pttl(&log).await.unwrap();
+    assert!(ttl > 50_000, "the hold keeps the log for its lease: {ttl}");
+    tokio::time::sleep(Duration::from_millis(400)).await;
+    setup
+        .store
+        .append(append(&chain, "p", 3, 1, b"\x03"))
+        .await
+        .unwrap();
+    assert_eq!(
+        sequences(&mut setup, &chain).await,
+        [1, 2, 3],
+        "the floor holds the records retention would have trimmed"
+    );
+    let ttl: i64 = setup.raw.pttl(&log).await.unwrap();
+    assert!(
+        ttl > 50_000,
+        "an append keeps the log for the lease too: {ttl}"
+    );
+    setup
+        .store
+        .release_floor(&chain, "events", "reader-run/1")
+        .await
+        .unwrap();
+    tokio::time::sleep(Duration::from_millis(400)).await;
+    setup
+        .store
+        .append(append(&chain, "p", 4, 1, b"\x04"))
+        .await
+        .unwrap();
+    assert_eq!(
+        sequences(&mut setup, &chain).await,
+        [4],
+        "once the release grace ended, retention trims again"
+    );
+    let floors = format!("{log}:floors");
+    let left: HashMap<String, String> = setup.raw.hgetall(&floors).await.unwrap();
+    assert!(
+        left.is_empty(),
+        "the append dropped the ended hold: {left:?}"
+    );
+}
+
+#[tokio::test]
+async fn a_hold_keeps_the_lowest_position_and_a_lapsed_lease_lets_retention_trim() {
+    let Some(mut setup) = floored(Duration::from_millis(300), Duration::from_secs(60)).await else {
+        return;
+    };
+    let chain = chain();
+    let first = setup
+        .store
+        .append(append(&chain, "p", 1, 1, b"\x01"))
+        .await
+        .unwrap();
+    let second = setup
+        .store
+        .append(append(&chain, "p", 2, 1, b"\x02"))
+        .await
+        .unwrap();
+    for position in [&first.first_position, &second.first_position] {
+        setup
+            .store
+            .hold_floor(&chain, "events", "reader-run/1", position)
+            .await
+            .unwrap();
+    }
+    let floors = format!("{}:floors", log_key(&setup.prefix, &chain, "events"));
+    let held: HashMap<String, String> = setup.raw.hgetall(&floors).await.unwrap();
+    assert!(
+        held["reader-run/1"].starts_with(&format!("{}|", first.first_position)),
+        "{held:?}"
+    );
+    tokio::time::sleep(Duration::from_millis(400)).await;
+    setup
+        .store
+        .append(append(&chain, "p", 3, 1, b"\x03"))
+        .await
+        .unwrap();
+    assert_eq!(sequences(&mut setup, &chain).await, [3]);
+}
+
+#[tokio::test]
+async fn a_hold_from_the_beginning_keeps_the_whole_topic() {
+    let Some(mut setup) = floored(Duration::from_secs(60), Duration::from_secs(60)).await else {
+        return;
+    };
+    let chain = chain();
+    setup
+        .store
+        .append(append(&chain, "p", 1, 1, b"\x01"))
+        .await
+        .unwrap();
+    setup
+        .store
+        .hold_floor(&chain, "events", "reader-run/1", "")
+        .await
+        .unwrap();
+    tokio::time::sleep(Duration::from_millis(400)).await;
+    setup
+        .store
+        .append(append(&chain, "p", 2, 1, b"\x02"))
+        .await
+        .unwrap();
+    assert_eq!(sequences(&mut setup, &chain).await, [1, 2]);
+}
+
+#[tokio::test]
+async fn a_replay_read_on_redis_repeats_the_read_and_survives_retention_under_a_floor() {
+    use sha2::{Digest, Sha256};
+    use temporalio_common::protos::temporal::api::{
+        common::v1::Payload, enums::v1::WorkflowExecutionStatus,
+    };
+    use temporalio_streams::{
+        Streams, StreamsOptions,
+        proto::{
+            AppendRecord, AppendRequest, NamedProducer, ReadRangeRequest, ReadRequest,
+            StreamAddress, StreamOwnerKind, StreamRecordKind, append_request::Producer,
+        },
+    };
+    let Some(url) = url() else {
+        return;
+    };
+    let prefix = unique("replay");
+    let mut options = RedisStoreOptions::new(url.clone());
+    options.key_prefix = prefix.clone();
+    options.retention = Duration::from_millis(200);
+    options.floor_lease = Some(Duration::from_secs(60));
+    let streams = Streams::new(
+        Arc::new(RedisStore::connect(options).await.unwrap()),
+        Arc::new(OneOwner {
+            status: std::sync::Mutex::new(WorkflowExecutionStatus::Running),
+        }),
+        StreamsOptions::default(),
+    );
+    let chain = chain();
+    let stream = StreamAddress {
+        namespace: chain.namespace.clone(),
+        owner_kind: StreamOwnerKind::Workflow as i32,
+        workflow_id: chain.workflow_id.clone(),
+        run_id: String::new(),
+        topic: "events".to_string(),
+        ..Default::default()
+    };
+    let append = |attempt: i64, sequence: i64, value: &str| AppendRequest {
+        stream: Some(stream.clone()),
+        producer: Some(Producer::Named(NamedProducer {
+            producer_id: "p".to_string(),
+            attempt,
+        })),
+        sequence,
+        records: vec![AppendRecord {
+            kind: StreamRecordKind::Data as i32,
+            body: Some(Payload {
+                data: value.as_bytes().to_vec(),
+                ..Default::default()
+            }),
+            content_hash: Sha256::digest(value.as_bytes()).to_vec(),
+            ..Default::default()
+        }],
+        digest: Sha256::digest(value.as_bytes()).to_vec(),
+    };
+    let first = streams.append(append(1, 1, "1")).await.unwrap();
+    streams.append(append(1, 2, "2")).await.unwrap();
+    streams.append(append(2, 1, "3")).await.unwrap();
+    let request = ReadRequest {
+        stream: Some(stream.clone()),
+        after: first.last_cursor.clone(),
+        floor_holder: "reader-run/1".to_string(),
+        ..Default::default()
+    };
+    let page = streams.read(request.clone()).await.unwrap();
+    assert_eq!(page.records.len(), 3, "two records and a supersession");
+    // Past the retention, an append's trim would drop the range without the floor.
+    tokio::time::sleep(Duration::from_millis(400)).await;
+    streams.append(append(2, 2, "4")).await.unwrap();
+    let replayed = streams
+        .read_range(ReadRangeRequest {
+            stream: Some(stream.clone()),
+            chain_first_run_id: page.chain_first_run_id.clone(),
+            after: page.start_cursor.clone(),
+            to: page.cursor.clone(),
+            stored_records: 2,
+            state: request.state.clone(),
+            records_digest: page.records_digest.clone(),
+            floor_holder: "reader-run/1".to_string(),
+            start_from_end: false,
+        })
+        .await
+        .unwrap();
+    assert_eq!(replayed.records, page.records);
+    assert_eq!(replayed.records_digest, page.records_digest);
+}
+
+/// A reader's first range starts at the stream's start, so it has no cursor to find gone. Once
+/// its hold lapsed and retention trimmed the range, later records stand where it began.
+#[tokio::test]
+async fn a_replay_read_from_a_trimmed_start_on_redis_is_rec_01() {
+    use sha2::{Digest, Sha256};
+    use temporalio_common::protos::temporal::api::{
+        common::v1::Payload, enums::v1::WorkflowExecutionStatus,
+    };
+    use temporalio_streams::{
+        Streams, StreamsOptions,
+        proto::{
+            AppendRecord, AppendRequest, NamedProducer, ReadRangeRequest, ReadRequest,
+            StreamAddress, StreamOwnerKind, StreamRecordKind, append_request::Producer,
+        },
+    };
+    let Some(url) = url() else {
+        return;
+    };
+    let mut options = RedisStoreOptions::new(url.clone());
+    options.key_prefix = unique("trimmed-start");
+    options.retention = Duration::from_millis(300);
+    options.floor_lease = Some(Duration::from_millis(100));
+    let streams = Streams::new(
+        Arc::new(RedisStore::connect(options).await.unwrap()),
+        Arc::new(OneOwner {
+            status: std::sync::Mutex::new(WorkflowExecutionStatus::Running),
+        }),
+        StreamsOptions::default(),
+    );
+    let chain = chain();
+    let stream = StreamAddress {
+        namespace: chain.namespace.clone(),
+        owner_kind: StreamOwnerKind::Workflow as i32,
+        workflow_id: chain.workflow_id.clone(),
+        run_id: String::new(),
+        topic: "events".to_string(),
+        ..Default::default()
+    };
+    let append = |sequence: i64| AppendRequest {
+        stream: Some(stream.clone()),
+        producer: Some(Producer::Named(NamedProducer {
+            producer_id: "p".to_string(),
+            attempt: 1,
+        })),
+        sequence,
+        records: vec![AppendRecord {
+            kind: StreamRecordKind::Data as i32,
+            body: Some(Payload {
+                data: sequence.to_be_bytes().to_vec(),
+                ..Default::default()
+            }),
+            content_hash: Sha256::digest(sequence.to_be_bytes()).to_vec(),
+            ..Default::default()
+        }],
+        digest: Sha256::digest(sequence.to_be_bytes()).to_vec(),
+    };
+    streams.append(append(1)).await.unwrap();
+    streams.append(append(2)).await.unwrap();
+    let request = ReadRequest {
+        stream: Some(stream.clone()),
+        floor_holder: "reader-run/1".to_string(),
+        ..Default::default()
+    };
+    let page = streams.read(request.clone()).await.unwrap();
+    assert_eq!((page.records.len(), page.start_cursor.as_str()), (2, ""));
+    // Past the lease and the retention, the appends' trims drop the range.
+    tokio::time::sleep(Duration::from_millis(600)).await;
+    streams.append(append(3)).await.unwrap();
+    streams.append(append(4)).await.unwrap();
+    let error = streams
+        .read_range(ReadRangeRequest {
+            stream: Some(stream.clone()),
+            chain_first_run_id: page.chain_first_run_id.clone(),
+            after: page.start_cursor.clone(),
+            to: page.cursor.clone(),
+            stored_records: 2,
+            state: request.state.clone(),
+            records_digest: page.records_digest.clone(),
+            floor_holder: String::new(),
+            start_from_end: false,
+        })
+        .await
+        .unwrap_err();
+    assert_eq!(error.kind, StreamFailureKind::ReplayRangeLost, "{error}");
+}
+
+#[tokio::test]
+async fn a_chains_notification_entry_lands_in_the_chains_own_slot() {
+    let Ok(url) = std::env::var("STREAMS_REDIS_CLUSTER_URL") else {
+        eprintln!("set STREAMS_REDIS_CLUSTER_URL to run the Redis cluster tests");
+        return;
+    };
+    let prefix = unique("cluster-slots");
+    let mut options = RedisStoreOptions::new(url.clone());
+    options.cluster = true;
+    options.key_prefix = prefix.clone();
+    options.notification_log = true;
+    let store = RedisStore::connect(options).await.unwrap();
+    let tags: Vec<String> =
+        serde_json::from_str(include_str!("../testdata/redis/notify_slots.json")).unwrap();
+    let mut raw = redis::cluster::ClusterClient::new(vec![url.as_str()])
+        .unwrap()
+        .get_async_connection()
+        .await
+        .unwrap();
+    let keyslot = async |raw: &mut redis::cluster_async::ClusterConnection, key: &str| -> u16 {
+        redis::cmd("CLUSTER")
+            .arg("KEYSLOT")
+            .arg(key)
+            .query_async(raw)
+            .await
+            .unwrap()
+    };
+    for _ in 0..20 {
+        let chain = ChainId {
+            namespace: unique("ns:with{braces}"),
+            workflow_id: unique("wf"),
+            first_run_id: unique("run"),
+            ..Default::default()
+        };
+        let landed = store
+            .append(append(&chain, "p", 1, 1, b"\x01"))
+            .await
+            .unwrap();
+        let log = format!(
+            "{}:{{{}:{}:{}}}:t:events",
+            part(&prefix),
+            part(&chain.namespace),
+            part(&chain.workflow_id),
+            part(&chain.first_run_id)
+        );
+        let slot = keyslot(&mut raw, &log).await;
+        let notifications = format!("{}:{{{}}}:n", part(&prefix), tags[usize::from(slot)]);
+        assert_eq!(keyslot(&mut raw, &notifications).await, slot);
+        let entries: Vec<(String, HashMap<String, String>)> = redis::cmd("XRANGE")
+            .arg(&notifications)
+            .arg("-")
+            .arg("+")
+            .query_async(&mut raw)
+            .await
+            .unwrap();
+        assert!(
+            entries
+                .iter()
+                .any(|(_, fields)| fields["k"] == log && fields["p"] == landed.last_position),
+            "{entries:?}"
+        );
+    }
+}
+
+/// A store with the notification log and an archive hold of `lease`, with `retention`.
+async fn archiving(retention: Duration, lease: Duration) -> Option<Setup> {
+    let url = url()?;
+    Some(
+        setup_with(&url, &url, &unique("archive"), |options| {
+            options.retention = retention;
+            options.notification_log = true;
+            options.archive_lease = Some(lease);
+        })
+        .await,
+    )
+}
+
+/// The slot's set of topics to archive that `log` is in.
+fn archive_pending(prefix: &str, log: &str) -> String {
+    let tags: Vec<String> =
+        serde_json::from_str(include_str!("../testdata/redis/notify_slots.json")).unwrap();
+    let tag = &log[log.find('{').unwrap() + 1..log.find('}').unwrap()];
+    let slot = crc16::State::<crc16::XMODEM>::calculate(tag.as_bytes()) % 16384;
+    format!("{}:{{{}}}:a", part(prefix), tags[usize::from(slot)])
+}
+
+#[tokio::test]
+async fn an_archive_needs_the_notification_log() {
+    let mut options = RedisStoreOptions::new("redis://localhost:1");
+    options.archive_lease = Some(Duration::from_secs(1));
+    let error = RedisStore::connect(options).await.unwrap_err();
+    assert_eq!(error.kind, StreamFailureKind::Refused);
+    assert!(error.message.contains("notification log"), "{error}");
+}
+
+#[tokio::test]
+async fn the_archive_hold_keeps_records_past_retention_until_the_archive_moves_it() {
+    let Some(mut setup) = archiving(Duration::from_millis(200), Duration::from_secs(60)).await
+    else {
+        return;
+    };
+    let chain = chain();
+    let log = log_key(&setup.prefix, &chain, "events");
+    let pending = archive_pending(&setup.prefix, &log);
+    let first = setup
+        .store
+        .append(append(&chain, "p", 1, 2, b"\x01"))
+        .await
+        .unwrap();
+    assert_eq!(
+        setup.store.archived(&chain, "events").await.unwrap(),
+        Some(String::new())
+    );
+    let score: Option<f64> = setup.raw.zscore(&pending, &log).await.unwrap();
+    assert!(score.is_some_and(|score| score > 0.0), "{score:?}");
+    tokio::time::sleep(Duration::from_millis(400)).await;
+    setup
+        .store
+        .append(append(&chain, "p", 3, 1, b"\x02"))
+        .await
+        .unwrap();
+    // Retention would have dropped the first batch, and the hold from the start kept it.
+    assert_eq!(sequences(&mut setup, &chain).await, [1, 2, 3]);
+    setup
+        .store
+        .advance_archive(&chain, "events", &first.last_position)
+        .await
+        .unwrap();
+    assert_eq!(
+        setup.store.archived(&chain, "events").await.unwrap(),
+        Some(first.last_position.clone())
+    );
+    // The archive doesn't hold the newest record yet, so the topic stays in the set.
+    let score: Option<f64> = setup.raw.zscore(&pending, &log).await.unwrap();
+    assert!(score.is_some());
+    tokio::time::sleep(Duration::from_millis(400)).await;
+    let last = setup
+        .store
+        .append(append(&chain, "p", 4, 1, b"\x03"))
+        .await
+        .unwrap();
+    // The trim keeps the held record and what follows it.
+    assert_eq!(sequences(&mut setup, &chain).await, [2, 3, 4]);
+    setup
+        .store
+        .advance_archive(&chain, "events", &last.last_position)
+        .await
+        .unwrap();
+    let score: Option<f64> = setup.raw.zscore(&pending, &log).await.unwrap();
+    assert_eq!(score, None);
+    // The hold never keeps the log alive for less than its lease.
+    let ttl: i64 = setup.raw.pttl(&log).await.unwrap();
+    assert!(ttl > 50_000, "{ttl}");
+}
+
+#[tokio::test]
+async fn a_lapsed_archive_hold_lets_retention_go_on() {
+    let Some(mut setup) = archiving(Duration::from_millis(200), Duration::from_millis(300)).await
+    else {
+        return;
+    };
+    let chain = chain();
+    setup
+        .store
+        .append(append(&chain, "p", 1, 2, b"\x01"))
+        .await
+        .unwrap();
+    tokio::time::sleep(Duration::from_millis(500)).await;
+    setup
+        .store
+        .append(append(&chain, "p", 3, 1, b"\x02"))
+        .await
+        .unwrap();
+    assert_eq!(sequences(&mut setup, &chain).await, [3]);
+}
+
+#[tokio::test]
+async fn a_close_puts_the_topic_first_and_the_archives_release_takes_it_out() {
+    let Some(mut setup) = archiving(Duration::from_secs(60), Duration::from_secs(60)).await else {
+        return;
+    };
+    let chain = chain();
+    let log = log_key(&setup.prefix, &chain, "events");
+    let pending = archive_pending(&setup.prefix, &log);
+    setup
+        .store
+        .append(append(&chain, "p", 1, 1, b"\x01"))
+        .await
+        .unwrap();
+    setup.store.close_topic(&chain, "events").await.unwrap();
+    let score: Option<f64> = setup.raw.zscore(&pending, &log).await.unwrap();
+    assert_eq!(score, Some(0.0));
+    // A reader's release leaves the topic in the set.
+    setup
+        .store
+        .release_floor(&chain, "events", "reader-run/1")
+        .await
+        .unwrap();
+    let score: Option<f64> = setup.raw.zscore(&pending, &log).await.unwrap();
+    assert_eq!(score, Some(0.0));
+    setup
+        .store
+        .release_floor(&chain, "events", temporalio_streams::ARCHIVE_HOLDER)
+        .await
+        .unwrap();
+    let score: Option<f64> = setup.raw.zscore(&pending, &log).await.unwrap();
+    assert_eq!(score, None);
+}
+
+#[tokio::test]
+async fn a_store_without_an_archive_refuses_to_move_its_hold() {
+    let Some(setup) = setup().await else {
+        return;
+    };
+    let chain = chain();
+    let error = setup
+        .store
+        .advance_archive(&chain, "events", "1-0")
+        .await
+        .unwrap_err();
+    assert_eq!(error.kind, StreamFailureKind::Unsupported);
+    assert_eq!(setup.store.archived(&chain, "events").await.unwrap(), None);
+}
+
+#[tokio::test]
+async fn a_readers_short_hold_never_ends_the_archives_hold() {
+    let Some(url) = url() else {
+        return;
+    };
+    let mut setup = setup_with(&url, &url, &unique("archive-reader"), |options| {
+        options.retention = Duration::from_millis(200);
+        options.notification_log = true;
+        options.archive_lease = Some(Duration::from_secs(60));
+        options.floor_lease = Some(Duration::from_millis(100));
+        options.floor_release_grace = Duration::from_millis(100);
+    })
+    .await;
+    let chain = chain();
+    let first = setup
+        .store
+        .append(append(&chain, "p", 1, 2, b"\x01"))
+        .await
+        .unwrap();
+    // A positions-only reader holds with a lease far shorter than the archive's, and the archive
+    // lags behind it.
+    setup
+        .store
+        .hold_floor(&chain, "events", "reader-run/1", &first.first_position)
+        .await
+        .unwrap();
+    let floors = format!("{}:floors", log_key(&setup.prefix, &chain, "events"));
+    let ttl: i64 = setup.raw.pttl(&floors).await.unwrap();
+    assert!(ttl > 50_000, "{ttl}");
+    tokio::time::sleep(Duration::from_millis(400)).await;
+    setup
+        .store
+        .append(append(&chain, "p", 3, 1, b"\x02"))
+        .await
+        .unwrap();
+    // The reader's lease ended, and the records the archive has not taken stay.
+    assert_eq!(sequences(&mut setup, &chain).await, [1, 2, 3]);
+}
+
+/// The median time of `n` single-record appends to `chain`'s topic, from sequence `first`.
+async fn median_append(store: &RedisStore, chain: &ChainId, first: i64, n: i64) -> Duration {
+    let mut times = vec![];
+    for sequence in first..first + n {
+        let started = tokio::time::Instant::now();
+        store
+            .append(append(chain, "p", sequence, 1, &sequence.to_be_bytes()))
+            .await
+            .unwrap();
+        times.push(started.elapsed());
+    }
+    times.sort();
+    times[times.len() / 2]
+}
+
+#[tokio::test]
+async fn an_append_costs_the_same_however_long_the_retained_log_is() {
+    let Some(setup) = setup().await else { return };
+    let (short, long) = (chain(), chain());
+    let mut sequence = 1;
+    // 100,000 entries, all within the retention, so the trim drops none of them.
+    while sequence <= 100_000 {
+        setup
+            .store
+            .append(append(&long, "p", sequence, 1000, &sequence.to_be_bytes()))
+            .await
+            .unwrap();
+        sequence += 1000;
+    }
+    setup
+        .store
+        .append(append(&short, "p", 1, 1, b"1"))
+        .await
+        .unwrap();
+    let on_short = median_append(&setup.store, &short, 2, 30).await;
+    let on_long = median_append(&setup.store, &long, sequence, 30).await;
+    // Finding the newest record to trim once scanned the whole log, about 4 ms at this length.
+    assert!(
+        on_long < Duration::from_millis(1),
+        "{on_long:?} on the long log, {on_short:?} on the short one"
+    );
+    assert!(
+        on_long < on_short * 3 + Duration::from_micros(200),
+        "{on_long:?} on the long log, {on_short:?} on the short one"
+    );
+}
 #[tokio::test]
 async fn a_retention_past_the_epoch_is_refused_at_connect() {
     // The check runs before any connection, so no server is needed.
@@ -1549,4 +2253,275 @@ async fn the_read_checks_run_by_hash_and_survive_a_script_flush() {
     let read = setup.store.read(read_after(&chain, "", 10)).await.unwrap();
     assert_eq!(read.records.len(), 1);
     assert!(evalsha_calls(&mut setup.raw).await > before);
+}
+
+#[tokio::test]
+async fn a_hold_at_zero_neither_fails_the_append_nor_leaves_a_half_written_batch() {
+    let Some(mut setup) = setup().await else {
+        return;
+    };
+    let chain = chain();
+    setup
+        .store
+        .hold_floor(&chain, "events", "reader-run/1", "0-0")
+        .await
+        .unwrap();
+    setup
+        .store
+        .append(append(&chain, "p", 1, 1, b"\x01"))
+        .await
+        .unwrap();
+    let log = log_key(&setup.prefix, &chain, "events");
+    let length: usize = setup.raw.xlen(&log).await.unwrap();
+    assert_eq!(length, 1);
+    let ttl: i64 = setup.raw.pttl(&log).await.unwrap();
+    assert!(ttl > 0, "{ttl}");
+}
+
+#[tokio::test]
+async fn a_topic_refuses_a_floor_holder_past_the_cap() {
+    let Some(setup) = setup().await else {
+        return;
+    };
+    let chain = chain();
+    for holder in 0..temporalio_streams::MAX_FLOOR_HOLDERS {
+        setup
+            .store
+            .hold_floor(&chain, "events", &format!("reader-run/{holder}"), "")
+            .await
+            .unwrap();
+    }
+    let error = setup
+        .store
+        .hold_floor(&chain, "events", "one-more/1", "")
+        .await
+        .unwrap_err();
+    assert_eq!(error.kind, StreamFailureKind::Refused, "{error}");
+    // A holder already on the topic renews its hold.
+    setup
+        .store
+        .hold_floor(&chain, "events", "reader-run/0", "")
+        .await
+        .unwrap();
+}
+
+#[tokio::test]
+async fn a_replay_whose_end_record_the_store_lost_is_rec_01() {
+    use sha2::{Digest, Sha256};
+    use temporalio_common::protos::temporal::api::{
+        common::v1::Payload, enums::v1::WorkflowExecutionStatus,
+    };
+    use temporalio_streams::{
+        Streams, StreamsOptions,
+        proto::{
+            AppendRecord, AppendRequest, NamedProducer, ReadRangeRequest, ReadRequest,
+            StreamAddress, StreamOwnerKind, StreamRecordKind, append_request::Producer,
+        },
+    };
+    let Some(mut setup) = setup().await else {
+        return;
+    };
+    let prefix = setup.prefix.clone();
+    let streams = Streams::new(
+        Arc::new(setup.store),
+        Arc::new(OneOwner {
+            status: std::sync::Mutex::new(WorkflowExecutionStatus::Running),
+        }),
+        StreamsOptions::default(),
+    );
+    let chain = chain();
+    let stream = StreamAddress {
+        namespace: chain.namespace.clone(),
+        owner_kind: StreamOwnerKind::Workflow as i32,
+        workflow_id: chain.workflow_id.clone(),
+        run_id: String::new(),
+        topic: "events".to_string(),
+        ..Default::default()
+    };
+    let append = |sequence: i64| AppendRequest {
+        stream: Some(stream.clone()),
+        producer: Some(Producer::Named(NamedProducer {
+            producer_id: "p".to_string(),
+            attempt: 1,
+        })),
+        sequence,
+        records: vec![AppendRecord {
+            kind: StreamRecordKind::Data as i32,
+            body: Some(Payload {
+                data: sequence.to_be_bytes().to_vec(),
+                ..Default::default()
+            }),
+            content_hash: Sha256::digest(sequence.to_be_bytes()).to_vec(),
+            link: None,
+        }],
+        digest: Sha256::digest(sequence.to_be_bytes()).to_vec(),
+    };
+    streams.append(append(1)).await.unwrap();
+    streams.append(append(2)).await.unwrap();
+    let request = ReadRequest {
+        stream: Some(stream.clone()),
+        ..Default::default()
+    };
+    let page = streams.read(request.clone()).await.unwrap();
+    assert_eq!(page.records.len(), 2);
+    // A failover of a store that replicates late loses the acked tail, and later appends land
+    // at new ids.
+    let log = log_key(&prefix, &chain, "events");
+    let ids: Vec<(String, HashMap<String, redis::Value>)> =
+        setup.raw.xrange_all(&log).await.unwrap();
+    for (id, _) in ids {
+        let _: i64 = setup.raw.xdel(&log, &[id]).await.unwrap();
+    }
+    streams.append(append(3)).await.unwrap();
+    streams.append(append(4)).await.unwrap();
+    let error = streams
+        .read_range(ReadRangeRequest {
+            stream: Some(stream.clone()),
+            chain_first_run_id: page.chain_first_run_id.clone(),
+            after: page.start_cursor.clone(),
+            to: page.cursor.clone(),
+            stored_records: 2,
+            state: request.state.clone(),
+            records_digest: page.records_digest.clone(),
+            floor_holder: String::new(),
+            start_from_end: false,
+        })
+        .await
+        .unwrap_err();
+    assert_eq!(error.kind, StreamFailureKind::ReplayRangeLost, "{error}");
+}
+
+#[tokio::test]
+async fn two_archive_advances_out_of_order_keep_the_higher() {
+    let Some(mut setup) = archiving(Duration::from_secs(60), Duration::from_secs(60)).await else {
+        return;
+    };
+    let chain = chain();
+    let lower = setup
+        .store
+        .append(append(&chain, "p", 1, 1, b"\x01"))
+        .await
+        .unwrap();
+    let higher = setup
+        .store
+        .append(append(&chain, "p", 2, 1, b"\x02"))
+        .await
+        .unwrap();
+    setup
+        .store
+        .advance_archive(&chain, "events", &higher.last_position)
+        .await
+        .unwrap();
+    setup
+        .store
+        .advance_archive(&chain, "events", &lower.last_position)
+        .await
+        .unwrap();
+    assert_eq!(
+        setup.store.archived(&chain, "events").await.unwrap(),
+        Some(higher.last_position.clone())
+    );
+    let log = log_key(&setup.prefix, &chain, "events");
+    let hold: String = setup
+        .raw
+        .hget(format!("{log}:floors"), temporalio_streams::ARCHIVE_HOLDER)
+        .await
+        .unwrap();
+    assert!(
+        hold.starts_with(&format!("{}|", higher.last_position)),
+        "{hold}"
+    );
+}
+
+#[tokio::test]
+async fn a_deleted_topics_archive_mark_is_dropped() {
+    let Some(mut setup) = archiving(Duration::from_secs(60), Duration::from_secs(60)).await else {
+        return;
+    };
+    let (gone, deleted) = (chain(), chain());
+    for chain in [&gone, &deleted] {
+        setup
+            .store
+            .append(append(chain, "p", 1, 1, b"\x01"))
+            .await
+            .unwrap();
+    }
+    let marked = |chain: &ChainId| {
+        let log = log_key(&setup.prefix, chain, "events");
+        (archive_pending(&setup.prefix, &log), log)
+    };
+    // A topic whose keys expired, then a late advance.
+    let (pending, log) = marked(&gone);
+    let _: () = setup
+        .raw
+        .del(&[format!("{log}:meta"), log.clone()])
+        .await
+        .unwrap();
+    setup
+        .store
+        .advance_archive(&gone, "events", "1-1")
+        .await
+        .unwrap();
+    let score: Option<f64> = setup.raw.zscore(&pending, &log).await.unwrap();
+    assert_eq!(score, None);
+    // An owner delete.
+    let (pending, log) = marked(&deleted);
+    setup
+        .store
+        .delete_owner(temporalio_streams::proto::DeleteOwnerRequest {
+            namespace: deleted.namespace.clone(),
+            owner_kind: temporalio_streams::proto::StreamOwnerKind::Workflow as i32,
+            workflow_id: deleted.workflow_id.clone(),
+            ..Default::default()
+        })
+        .await
+        .unwrap();
+    let score: Option<f64> = setup.raw.zscore(&pending, &log).await.unwrap();
+    assert_eq!(score, None);
+}
+
+#[tokio::test]
+async fn a_large_trim_takes_no_longer_than_a_small_one() {
+    let Some(url) = url() else { return };
+    let setup = setup_with(&url, &url, &unique("large-trim"), |options| {
+        options.retention = Duration::from_millis(500);
+        options.floor_lease = Some(Duration::from_secs(60));
+    })
+    .await;
+    let chain = chain();
+    // A hold keeps 50,000 records of 1 KiB past the retention, then ends.
+    setup
+        .store
+        .hold_floor(&chain, "events", "reader-run/1", "")
+        .await
+        .unwrap();
+    let body = vec![7u8; 1024];
+    let mut sequence = 1;
+    while sequence <= 50_000 {
+        let mut batch = append(&chain, "p", sequence, 1000, &sequence.to_be_bytes());
+        batch.records = vec![body.clone(); 1000];
+        setup.store.append(batch).await.unwrap();
+        sequence += 1000;
+    }
+    setup
+        .store
+        .release_floor(&chain, "events", "reader-run/1")
+        .await
+        .unwrap();
+    let mut raw = setup.raw.clone();
+    let floors = format!("{}:floors", log_key(&setup.prefix, &chain, "events"));
+    let _: () = raw.del(&floors).await.unwrap();
+    tokio::time::sleep(Duration::from_millis(600)).await;
+    let started = tokio::time::Instant::now();
+    setup
+        .store
+        .append(append(&chain, "p", sequence, 1, b"last"))
+        .await
+        .unwrap();
+    let took = started.elapsed();
+    let log = log_key(&setup.prefix, &chain, "events");
+    let length: usize = raw.xlen(&log).await.unwrap();
+    assert_eq!(length, 1, "the trim dropped every held record");
+    // Copying 50,000 doomed records into Lua took about 80 ms.
+    assert!(took < Duration::from_millis(30), "{took:?}");
 }

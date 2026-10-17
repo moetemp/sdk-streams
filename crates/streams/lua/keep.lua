@@ -23,20 +23,25 @@ local function sweep_sessions(meta, floor_ms)
   end
   redis.call('HSET', meta, 'hwscan', found[1])
 end
-local function trim(log, meta, retention)
+local function trim(log, meta, retention, floors)
   local floor_ms = now_ms() - retention
   local floor = floor_ms .. '-0'
-  local doomed = redis.call('XREVRANGE', log, '(' .. floor, '-', 'COUNT', 1)
-  if #doomed > 0 then
+  local life
+  floor, life = held(floors, floor, retention)
+  -- Two reads that cost O(log n) each. Reading back from the floor walks the whole log
+  -- when no record is older, so it runs only when the oldest record is.
+  local oldest = redis.call('XRANGE', log, '-', '+', 'COUNT', 1)
+  if #oldest > 0 and id_below(oldest[1][1], floor) then
+    local doomed = redis.call('XREVRANGE', log, '(' .. floor, '-', 'COUNT', 1)
     redis.call('XTRIM', log, 'MINID', floor)
     redis.call('HSET', meta, 'trimmed', doomed[1][1])
   end
-  return floor_ms
+  return floor_ms, life
 end
-local function keep(log, meta, added, last, retention, grace, floor_ms)
-  redis.call('PEXPIRE', log, retention)
+local function keep(log, meta, added, last, grace, floor_ms, life)
+  redis.call('PEXPIRE', log, life)
   redis.call('HINCRBY', meta, 'added', added)
   redis.call('HSET', meta, 'last', last)
-  redis.call('PEXPIRE', meta, retention + grace)
+  redis.call('PEXPIRE', meta, life + grace)
   sweep_sessions(meta, floor_ms)
 end

@@ -27,7 +27,7 @@ end
 revive(KEYS[1], KEYS[2])
 -- Redis doesn't roll a script back, so whatever can fail runs before the first record lands,
 -- and the dedupe field goes last. A retry then never finds a batch that only half landed.
-local floor_ms = trim(KEYS[1], KEYS[2], retention)
+local floor_ms, life = trim(KEYS[1], KEYS[2], retention, KEYS[4])
 local first, last
 for i = 6, #ARGV do
   last = redis.call('XADD', KEYS[1], '*', 'r', ARGV[i])
@@ -35,7 +35,13 @@ for i = 6, #ARGV do
     first = last
   end
 end
-keep(KEYS[1], KEYS[2], #ARGV - 5, last, retention, grace, floor_ms)
+local topics = KEYS[5]
+if topics then
+  -- On every batch, since the first one can be lost and the close must still find the topic.
+  redis.call('SADD', topics, KEYS[1])
+  redis.call('PEXPIRE', topics, retention + grace)
+end
+keep(KEYS[1], KEYS[2], #ARGV - 5, last, grace, floor_ms, life)
 redis.call('HSET', KEYS[2], field,
   ARGV[4] .. '|' .. (#ARGV - 5) .. '|' .. first .. '|' .. last .. '|' .. digest_arg)
 return {first, last}

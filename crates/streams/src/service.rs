@@ -1,13 +1,19 @@
 //! The stream calls lang makes, served in process.
 
 use crate::{
-    OwnerClient, StreamError, StreamResult, StreamStore, Streams, StreamsOptions,
+    ArchiveSink, DEFAULT_MAX_NOTIFIERS, LocalFileArchive, Notifier, NotifierClient, NotifyingStore,
+    OwnerClient, SegmentLimits, StreamArchive, StreamError, StreamResult, StreamStore, Streams,
+    StreamsOptions, TieredStore,
     proto::{
-        AppendRequest, CloseRequest, DeleteOwnerRequest, DescribeStoreRequest,
-        DescribeStoreResponse, LatestRequest, PublishWorkflowTaskRequest, ReadRequest,
-        RetireProducerRequest, RunEvictedRequest, RunEvictedResponse, ShutdownWorkerRequest,
-        ShutdownWorkerResponse, StreamFailure, StreamStoreConfig, stream_store_config,
+        AppendRequest, ArchiveConfig, CloseRequest, DeleteOwnerRequest, DescribeStoreRequest,
+        DescribeStoreResponse, FlushNotificationsRequest, FlushNotificationsResponse,
+        FollowRangeRequest, FollowRequest, LatestRequest, PublishWorkflowTaskRequest,
+        ReadRangeRequest, ReadRequest, ReleaseFloorRequest, RetireProducerRequest,
+        RunEvictedRequest, RunEvictedResponse, RunStreamDriverRequest, RunStreamDriverResponse,
+        ShutdownWorkerRequest, ShutdownWorkerResponse, StreamFailure, StreamStoreConfig,
+        SubscribeRequest, UnsubscribeRequest, WaitForNotificationRequest, stream_store_config,
     },
+    subscribe::Subscriptions,
     workflow::WorkflowOutput,
 };
 use prost::Message;
@@ -18,6 +24,10 @@ use temporalio_common::telemetry::metrics::TemporalMeter;
 const DEFAULT_RETENTION: Duration = Duration::from_secs(7 * 24 * 60 * 60);
 /// The most records one read answers with, as the stream service contract allows.
 const MAX_READ_RECORDS: u32 = 1000;
+/// How long a stream goes without a write before the driver archives its tail, by default.
+const DEFAULT_SEGMENT_IDLE: Duration = Duration::from_secs(5 * 60);
+/// How long the store holds records the archive doesn't hold yet, by default.
+const DEFAULT_STALL_LIMIT: Duration = Duration::from_secs(7 * 24 * 60 * 60);
 /// The longest one read waits, as the stream service contract allows. A longer wait would hold a
 /// store connection that other reads need.
 const MAX_READ_WAIT: Duration = Duration::from_secs(60);
@@ -33,6 +43,9 @@ pub struct StreamService {
     streams: Streams,
     workflows: WorkflowOutput,
     meter: TemporalMeter,
+    subscriptions: Subscriptions,
+    /// What a driver archives into, when the config names an archive.
+    archive: Option<ArchiveSink>,
 }
 
 impl std::fmt::Debug for StreamService {
@@ -44,25 +57,92 @@ impl std::fmt::Debug for StreamService {
 }
 
 impl StreamService {
-    /// Connects to the store `config` names, asking `owner` about streams' owners.
+    /// Connects to the store `config` names, asking `owner` about streams' owners. Refuses a
+    /// config that turns notifications on, since there's no client to send them with.
     pub async fn connect(
         config: StreamStoreConfig,
         owner: Arc<dyn OwnerClient>,
     ) -> StreamResult<Self> {
+        Self::connect_with_notifier(config, owner, None).await
+    }
+
+    /// Like [StreamService::connect], closing each stream's notifier through `notifier` after
+    /// the store closes the stream, sending progress too when the config turns it on, attaching
+    /// and detaching Workflow readers through it, and waiting on it for client readers.
+    pub async fn connect_with_notifier(
+        config: StreamStoreConfig,
+        owner: Arc<dyn OwnerClient>,
+        notifier: Option<Arc<dyn NotifierClient>>,
+    ) -> StreamResult<Self> {
+        let stall_limit = match &config.archive {
+            Some(_) if !config.notification_log => {
+                return Err(StreamError::refused(
+                    "a stream archive needs the notification log, since a driver archives",
+                ));
+            }
+            Some(archive) => Some(positive_or(
+                archive.stall_limit,
+                DEFAULT_STALL_LIMIT,
+                "archive stall limit",
+            )?),
+            None => None,
+        };
         let (store, retention): (Arc<dyn StreamStore>, Duration) = match config.store {
             Some(stream_store_config::Store::Memory(memory)) => {
-                let store = match &memory.capabilities {
+                let mut store = match &memory.capabilities {
                     Some(mask) => crate::MemoryStore::with_capabilities(mask.into()),
+                    None if config.notification_log => crate::MemoryStore::with_notification_log(),
                     None => crate::MemoryStore::new(),
                 };
+                if stall_limit.is_some() {
+                    store = store.holding_for_archive();
+                }
                 (Arc::new(store), DEFAULT_RETENTION)
             }
-            Some(stream_store_config::Store::Redis(redis)) => connect_redis(redis).await?,
+            Some(stream_store_config::Store::Redis(redis)) => {
+                connect_redis(redis, config.notification_log, stall_limit).await?
+            }
+            Some(stream_store_config::Store::Postgres(postgres)) => {
+                connect_postgres(postgres, config.notification_log, stall_limit).await?
+            }
             None => {
                 return Err(StreamError::refused(
                     "the stream store config names no store",
                 ));
             }
+        };
+        if config.notification_log && store.notification_log().is_none() {
+            return Err(StreamError::refused(format!(
+                "the {} store keeps no notification log",
+                store.name()
+            )));
+        }
+        let (store, archive) = match &config.archive {
+            Some(archive) => {
+                let sink = archive_sink(archive, store.clone()).await?;
+                let tiered: Arc<dyn StreamStore> =
+                    Arc::new(TieredStore::new(store, sink.archive.clone()));
+                (tiered, Some(sink))
+            }
+            None => (store, None),
+        };
+        if config.notify_on_append && notifier.is_none() {
+            return Err(StreamError::refused(
+                "stream notifications need a client to send them with",
+            ));
+        }
+        let store: Arc<dyn StreamStore> = match notifier.clone() {
+            Some(client) => {
+                let max_notifiers = match config.max_notifiers {
+                    0 => DEFAULT_MAX_NOTIFIERS,
+                    max => max as usize,
+                };
+                Arc::new(
+                    NotifyingStore::new(store, Arc::new(Notifier::new(client, max_notifiers)))
+                        .with_progress(config.notify_on_append),
+                )
+            }
+            None => store,
         };
         let mut options = StreamsOptions::for_retention(retention);
         if let Some(grace) = config.owner_start_grace {
@@ -70,7 +150,12 @@ impl StreamService {
                 StreamError::refused("the stream store's owner start grace must not be negative")
             })?;
         }
-        Ok(Self::new(store, owner, options))
+        let mut service = Self::new(store, owner, options);
+        service.archive = archive;
+        Ok(match notifier {
+            Some(client) => service.with_subscriptions(client),
+            None => service,
+        })
     }
 
     /// Serves calls on `store`.
@@ -88,7 +173,15 @@ impl StreamService {
             streams,
             workflows,
             meter,
+            subscriptions: Subscriptions::default(),
+            archive: None,
         }
+    }
+
+    /// Attaches and detaches Workflow readers, and waits for client readers, through `client`.
+    pub fn with_subscriptions(mut self, client: Arc<dyn NotifierClient>) -> Self {
+        self.subscriptions = Subscriptions::new(Some(client));
+        self
     }
 
     /// Counts on `meter`, which is the no-op meter until lang gives one. Call it before any
@@ -119,8 +212,8 @@ impl StreamService {
                 .await
                 .map(|r| r.encode_to_vec()),
             "Read" => self
-                .streams
-                .read(capped(decode::<ReadRequest>(rpc, request)?))
+                .subscriptions
+                .read(&self.streams, capped(decode::<ReadRequest>(rpc, request)?))
                 .await
                 .map(|r| r.encode_to_vec()),
             "Latest" => self
@@ -138,9 +231,72 @@ impl StreamService {
                 .delete_owner(decode::<DeleteOwnerRequest>(rpc, request)?)
                 .await
                 .map(|r| r.encode_to_vec()),
+            "ReadRange" => self
+                .streams
+                .read_range(decode::<ReadRangeRequest>(rpc, request)?)
+                .await
+                .map(|r| r.encode_to_vec()),
+            "Follow" => {
+                let mut request = decode::<FollowRequest>(rpc, request)?;
+                request.max_records = request.max_records.min(MAX_READ_RECORDS);
+                request.wait = capped_wait(request.wait);
+                crate::follow::follow(&self.streams, &self.subscriptions, request)
+                    .await
+                    .map(|r| r.encode_to_vec())
+            }
+            "FollowRange" => crate::follow::follow_range(
+                &self.streams,
+                decode::<FollowRangeRequest>(rpc, request)?,
+            )
+            .await
+            .map(|r| r.encode_to_vec()),
+            "ReleaseFloor" => self
+                .streams
+                .release_floor(decode::<ReleaseFloorRequest>(rpc, request)?)
+                .await
+                .map(|r| r.encode_to_vec()),
             "RetireProducer" => self
                 .streams
                 .retire_producer(decode::<RetireProducerRequest>(rpc, request)?)
+                .await
+                .map(|r| r.encode_to_vec()),
+            "RunStreamDriver" => {
+                let request = decode::<RunStreamDriverRequest>(rpc, request)?;
+                let mut driver = crate::StreamDriver::new(
+                    self.store.clone(),
+                    self.subscriptions.client()?.clone(),
+                    driver_options(request)?,
+                )?;
+                if let Some(sink) = self.archive.clone() {
+                    driver = driver.with_archive(sink);
+                }
+                Arc::new(driver).run().await?;
+                Ok(RunStreamDriverResponse {}.encode_to_vec())
+            }
+            "FlushNotifications" => {
+                decode::<FlushNotificationsRequest>(rpc, request)?;
+                // A close retries until the server takes it, so a stopping process waits only
+                // so long for one against a server that's down.
+                let _ = tokio::time::timeout(crate::FLUSH_LIMIT, self.store.flush_notifications())
+                    .await;
+                Ok(FlushNotificationsResponse {}.encode_to_vec())
+            }
+            "Subscribe" => self
+                .subscriptions
+                .subscribe(&self.streams, decode::<SubscribeRequest>(rpc, request)?)
+                .await
+                .map(|r| r.encode_to_vec()),
+            "Unsubscribe" => self
+                .subscriptions
+                .unsubscribe(&self.streams, decode::<UnsubscribeRequest>(rpc, request)?)
+                .await
+                .map(|r| r.encode_to_vec()),
+            "WaitForNotification" => self
+                .subscriptions
+                .wait(
+                    &self.streams,
+                    decode::<WaitForNotificationRequest>(rpc, request)?,
+                )
                 .await
                 .map(|r| r.encode_to_vec()),
             "DescribeStore" => {
@@ -207,14 +363,23 @@ impl StreamService {
 /// `request` with its record count and wait cut to what the service allows.
 fn capped(mut request: ReadRequest) -> ReadRequest {
     request.max_records = request.max_records.min(MAX_READ_RECORDS);
-    let too_long = request
-        .wait
+    request.wait = capped_wait(request.wait);
+    request
+}
+
+fn capped_wait<D>(wait: Option<D>) -> Option<D>
+where
+    D: Copy + TryFrom<Duration>,
+    Duration: TryFrom<D>,
+{
+    let too_long = wait
         .and_then(|wait| Duration::try_from(wait).ok())
         .is_some_and(|wait| wait > MAX_READ_WAIT);
     if too_long {
-        request.wait = MAX_READ_WAIT.try_into().ok();
+        MAX_READ_WAIT.try_into().ok()
+    } else {
+        wait
     }
-    request
 }
 
 fn decode<T: Message + Default>(rpc: &str, request: &[u8]) -> Result<T, StreamFailure> {
@@ -223,11 +388,96 @@ fn decode<T: Message + Default>(rpc: &str, request: &[u8]) -> Result<T, StreamFa
     })
 }
 
+fn driver_options(request: RunStreamDriverRequest) -> StreamResult<crate::StreamDriverOptions> {
+    let mut options = crate::StreamDriverOptions {
+        consumer: request.consumer,
+        ..Default::default()
+    };
+    if let Some(interval) = request.sweep_interval {
+        options.sweep_interval = Duration::try_from(interval)
+            .ok()
+            .filter(|interval| !interval.is_zero())
+            .ok_or_else(|| StreamError::invalid_argument("a sweep interval must be positive"))?;
+    }
+    if let Some(idle) = request.claim_idle {
+        options.claim_idle = Duration::try_from(idle)
+            .map_err(|_| StreamError::invalid_argument("a claim idle time must not be negative"))?;
+    }
+    if request.batch > 0 {
+        options.batch = request.batch as usize;
+    }
+    Ok(options)
+}
+
+/// A positive duration from the config, or `default` when it's unset.
+fn positive_or<D>(value: Option<D>, default: Duration, name: &str) -> StreamResult<Duration>
+where
+    Duration: TryFrom<D>,
+{
+    let Some(value) = value else {
+        return Ok(default);
+    };
+    Duration::try_from(value)
+        .ok()
+        .filter(|value| !value.is_zero())
+        .ok_or_else(|| StreamError::refused(format!("the {name} must be positive")))
+}
+
+/// The archive at the config's URL, with the hot store it archives from.
+async fn archive_sink(
+    config: &ArchiveConfig,
+    hot: Arc<dyn StreamStore>,
+) -> StreamResult<ArchiveSink> {
+    let archive: Arc<dyn StreamArchive> = if let Some(path) = config.url.strip_prefix("file://") {
+        Arc::new(LocalFileArchive::new(path))
+    } else if config.url.starts_with("s3://") {
+        s3_archive(&config.url)?
+    } else {
+        return Err(StreamError::refused(format!(
+            "the archive URL {:?} is neither s3:// nor file://",
+            config.url
+        )));
+    };
+    let mut limits = SegmentLimits::default();
+    if config.segment_bytes > 0 {
+        limits.bytes = usize::try_from(config.segment_bytes).unwrap_or(usize::MAX);
+    }
+    Ok(ArchiveSink {
+        hot,
+        archive,
+        limits,
+        segment_idle: positive_or(
+            config.segment_idle,
+            DEFAULT_SEGMENT_IDLE,
+            "segment idle time",
+        )?,
+    })
+}
+
+#[cfg(feature = "archive")]
+fn s3_archive(url: &str) -> StreamResult<Arc<dyn StreamArchive>> {
+    Ok(Arc::new(crate::ObjectStoreArchive::from_s3_url(url)?))
+}
+
+#[cfg(not(feature = "archive"))]
+fn s3_archive(_: &str) -> StreamResult<Arc<dyn StreamArchive>> {
+    Err(StreamError::unsupported(
+        "this build has no S3 archive; build temporalio-streams with its archive feature",
+    ))
+}
+
 #[cfg(feature = "redis")]
 async fn connect_redis(
     config: crate::proto::RedisStoreConfig,
+    notification_log: bool,
+    archive_lease: Option<Duration>,
 ) -> StreamResult<(Arc<dyn StreamStore>, Duration)> {
     let mut options = crate::RedisStoreOptions::new(String::new());
+    options.notification_log = notification_log;
+    options.archive_lease = archive_lease;
+    if config.notify_doorbells > 0 {
+        options.notify_doorbells = config.notify_doorbells;
+    }
     options.urls = config.urls;
     options.cluster = config.cluster;
     if !config.key_prefix.is_empty() {
@@ -242,6 +492,12 @@ async fn connect_redis(
     if let Some(timeout) = config.response_timeout {
         options.response_timeout = duration(timeout.seconds, timeout.nanos, "response timeout")?;
     }
+    if let Some(lease) = config.floor_lease {
+        options.floor_lease = Some(duration(lease.seconds, lease.nanos, "floor lease")?);
+    }
+    if let Some(grace) = config.floor_release_grace {
+        options.floor_release_grace = duration(grace.seconds, grace.nanos, "floor release grace")?;
+    }
     options.plain = config.plain;
     let retention = options.retention;
     let store = crate::RedisStore::connect(options).await?;
@@ -251,9 +507,77 @@ async fn connect_redis(
 #[cfg(not(feature = "redis"))]
 async fn connect_redis(
     _: crate::proto::RedisStoreConfig,
+    _: bool,
+    _: Option<Duration>,
 ) -> StreamResult<(Arc<dyn StreamStore>, Duration)> {
     Err(StreamError::unsupported(
         "this build has no Redis store; build temporalio-streams with its redis feature",
+    ))
+}
+
+#[cfg(feature = "postgres")]
+async fn connect_postgres(
+    config: crate::proto::PostgresStoreConfig,
+    notification_log: bool,
+    archive_lease: Option<Duration>,
+) -> StreamResult<(Arc<dyn StreamStore>, Duration)> {
+    let mut options = crate::PostgresStoreOptions::new(config.url);
+    options.notification_log = notification_log;
+    options.archive_lease = archive_lease;
+    if config.notify_doorbells > 0 {
+        options.notify_doorbells = config.notify_doorbells;
+    }
+    options.listen_url = Some(config.listen_url).filter(|url| !url.is_empty());
+    options.notify_reads = config.notify_reads;
+    if !config.schema.is_empty() {
+        options.schema = config.schema;
+    }
+    let name = |field: &str| format!("Postgres store's {field}");
+    options.retention = positive_or(config.retention, options.retention, &name("retention"))?;
+    if config.max_connections > 0 {
+        options.max_connections = config.max_connections as usize;
+    }
+    options.response_timeout = positive_or(
+        config.response_timeout,
+        options.response_timeout,
+        &name("response timeout"),
+    )?;
+    if let Some(lease) = config.floor_lease {
+        options.floor_lease = Some(positive_or(
+            Some(lease),
+            Duration::ZERO,
+            &name("floor lease"),
+        )?);
+    }
+    options.floor_release_grace = positive_or(
+        config.floor_release_grace,
+        options.floor_release_grace,
+        &name("floor release grace"),
+    )?;
+    options.poll_interval = positive_or(
+        config.poll_interval,
+        options.poll_interval,
+        &name("poll interval"),
+    )?;
+    options.skip_migrations = config.skip_migrations;
+    options.janitor_interval = positive_or(
+        config.janitor_interval,
+        options.janitor_interval,
+        &name("janitor interval"),
+    )?;
+    let retention = options.retention;
+    let store = crate::PostgresStore::connect(options).await?;
+    Ok((Arc::new(store), retention))
+}
+
+#[cfg(not(feature = "postgres"))]
+async fn connect_postgres(
+    _: crate::proto::PostgresStoreConfig,
+    _: bool,
+    _: Option<Duration>,
+) -> StreamResult<(Arc<dyn StreamStore>, Duration)> {
+    Err(StreamError::unsupported(
+        "this build has no PostgreSQL store; build temporalio-streams with its postgres feature",
     ))
 }
 
@@ -271,16 +595,14 @@ fn duration(seconds: i64, nanos: i32, name: &str) -> StreamResult<Duration> {
 mod tests {
     use super::*;
     use crate::{
-        OwnerDescription, OwnerError,
+        OwnerDescription, OwnerError, OwnerId, OwnerStatus,
         proto::{
             AppendRecord, AppendResponse, LatestResponse, MemoryStoreConfig, NamedProducer,
             ReadResponse, StreamAddress, StreamFailureKind, StreamOwnerKind, StreamRecordKind,
             append_request, read_record,
         },
     };
-    use temporalio_common::protos::temporal::api::{
-        common::v1::Payload, enums::v1::WorkflowExecutionStatus,
-    };
+    use temporalio_common::protos::temporal::api::common::v1::Payload;
 
     /// Every Workflow's latest run is `run-1`, the first of its chain, and still running.
     struct Running;
@@ -290,13 +612,13 @@ mod tests {
         async fn describe(
             &self,
             _: &str,
-            _: &str,
+            _: OwnerId<'_>,
             _: &str,
         ) -> Result<OwnerDescription, OwnerError> {
             Ok(OwnerDescription {
                 run_id: "run-1".to_string(),
                 first_run_id: "run-1".to_string(),
-                status: WorkflowExecutionStatus::Running,
+                status: OwnerStatus::Running,
             })
         }
     }
@@ -322,6 +644,7 @@ mod tests {
             workflow_id: "wf".to_string(),
             run_id: String::new(),
             topic: "out".to_string(),
+            ..Default::default()
         }
     }
 
@@ -343,6 +666,7 @@ mod tests {
                         ..Default::default()
                     }),
                     content_hash: vec![value.as_bytes()[0]; 32],
+                    ..Default::default()
                 })
                 .collect(),
         }
@@ -525,6 +849,7 @@ mod tests {
             namespace: "ns".to_string(),
             owner_kind: StreamOwnerKind::Unspecified as i32,
             workflow_id: "wf".to_string(),
+            ..Default::default()
         };
         let failure = service
             .call("DeleteOwner", &other_owner.encode_to_vec())
@@ -535,6 +860,7 @@ mod tests {
             namespace: "ns".to_string(),
             owner_kind: StreamOwnerKind::Workflow as i32,
             workflow_id: String::new(),
+            ..Default::default()
         };
         let failure = service
             .call("DeleteOwner", &no_id.encode_to_vec())
@@ -557,7 +883,11 @@ mod tests {
         assert_eq!(full.name, "memory");
         let capabilities = full.capabilities.unwrap();
         assert!(capabilities.producer_state && capabilities.kept_last);
-        assert!(capabilities.dense_positions && !capabilities.holds);
+        assert!(capabilities.dense_positions && capabilities.holds);
+        assert!(
+            !capabilities.change_feed,
+            "a store with no notification log has no change feed"
+        );
         assert_eq!(capabilities.max_record_bytes, 1536 * 1024);
         assert_eq!(capabilities.max_batch_bytes, 4 << 20);
         let masked = StreamService::connect(
@@ -597,6 +927,7 @@ mod tests {
                 MemoryStoreConfig::default(),
             )),
             owner_start_grace: Some(Default::default()),
+            ..Default::default()
         };
         config.owner_start_grace.as_mut().unwrap().seconds = -1;
         let error = StreamService::connect(config, Arc::new(Running))
@@ -619,5 +950,779 @@ mod tests {
         .await
         .unwrap_err();
         assert_eq!(error.kind, StreamFailureKind::Unsupported);
+    }
+
+    #[cfg(not(feature = "postgres"))]
+    #[tokio::test]
+    async fn postgres_needs_the_postgres_feature() {
+        let error = StreamService::connect(
+            StreamStoreConfig {
+                store: Some(stream_store_config::Store::Postgres(Default::default())),
+                ..Default::default()
+            },
+            Arc::new(Running),
+        )
+        .await
+        .unwrap_err();
+        assert_eq!(error.kind, StreamFailureKind::Unsupported);
+    }
+
+    #[cfg(feature = "postgres")]
+    #[tokio::test]
+    async fn a_postgres_config_with_a_bad_value_is_refused() {
+        let config = |postgres: crate::proto::PostgresStoreConfig| StreamStoreConfig {
+            store: Some(stream_store_config::Store::Postgres(postgres)),
+            ..Default::default()
+        };
+        for (postgres, text) in [
+            (Default::default(), "postgres://"),
+            (
+                crate::proto::PostgresStoreConfig {
+                    url: "postgres://localhost/db".to_string(),
+                    retention: Some(Default::default()),
+                    ..Default::default()
+                },
+                "retention",
+            ),
+            (
+                crate::proto::PostgresStoreConfig {
+                    url: "postgres://localhost/db".to_string(),
+                    schema: "Bad-Schema".to_string(),
+                    ..Default::default()
+                },
+                "schema",
+            ),
+        ] {
+            let error = StreamService::connect(config(postgres), Arc::new(Running))
+                .await
+                .unwrap_err();
+            assert_eq!(error.kind, StreamFailureKind::Refused, "{error}");
+            assert!(error.message.contains(text), "{error}");
+        }
+    }
+
+    /// Records the notifications it was sent.
+    #[derive(Default)]
+    struct Recorder(std::sync::Mutex<Vec<crate::StreamNotification>>);
+
+    #[async_trait::async_trait]
+    impl NotifierClient for Recorder {
+        async fn notify(
+            &self,
+            notification: crate::StreamNotification,
+        ) -> Result<(), crate::NotifyError> {
+            self.0.lock().unwrap().push(notification);
+            Ok(())
+        }
+    }
+
+    async fn service_notifying(notify_on_append: bool, recorder: Arc<Recorder>) -> StreamService {
+        StreamService::connect_with_notifier(
+            StreamStoreConfig {
+                store: Some(stream_store_config::Store::Memory(
+                    MemoryStoreConfig::default(),
+                )),
+                notify_on_append,
+                ..Default::default()
+            },
+            Arc::new(Running),
+            Some(recorder),
+        )
+        .await
+        .unwrap()
+    }
+
+    async fn flush(service: &StreamService) {
+        let response = service
+            .call(
+                "FlushNotifications",
+                &FlushNotificationsRequest {}.encode_to_vec(),
+            )
+            .await
+            .unwrap();
+        FlushNotificationsResponse::decode(response.as_slice()).unwrap();
+    }
+
+    #[tokio::test]
+    async fn an_append_notifies_its_streams_notifier_once_notifications_are_on() {
+        let recorder = Arc::new(Recorder::default());
+        let service = service_notifying(true, recorder.clone()).await;
+        let appended = AppendResponse::decode(
+            service
+                .call("Append", &append(1, &["a", "b"]))
+                .await
+                .unwrap()
+                .as_slice(),
+        )
+        .unwrap();
+        flush(&service).await;
+        let sent = recorder.0.lock().unwrap().clone();
+        assert_eq!(sent.len(), 1);
+        assert_eq!(
+            sent[0].chain.first_run_id, "run-1",
+            "the chain the append wrote to"
+        );
+        assert_eq!(sent[0].topic, "out");
+        assert_eq!(sent[0].position, appended.last_cursor);
+        assert_eq!(sent[0].counter, 2);
+    }
+
+    #[tokio::test]
+    async fn every_append_notifies_with_no_reader_waiting() {
+        let recorder = Arc::new(Recorder::default());
+        let service = service_notifying(true, recorder.clone()).await;
+        service.call("Append", &append(1, &["a"])).await.unwrap();
+        service.call("Append", &append(2, &["b"])).await.unwrap();
+        flush(&service).await;
+        let counters: Vec<i64> = recorder
+            .0
+            .lock()
+            .unwrap()
+            .iter()
+            .map(|n| n.counter)
+            .collect();
+        assert_eq!(counters.last(), Some(&2), "{counters:?}");
+    }
+
+    #[tokio::test]
+    async fn with_a_notification_log_an_append_writes_an_entry_and_sends_nothing() {
+        let recorder = Arc::new(Recorder::default());
+        let service = StreamService::connect_with_notifier(
+            StreamStoreConfig {
+                store: Some(stream_store_config::Store::Memory(
+                    MemoryStoreConfig::default(),
+                )),
+                notify_on_append: true,
+                notification_log: true,
+                ..Default::default()
+            },
+            Arc::new(Running),
+            Some(recorder.clone()),
+        )
+        .await
+        .unwrap();
+        service.call("Append", &append(1, &["a"])).await.unwrap();
+        flush(&service).await;
+        assert!(recorder.0.lock().unwrap().is_empty(), "the driver notifies");
+        let log = service.store().notification_log().unwrap();
+        assert_eq!(log.busy().await.unwrap(), [0]);
+    }
+
+    #[cfg(feature = "redis")]
+    #[tokio::test]
+    async fn the_redis_store_keeps_a_notification_log_when_asked() {
+        let Ok(url) = std::env::var("STREAMS_REDIS_URL") else {
+            return;
+        };
+        for notification_log in [false, true] {
+            let service = StreamService::connect(
+                StreamStoreConfig {
+                    store: Some(stream_store_config::Store::Redis(
+                        crate::proto::RedisStoreConfig {
+                            urls: vec![url.clone()],
+                            notify_doorbells: 4,
+                            ..Default::default()
+                        },
+                    )),
+                    notification_log,
+                    ..Default::default()
+                },
+                Arc::new(Running),
+            )
+            .await
+            .unwrap();
+            let log = service.store().notification_log();
+            assert_eq!(log.is_some(), notification_log);
+            if let Some(log) = log {
+                assert_eq!((log.partitions(), log.doorbells()), (16_384, 4));
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn a_driver_runs_as_a_call_until_its_caller_drops_it() {
+        let recorder = Arc::new(Recorder::default());
+        let service = Arc::new(
+            StreamService::connect_with_notifier(
+                StreamStoreConfig {
+                    store: Some(stream_store_config::Store::Memory(
+                        MemoryStoreConfig::default(),
+                    )),
+                    notify_on_append: true,
+                    notification_log: true,
+                    ..Default::default()
+                },
+                Arc::new(Running),
+                Some(recorder.clone()),
+            )
+            .await
+            .unwrap(),
+        );
+        let driving = service.clone();
+        let driver = tokio::spawn(async move {
+            driving
+                .call(
+                    "RunStreamDriver",
+                    &RunStreamDriverRequest {
+                        consumer: "d1".to_string(),
+                        ..Default::default()
+                    }
+                    .encode_to_vec(),
+                )
+                .await
+        });
+        service.call("Append", &append(1, &["a"])).await.unwrap();
+        tokio::time::timeout(Duration::from_secs(5), async {
+            while recorder.0.lock().unwrap().is_empty() {
+                tokio::time::sleep(Duration::from_millis(5)).await;
+            }
+        })
+        .await
+        .expect("the driver notified the append");
+        assert_eq!(recorder.0.lock().unwrap()[0].counter, 1);
+        assert!(!driver.is_finished(), "a driver runs until it is dropped");
+        driver.abort();
+    }
+
+    fn archived_memory(url: &str, notification_log: bool) -> StreamStoreConfig {
+        StreamStoreConfig {
+            store: Some(stream_store_config::Store::Memory(
+                MemoryStoreConfig::default(),
+            )),
+            notification_log,
+            archive: Some(ArchiveConfig {
+                url: url.to_string(),
+                ..Default::default()
+            }),
+            ..Default::default()
+        }
+    }
+
+    #[tokio::test]
+    async fn an_archive_needs_the_notification_log_and_a_known_url() {
+        for (config, why) in [
+            (archived_memory("file:///tmp/x", false), "notification log"),
+            (
+                archived_memory("gs://bucket", true),
+                "neither s3:// nor file://",
+            ),
+        ] {
+            let error = StreamService::connect(config, Arc::new(Running))
+                .await
+                .unwrap_err();
+            assert_eq!(error.kind, StreamFailureKind::Refused);
+            assert!(error.message.contains(why), "{error}");
+        }
+    }
+
+    #[tokio::test]
+    async fn a_driver_call_archives_into_the_configured_archive() {
+        let root =
+            std::env::temp_dir().join(format!("streams-service-archive-{}", std::process::id()));
+        let service = Arc::new(
+            StreamService::connect_with_notifier(
+                archived_memory(&format!("file://{}", root.display()), true),
+                Arc::new(Running),
+                Some(Arc::new(Recorder::default())),
+            )
+            .await
+            .unwrap(),
+        );
+        let driving = service.clone();
+        let driver = tokio::spawn(async move {
+            driving
+                .call(
+                    "RunStreamDriver",
+                    &RunStreamDriverRequest {
+                        consumer: "d1".to_string(),
+                        sweep_interval: Some(Duration::from_millis(20).try_into().unwrap()),
+                        ..Default::default()
+                    }
+                    .encode_to_vec(),
+                )
+                .await
+        });
+        service.call("Append", &append(1, &["a"])).await.unwrap();
+        // The store is the tiered one, under the memory store's name.
+        assert_eq!(service.store().name(), "memory");
+        let topic = root.join("v1/ns/w/wf/run-1/out");
+        tokio::time::timeout(Duration::from_secs(5), async {
+            while std::fs::read_dir(&topic).map_or(true, |mut names| names.next().is_none()) {
+                tokio::time::sleep(Duration::from_millis(5)).await;
+            }
+        })
+        .await
+        .expect("the driver archived the topic");
+        driver.abort();
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[tokio::test]
+    async fn a_driver_needs_a_store_with_a_log() {
+        let service = service_notifying(true, Arc::new(Recorder::default())).await;
+        let failure = service
+            .call(
+                "RunStreamDriver",
+                &RunStreamDriverRequest {
+                    consumer: "d1".to_string(),
+                    ..Default::default()
+                }
+                .encode_to_vec(),
+            )
+            .await
+            .unwrap_err();
+        assert_eq!(failure.kind, StreamFailureKind::Refused as i32);
+    }
+
+    #[tokio::test]
+    async fn notifications_are_off_by_default() {
+        let recorder = Arc::new(Recorder::default());
+        let service = service_notifying(false, recorder.clone()).await;
+        service.call("Append", &append(1, &["a"])).await.unwrap();
+        flush(&service).await;
+        assert!(recorder.0.lock().unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn notifications_without_a_client_are_refused() {
+        let error = StreamService::connect(
+            StreamStoreConfig {
+                store: Some(stream_store_config::Store::Memory(
+                    MemoryStoreConfig::default(),
+                )),
+                notify_on_append: true,
+                ..Default::default()
+            },
+            Arc::new(Running),
+        )
+        .await
+        .unwrap_err();
+        assert_eq!(error.kind, StreamFailureKind::Refused);
+    }
+
+    #[tokio::test]
+    async fn a_close_reaches_the_notifier_with_notifications_off() {
+        let recorder = Arc::new(Recorder::default());
+        let service = service_notifying(false, recorder.clone()).await;
+        service.call("Append", &append(1, &["a"])).await.unwrap();
+        let result = Payload {
+            data: b"summary".to_vec(),
+            ..Default::default()
+        };
+        service
+            .call(
+                "Close",
+                &CloseRequest {
+                    stream: Some(address()),
+                    result: Some(result.clone()),
+                    failure: None,
+                    closed_by: Default::default(),
+                }
+                .encode_to_vec(),
+            )
+            .await
+            .unwrap();
+        flush(&service).await;
+        let sent = recorder.0.lock().unwrap().clone();
+        assert_eq!(sent.len(), 1, "no progress, only the close");
+        assert_eq!(sent[0].close_result(), Some(result));
+    }
+
+    /// Answers every notification like a server without the stream notifier.
+    #[derive(Default)]
+    struct Stock(std::sync::atomic::AtomicUsize);
+
+    #[async_trait::async_trait]
+    impl NotifierClient for Stock {
+        async fn notify(&self, _: crate::StreamNotification) -> Result<(), crate::NotifyError> {
+            self.0.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            Err(crate::NotifyError::Unsupported("unimplemented".to_string()))
+        }
+    }
+
+    #[tokio::test]
+    async fn a_server_without_the_notifier_costs_one_call() {
+        let stock = Arc::new(Stock::default());
+        let service = StreamService::connect_with_notifier(
+            StreamStoreConfig {
+                store: Some(stream_store_config::Store::Memory(
+                    MemoryStoreConfig::default(),
+                )),
+                notify_on_append: true,
+                ..Default::default()
+            },
+            Arc::new(Running),
+            Some(stock.clone()),
+        )
+        .await
+        .unwrap();
+        service.call("Append", &append(1, &["a"])).await.unwrap();
+        flush(&service).await;
+        service.call("Append", &append(2, &["b"])).await.unwrap();
+        service
+            .call(
+                "Close",
+                &CloseRequest {
+                    stream: Some(address()),
+                    result: Some(Payload::default()),
+                    failure: None,
+                    closed_by: Default::default(),
+                }
+                .encode_to_vec(),
+            )
+            .await
+            .unwrap();
+        flush(&service).await;
+        assert_eq!(stock.0.load(std::sync::atomic::Ordering::SeqCst), 1);
+    }
+
+    /// The Workflow's chain is `run-1`. It runs until `ended` is set, then it's completed.
+    #[derive(Default)]
+    struct Ends(std::sync::atomic::AtomicBool);
+
+    #[async_trait::async_trait]
+    impl OwnerClient for Ends {
+        async fn describe(
+            &self,
+            _: &str,
+            _: OwnerId<'_>,
+            _: &str,
+        ) -> Result<OwnerDescription, OwnerError> {
+            let ended = self.0.load(std::sync::atomic::Ordering::SeqCst);
+            Ok(OwnerDescription {
+                run_id: "run-1".to_string(),
+                first_run_id: "run-1".to_string(),
+                status: if ended {
+                    OwnerStatus::Ended
+                } else {
+                    OwnerStatus::Running
+                },
+            })
+        }
+    }
+
+    #[tokio::test]
+    async fn a_readers_owner_check_right_after_the_final_task_sends_no_notifier_close() {
+        let recorder = Arc::new(Recorder::default());
+        let owner = Arc::new(Ends::default());
+        let store = Arc::new(NotifyingStore::new(
+            Arc::new(crate::MemoryStore::new()),
+            Arc::new(Notifier::new(recorder.clone(), 10)),
+        ));
+        let service = StreamService::new(
+            store,
+            owner.clone(),
+            StreamsOptions {
+                owner_recheck: Duration::ZERO,
+                owner_check_min: Duration::from_millis(1),
+                owner_check_max: Duration::from_millis(1),
+                ..Default::default()
+            },
+        );
+        let appended = AppendResponse::decode(
+            service
+                .call("Append", &append(1, &["a"]))
+                .await
+                .unwrap()
+                .as_slice(),
+        )
+        .unwrap();
+        flush(&service).await;
+        // The owner completed, and no close reached the topic.
+        owner.0.store(true, std::sync::atomic::Ordering::SeqCst);
+        let read = ReadResponse::decode(
+            service
+                .call(
+                    "Read",
+                    &ReadRequest {
+                        stream: Some(address()),
+                        after: appended.last_cursor,
+                        wait: Some(Duration::from_millis(200).try_into().unwrap()),
+                        ..Default::default()
+                    }
+                    .encode_to_vec(),
+                )
+                .await
+                .unwrap()
+                .as_slice(),
+        )
+        .unwrap();
+        assert!(read.done, "the reader saw the owner end");
+        let refused = service
+            .call("Append", &append(2, &["b"]))
+            .await
+            .unwrap_err();
+        assert_eq!(refused.kind, StreamFailureKind::Closed as i32);
+        flush(&service).await;
+        assert!(
+            recorder
+                .0
+                .lock()
+                .unwrap()
+                .iter()
+                .all(|n| n.close_result().is_none()),
+            "an empty close would beat the outcome the notifier's owner check finds"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_replay_read_and_a_release_go_through_the_one_call_entry() {
+        use crate::proto::{ReadRangeRequest, ReleaseFloorRequest, ReleaseFloorResponse};
+        let service = service().await;
+        service
+            .call("Append", &append(1, &["a", "b"]))
+            .await
+            .unwrap();
+        let request = ReadRequest {
+            stream: Some(address()),
+            floor_holder: "reader-run/1".to_string(),
+            ..Default::default()
+        };
+        let page = ReadResponse::decode(
+            service
+                .call("Read", &request.encode_to_vec())
+                .await
+                .unwrap()
+                .as_slice(),
+        )
+        .unwrap();
+        let replayed = ReadResponse::decode(
+            service
+                .call(
+                    "ReadRange",
+                    &ReadRangeRequest {
+                        stream: Some(address()),
+                        chain_first_run_id: page.chain_first_run_id.clone(),
+                        after: page.start_cursor.clone(),
+                        to: page.cursor.clone(),
+                        stored_records: 2,
+                        state: Vec::new(),
+                        records_digest: page.records_digest.clone(),
+                        floor_holder: "reader-run/1".to_string(),
+                        start_from_end: false,
+                    }
+                    .encode_to_vec(),
+                )
+                .await
+                .unwrap()
+                .as_slice(),
+        )
+        .unwrap();
+        assert_eq!(replayed.records, page.records);
+        let released = service
+            .call(
+                "ReleaseFloor",
+                &ReleaseFloorRequest {
+                    stream: Some(address()),
+                    chain_first_run_id: page.chain_first_run_id,
+                    floor_holder: "reader-run/1".to_string(),
+                }
+                .encode_to_vec(),
+            )
+            .await
+            .unwrap();
+        ReleaseFloorResponse::decode(released.as_slice()).unwrap();
+    }
+
+    #[tokio::test]
+    async fn a_read_after_the_close_ends_with_the_outcome_the_notifier_got() {
+        let recorder = Arc::new(Recorder::default());
+        let service = service_notifying(true, recorder.clone()).await;
+        let appended = AppendResponse::decode(
+            service
+                .call("Append", &append(1, &["a"]))
+                .await
+                .unwrap()
+                .as_slice(),
+        )
+        .unwrap();
+        let result = Payload {
+            data: b"summary".to_vec(),
+            ..Default::default()
+        };
+        service
+            .call(
+                "Close",
+                &CloseRequest {
+                    stream: Some(address()),
+                    result: Some(result.clone()),
+                    failure: None,
+                    closed_by: "run-1".to_string(),
+                }
+                .encode_to_vec(),
+            )
+            .await
+            .unwrap();
+        let read = ReadResponse::decode(
+            service
+                .call(
+                    "Read",
+                    &ReadRequest {
+                        stream: Some(address()),
+                        after: appended.last_cursor,
+                        ..Default::default()
+                    }
+                    .encode_to_vec(),
+                )
+                .await
+                .unwrap()
+                .as_slice(),
+        )
+        .unwrap();
+        assert!(read.done && read.records.is_empty());
+        assert_eq!(read.close_result, Some(result.clone()));
+        assert_eq!(read.closed_by, "run-1");
+        let sent = recorder.0.lock().unwrap().clone();
+        assert_eq!(sent.last().unwrap().close_result(), Some(result));
+        let refused = service
+            .call("Append", &append(2, &["b"]))
+            .await
+            .unwrap_err();
+        assert_eq!(refused.kind, StreamFailureKind::Closed as i32);
+        assert_eq!(refused.closed_by, "run-1");
+    }
+
+    #[tokio::test]
+    async fn a_close_with_a_result_closes_the_store_and_then_the_notifier() {
+        let recorder = Arc::new(Recorder::default());
+        let service = service_notifying(true, recorder.clone()).await;
+        service
+            .call("Append", &append(1, &["a", "b"]))
+            .await
+            .unwrap();
+        flush(&service).await;
+        let result = Payload {
+            data: b"summary".to_vec(),
+            ..Default::default()
+        };
+        service
+            .call(
+                "Close",
+                &CloseRequest {
+                    stream: Some(address()),
+                    result: Some(result.clone()),
+                    failure: None,
+                    closed_by: Default::default(),
+                }
+                .encode_to_vec(),
+            )
+            .await
+            .unwrap();
+        let sent = recorder.0.lock().unwrap().clone();
+        assert_eq!(sent.len(), 2);
+        assert_eq!(sent[1].close_result(), Some(result));
+        assert_eq!(sent[1].counter, 3, "above the newest record's counter");
+        let refused = service
+            .call("Append", &append(3, &["c"]))
+            .await
+            .unwrap_err();
+        assert_eq!(refused.kind, StreamFailureKind::Closed as i32);
+    }
+
+    #[tokio::test]
+    async fn a_close_without_a_result_ends_the_stream_on_the_server_with_an_empty_result() {
+        let recorder = Arc::new(Recorder::default());
+        let service = service_notifying(true, recorder.clone()).await;
+        service
+            .call(
+                "Close",
+                &CloseRequest {
+                    stream: Some(address()),
+                    result: None,
+                    failure: None,
+                    closed_by: Default::default(),
+                }
+                .encode_to_vec(),
+            )
+            .await
+            .unwrap();
+        flush(&service).await;
+        let sent = recorder.0.lock().unwrap().clone();
+        assert_eq!(sent.len(), 1);
+        // A caller with a typed result decodes it as None, which an empty payload can't give.
+        assert_eq!(sent[0].close_result(), Some(crate::empty_close_result()));
+        assert_eq!(
+            sent[0].close_result().unwrap().metadata["encoding"],
+            b"binary/null"
+        );
+    }
+
+    /// A store whose notifications never go out, as when the server is down and a close retries.
+    struct NeverFlushes(crate::MemoryStore);
+
+    #[async_trait::async_trait]
+    impl StreamStore for NeverFlushes {
+        fn name(&self) -> &str {
+            self.0.name()
+        }
+        async fn append(
+            &self,
+            r: crate::proto::StoreAppendRequest,
+        ) -> StreamResult<crate::proto::StoreAppendResponse> {
+            self.0.append(r).await
+        }
+        async fn read(
+            &self,
+            r: crate::proto::StoreReadRequest,
+        ) -> StreamResult<crate::proto::StoreReadResponse> {
+            self.0.read(r).await
+        }
+        async fn latest(
+            &self,
+            r: crate::proto::StoreLatestRequest,
+        ) -> StreamResult<crate::proto::StoreLatestResponse> {
+            self.0.latest(r).await
+        }
+        async fn record_at(
+            &self,
+            c: &crate::proto::ChainId,
+            t: &str,
+            p: &str,
+        ) -> StreamResult<Option<Vec<u8>>> {
+            self.0.record_at(c, t, p).await
+        }
+        async fn close_chain(&self, c: &crate::proto::ChainId) -> StreamResult<()> {
+            self.0.close_chain(c).await
+        }
+        async fn close_topic(&self, c: &crate::proto::ChainId, t: &str) -> StreamResult<()> {
+            self.0.close_topic(c, t).await
+        }
+        async fn retire_producer(
+            &self,
+            c: &crate::proto::ChainId,
+            t: &str,
+            p: &str,
+            a: i64,
+        ) -> StreamResult<()> {
+            self.0.retire_producer(c, t, p, a).await
+        }
+        async fn written_topics(&self, c: &crate::proto::ChainId) -> StreamResult<Vec<String>> {
+            self.0.written_topics(c).await
+        }
+        async fn delete_owner(
+            &self,
+            r: DeleteOwnerRequest,
+        ) -> StreamResult<crate::proto::DeleteOwnerResponse> {
+            self.0.delete_owner(r).await
+        }
+        async fn flush_notifications(&self) {
+            std::future::pending::<()>().await;
+        }
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_flush_waits_only_so_long_for_notifications_that_never_go_out() {
+        let service = StreamService::new(
+            Arc::new(NeverFlushes(crate::MemoryStore::new())),
+            Arc::new(Running),
+            StreamsOptions::default(),
+        );
+        let started = tokio::time::Instant::now();
+        flush(&service).await;
+        assert_eq!(
+            started.elapsed(),
+            crate::FLUSH_LIMIT,
+            "a stopping process mustn't hang on a close retrying against a server that's down"
+        );
     }
 }

@@ -44,6 +44,7 @@ pub(crate) fn stream_error(error: &RedisError, call: Call) -> StreamError {
         Some("STREAMS_DIVERGENT") => StreamError::new(StreamFailureKind::ProducerDivergent, detail),
         Some("STREAMS_STALE") => StreamError::new(StreamFailureKind::ProducerStale, detail),
         Some("STREAMS_CLOSED") => StreamError::closed(detail),
+        Some("STREAMS_HOLDERS") => StreamError::refused(detail),
         Some(code) if TRANSIENT.contains(&code) => match call {
             Call::Append => StreamError::outcome_unknown(format!(
                 "Redis could not take the batch for now, so it may or may not have landed: \
