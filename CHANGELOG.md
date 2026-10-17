@@ -53,3 +53,9 @@
 - Added `execute_sync_nexus_operation`, which calls `ExecuteSyncNexusOperation` by method path
   with the namespace header. The client-side payload size check of the typed client does not
   run on this path. The server still checks sizes.
+- Added `fold_nexus_progress`, `fold_nexus_progresses`, `NexusProgressOperations` and
+  `NEXUS_OPERATION_PROGRESS_TYPE_URL`, the reference fold and delivery of the Nexus progress on a
+  Workflow Task's attachments, keyed by endpoint, service, operation and token. The highest
+  counter wins, and an operation that resolved gets no progress. The shared vectors are in
+  `testdata/nexus_progress_folds.json`.
+- Ported Bridge's Core progress tests onto Core's mock Worker with the test as lang.
