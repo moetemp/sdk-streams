@@ -2282,6 +2282,7 @@ version = "0.1.0"
 dependencies = [
  "async-trait",
  "crc16",
+ "parking_lot",
  "prost",
  "prost-wkt-types",
  "redis",
@@ -2292,6 +2293,7 @@ dependencies = [
  "temporalio-common",
  "thiserror",
  "tokio",
+ "tokio-util",
  "tonic",
  "tonic-prost-build",
  "tracing",
@@ -2399,6 +2401,7 @@ dependencies = [
  "bytes",
  "futures-core",
  "futures-sink",
+ "futures-util",
  "libc",
  "pin-project-lite",
  "tokio",

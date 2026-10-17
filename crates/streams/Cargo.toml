@@ -26,6 +26,7 @@ redis = ["dep:redis", "dep:crc16"]
 [dependencies]
 async-trait = "0.1"
 crc16 = { version = "0.4", optional = true }
+parking_lot = "0.12"
 prost = { workspace = true }
 prost-types = { workspace = true }
 redis = { version = "1.7", optional = true, default-features = false, features = [
@@ -41,7 +42,8 @@ temporalio-client = { workspace = true }
 temporalio-common = { workspace = true }
 thiserror = { workspace = true }
 tonic = { workspace = true }
-tokio = { version = "1.47", default-features = false, features = ["sync", "time"] }
+tokio = { version = "1.47", default-features = false, features = ["rt", "sync", "time"] }
+tokio-util = { version = "0.7", default-features = false, features = ["rt"] }
 tracing = "0.1"
 
 [build-dependencies]

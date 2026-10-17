@@ -4,9 +4,11 @@ use crate::{
     OwnerClient, StreamError, StreamResult, StreamStore, Streams, StreamsOptions,
     proto::{
         AppendRequest, CloseRequest, DeleteOwnerRequest, DescribeStoreRequest,
-        DescribeStoreResponse, LatestRequest, ReadRequest, RetireProducerRequest, StreamFailure,
-        StreamStoreConfig, stream_store_config,
+        DescribeStoreResponse, LatestRequest, PublishWorkflowTaskRequest, ReadRequest,
+        RetireProducerRequest, RunEvictedRequest, RunEvictedResponse, ShutdownWorkerRequest,
+        ShutdownWorkerResponse, StreamFailure, StreamStoreConfig, stream_store_config,
     },
+    workflow::WorkflowOutput,
 };
 use prost::Message;
 use std::{sync::Arc, time::Duration};
@@ -22,11 +24,14 @@ const MAX_READ_WAIT: Duration = Duration::from_secs(60);
 
 /// One process's stream store and the calls lang makes on it.
 ///
-/// Lang builds one from a [StreamStoreConfig], hands [StreamService::store] to its Workers, and
-/// sends its stream calls to [StreamService::call] as serialized `coresdk.streams` requests.
+/// Lang builds one from a [StreamStoreConfig] and sends its stream calls to [StreamService::call]
+/// as serialized `coresdk.streams` requests. Its Workers publish their Workflows' output through
+/// the same calls.
 pub struct StreamService {
     store: Arc<dyn StreamStore>,
+    owner: Arc<dyn OwnerClient>,
     streams: Streams,
+    workflows: WorkflowOutput,
     meter: TemporalMeter,
 }
 
@@ -74,16 +79,22 @@ impl StreamService {
         owner: Arc<dyn OwnerClient>,
         options: StreamsOptions,
     ) -> Self {
-        let streams = Streams::new(store.clone(), owner, options);
+        let streams = Streams::new(store.clone(), owner.clone(), options);
+        let meter = TemporalMeter::no_op();
+        let workflows = WorkflowOutput::new(store.clone(), owner.clone(), meter.clone());
         Self {
             store,
+            owner,
             streams,
-            meter: TemporalMeter::no_op(),
+            workflows,
+            meter,
         }
     }
 
-    /// Counts on `meter`, which is the no-op meter until lang gives one.
+    /// Counts on `meter`, which is the no-op meter until lang gives one. Call it before any
+    /// Workflow publishes.
     pub fn with_meter(mut self, meter: TemporalMeter) -> Self {
+        self.workflows = WorkflowOutput::new(self.store.clone(), self.owner.clone(), meter.clone());
         self.meter = meter;
         self
     }
@@ -93,7 +104,7 @@ impl StreamService {
         &self.meter
     }
 
-    /// The store, for the Workers that append Workflow output to it.
+    /// The store the service serves.
     pub fn store(&self) -> Arc<dyn StreamStore> {
         self.store.clone()
     }
@@ -140,15 +151,57 @@ impl StreamService {
                 }
                 .encode_to_vec())
             }
+            "PublishWorkflowTask" => self
+                .workflows
+                .publish(decode::<PublishWorkflowTaskRequest>(rpc, request)?)
+                .await
+                .map(|r| r.encode_to_vec()),
+            "RunEvicted" => {
+                let request = decode::<RunEvictedRequest>(rpc, request)?;
+                self.run_evicted(
+                    &request.worker_id,
+                    &request.run_id,
+                    request.workflow_execution_ending,
+                )
+                .await;
+                Ok(RunEvictedResponse {}.encode_to_vec())
+            }
+            "ShutdownWorker" => {
+                let request = decode::<ShutdownWorkerRequest>(rpc, request)?;
+                self.shutdown_worker(&request.worker_id).await;
+                Ok(ShutdownWorkerResponse {}.encode_to_vec())
+            }
             other => Err(StreamError::unsupported(format!(
                 "the stream service has no call {other:?}"
             ))),
         };
         response.map_err(StreamFailure::from)
     }
+
+    /// Drops `worker_id`'s state for `run_id`. With `workflow_execution_ending`, closes the run's
+    /// chain in the background when the run's last live completion ended the chain and the
+    /// server shows the run closed. Lang waits for it before it completes the eviction
+    /// activation, so it never races the first publish of the run's next cache entry.
+    pub async fn run_evicted(
+        &self,
+        worker_id: &str,
+        run_id: &str,
+        workflow_execution_ending: bool,
+    ) {
+        self.workflows
+            .run_evicted(worker_id, run_id, workflow_execution_ending)
+            .await;
+    }
+
+    /// Drops all of `worker_id`'s state, and waits for the store calls its runs left running,
+    /// such as a chain close. Replay never sends a close again, so a Worker shutdown must wait
+    /// for it.
+    pub async fn shutdown_worker(&self, worker_id: &str) {
+        self.workflows.shutdown_worker(worker_id).await;
+    }
 }
 
-/// `request` with its record count and wait cut to what Core allows.
+/// `request` with its record count and wait cut to what the service allows.
 fn capped(mut request: ReadRequest) -> ReadRequest {
     request.max_records = request.max_records.min(MAX_READ_RECORDS);
     let too_long = request

@@ -23,6 +23,7 @@ mod record;
 mod redis;
 mod service;
 mod store;
+mod workflow;
 
 #[cfg(feature = "redis")]
 pub use self::redis::{RedisStore, RedisStoreOptions};
@@ -46,6 +47,7 @@ pub use record::{
 };
 pub use service::StreamService;
 pub use store::{Capabilities, ConditionForms, MAX_BATCH_BYTES, MAX_RECORD_BYTES, StreamStore};
+pub use workflow::{MAX_APPEND_BYTES, STREAM_COMPLETED_TASKS, STREAM_RETRY_BITS, stream_attempt};
 
 /// The protos stores and lang exchange.
 pub mod proto {

@@ -7,10 +7,11 @@ import "google/protobuf/duration.proto";
 import "temporal/api/common/v1/message.proto";
 import "temporal/sdk/streams/v1/message.proto";
 
-// The stream calls lang makes, served in process by Core against the configured store.
+// The stream calls lang makes, served in process by the stream service against the configured
+// store.
 //
 // Lang converts each value, hashes it and runs the payload codec before an append, and decodes
-// each body after a read, so Core only ever moves encoded bodies. Every failure crosses as a
+// each body after a read, so the service only ever moves encoded bodies. Every failure crosses as a
 // `StreamFailure`.
 service StreamService {
   // Appends one batch for one producer attempt. The batch lands whole and in order.
@@ -29,6 +30,15 @@ service StreamService {
   rpc RetireProducer(RetireProducerRequest) returns (RetireProducerResponse);
   // What the store can do beyond the log every store gives, and its limits.
   rpc DescribeStore(DescribeStoreRequest) returns (DescribeStoreResponse);
+  // Appends what one live activation of a Workflow published. Lang calls it before it completes
+  // the activation, and fails the Workflow Task when the call fails.
+  rpc PublishWorkflowTask(PublishWorkflowTaskRequest) returns (PublishWorkflowTaskResponse);
+  // Drops one Worker's state for one run. Lang calls it for each eviction, and waits for it
+  // before it completes the eviction activation.
+  rpc RunEvicted(RunEvictedRequest) returns (RunEvictedResponse);
+  // Drops one Worker's state for all its runs, and waits for the store calls the Worker's runs
+  // left running. Lang calls it at Worker shutdown, after the last eviction.
+  rpc ShutdownWorker(ShutdownWorkerRequest) returns (ShutdownWorkerResponse);
 }
 
 // Which store holds a process's streams, and how to reach it. Lang builds one store from it and
@@ -45,7 +55,7 @@ message StreamStoreConfig {
   google.protobuf.Duration owner_start_grace = 6;
 }
 
-// Streams in a Redis or Redis Cluster that Core connects to itself.
+// Streams in a Redis or Redis Cluster that the service connects to itself.
 message RedisStoreConfig {
   // One `redis://` or `rediss://` URL, or the seed nodes of a cluster. Credentials and TLS come
   // from the URL.
@@ -61,8 +71,8 @@ message RedisStoreConfig {
   uint32 blocking_reads_per_node = 5;
   // How long a short call waits for its reply. Unset uses the default.
   google.protobuf.Duration response_timeout = 6;
-  // Runs with no Lua, so the store keeps no producer state and no last position, and Core takes
-  // their fallbacks. For tests of the fallbacks on a real store.
+  // Runs with no Lua, so the store keeps no producer state and no last position, and the service
+  // takes their fallbacks. For tests of the fallbacks on a real store.
   bool plain = 10;
 }
 
@@ -107,8 +117,8 @@ message NamedProducer {
   int64 attempt = 2;
 }
 
-// An Activity attempt that writes. Core derives the producer id from it, so every SDK writes the
-// same one, and the attempt is the Activity's.
+// An Activity attempt that writes. The service derives the producer id from it, so every SDK writes
+// the same one, and the attempt is the Activity's.
 message ActivityProducer {
   string workflow_id = 1;
   string run_id = 2;
@@ -156,11 +166,11 @@ message ReadRequest {
   // Read strictly after this cursor. Empty starts at the oldest record the stream retains, and
   // `$end` at whatever is appended after the read starts.
   string after = 2;
-  // How long to wait for a record when none is there. Zero answers at once. Core waits at most
-  // 60 seconds, the stream service contract's long-poll maximum.
+  // How long to wait for a record when none is there. Zero answers at once. The service waits at
+  // most 60 seconds, the stream service contract's long-poll maximum.
   google.protobuf.Duration wait = 3;
   // How many stored records one answer holds at most. A synthesized supersession comes on top.
-  // Zero lets Core choose. Core answers with at most 1,000 records.
+  // Zero lets the service choose. The service answers with at most 1,000 records.
   uint32 max_records = 4;
   // The `state` of the previous answer of the same read. Empty on its first call.
   bytes state = 5;
@@ -247,7 +257,7 @@ message DescribeStoreResponse {
   StoreCapabilities capabilities = 2;
 }
 
-// What a store can do beyond the log every store gives. Core takes a fallback for each
+// What a store can do beyond the log every store gives. The service takes a fallback for each
 // capability the store lacks, with the weaker guarantee the fallback names.
 message StoreCapabilities {
   // The append checks the producer attempt's dedupe entry and the close flags in the same step.
@@ -319,8 +329,8 @@ message StreamFailure {
   string cursor = 3;
 }
 
-// The calls below are what Core asks of a store, below owner checks, cursors and supersession.
-// They name chains and store positions, not addresses and cursors.
+// The calls below are what the service asks of a store, below owner checks, cursors and
+// supersession. They name chains and store positions, not addresses and cursors.
 
 message StoreAppendRequest {
   ChainId chain = 1;
@@ -369,3 +379,73 @@ message StoreLatestResponse {
   // Empty when the topic holds no record.
   string position = 1;
 }
+
+// One live activation's stream output and the facts of its run, sent before lang completes the
+// activation. Lang sends none while it replays, since the records are in the store already. It
+// sends one for an activation with records or with a terminal command.
+message PublishWorkflowTaskRequest {
+  string namespace = 1;
+  // Names the lang Worker. The service keys each run's state by the Worker and the run, so two
+  // Workers in one process never share counters.
+  string worker_id = 2;
+  string task_queue = 3;
+  string workflow_type = 4;
+  string workflow_id = 5;
+  string run_id = 6;
+  // From `InitializeWorkflow`. Empty means the run starts its chain.
+  string first_execution_run_id = 7;
+  // A cron schedule starts the chain's next run when this one completes or fails.
+  bool cron = 8;
+  // A failure with a retry policy can go on in the same chain.
+  bool has_retry_policy = 9;
+  // The three fields of the activation's `WorkflowTaskHistoryInfo`.
+  int64 task_started_event_id = 10;
+  uint32 failed_attempts = 11;
+  repeated int64 completed_started_event_ids = 12;
+  // In publish order across topics.
+  repeated OutputRecord records = 13;
+  // The first terminal command of the completion, which is the one Core keeps.
+  WorkflowTerminalCommand terminal_command = 14;
+}
+
+// One record a Workflow published.
+message OutputRecord {
+  string topic = 1;
+  // DATA or FINISH.
+  temporal.sdk.streams.v1.StreamRecordKind kind = 2;
+  // The value on DATA, after lang's payload codec. Absent on FINISH.
+  temporal.api.common.v1.Payload body = 3;
+  // The SHA-256 of the body as the payload converter made it, before the codec. Set on DATA. The
+  // service builds each topic's batch digest from these, so a repeat of a batch matches whatever
+  // the codec made of the bodies.
+  bytes content_hash = 4;
+}
+
+enum WorkflowTerminalCommand {
+  WORKFLOW_TERMINAL_COMMAND_UNSPECIFIED = 0;
+  WORKFLOW_TERMINAL_COMMAND_COMPLETE = 1;
+  WORKFLOW_TERMINAL_COMMAND_FAIL = 2;
+  WORKFLOW_TERMINAL_COMMAND_CANCEL = 3;
+  WORKFLOW_TERMINAL_COMMAND_CONTINUE_AS_NEW = 4;
+}
+
+message PublishWorkflowTaskResponse {
+  // The topics whose records the service dropped, since the store has closed them. The other
+  // topics went on.
+  repeated string dropped_topics = 1;
+}
+
+message RunEvictedRequest {
+  string worker_id = 1;
+  string run_id = 2;
+  // The eviction reason is `WorkflowExecutionEnding`. Then the service can close the run's chain.
+  bool workflow_execution_ending = 3;
+}
+
+message RunEvictedResponse {}
+
+message ShutdownWorkerRequest {
+  string worker_id = 1;
+}
+
+message ShutdownWorkerResponse {}
