@@ -26,6 +26,7 @@ mod notifylog;
 mod owner;
 #[cfg(feature = "postgres")]
 mod postgres;
+mod progress;
 pub mod protos;
 mod reader;
 mod record;
@@ -64,6 +65,10 @@ pub use notify::{
 };
 pub use notifylog::{ArchiveMark, NotificationEntry, NotificationLog};
 pub use owner::{OwnerClient, OwnerDescription, OwnerError, OwnerId, OwnerStatus, RunClose};
+pub use progress::{
+    NEXUS_OPERATION_PROGRESS_TYPE_URL, NexusProgressOperations, fold_nexus_progress,
+    fold_nexus_progresses,
+};
 pub use reader::{
     DEFAULT_MAX_RECORDS, MAX_STATE_BYTES, MAX_TRACKED_PRODUCERS, ReadTarget, read_page,
 };

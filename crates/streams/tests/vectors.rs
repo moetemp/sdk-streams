@@ -117,3 +117,114 @@ fn wake_folds_match_the_vectors() {
         assert_eq!(folded, wakes("folded"), "{}", case["name"]);
     }
 }
+
+/// The progress in a `nexus_progress_folds.json` entry. A missing `key` leaves the operation
+/// unset, and a missing field takes its proto default.
+fn vector_progress(
+    value: &Value,
+) -> temporalio_streams::protos::temporal::api::nexus::v1::NexusOperationProgress {
+    use temporalio_streams::protos::temporal::api::nexus::v1::{
+        NexusOperationProgress,
+        nexus_operation_progress::{Operation, OperationKey},
+    };
+    let text = |value: &Value, field: &str| value[field].as_str().unwrap_or_default().to_string();
+    let key = &value["key"];
+    NexusOperationProgress {
+        operation: key.is_object().then(|| {
+            Operation::OperationKey(OperationKey {
+                endpoint: text(key, "endpoint"),
+                service: text(key, "service"),
+                operation: text(key, "operation"),
+                operation_token: text(key, "operation_token"),
+            })
+        }),
+        position: text(value, "position"),
+        counter: value["counter"].as_i64().unwrap_or_default(),
+        metadata: value["metadata"]
+            .as_object()
+            .into_iter()
+            .flatten()
+            .map(|(k, v)| (k.clone(), v.as_str().unwrap().to_string()))
+            .collect(),
+    }
+}
+
+fn vector_progresses(
+    value: &Value,
+) -> Vec<temporalio_streams::protos::temporal::api::nexus::v1::NexusOperationProgress> {
+    value
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(vector_progress)
+        .collect()
+}
+
+#[test]
+fn nexus_progress_folds_match_the_vectors() {
+    // Each lang folds a task's progress itself, so each one must give these results.
+    use temporalio_streams::fold_nexus_progress;
+    let vectors: Value =
+        serde_json::from_str(include_str!("../testdata/nexus_progress_folds.json")).unwrap();
+    let cases = vectors["folds"].as_array().unwrap();
+    assert!(!cases.is_empty());
+    for case in cases {
+        let mut folded = vec![];
+        for progress in vector_progresses(&case["progress"]) {
+            fold_nexus_progress(&mut folded, &progress);
+        }
+        assert_eq!(
+            folded,
+            vector_progresses(&case["folded"]),
+            "{}",
+            case["name"]
+        );
+    }
+}
+
+#[test]
+fn nexus_progress_deliveries_match_the_vectors() {
+    // Each lang hands progress to its operations itself, so each one must give these results.
+    use temporalio_streams::{NexusProgressOperations, fold_nexus_progress};
+    let vectors: Value =
+        serde_json::from_str(include_str!("../testdata/nexus_progress_folds.json")).unwrap();
+    let cases = vectors["deliveries"].as_array().unwrap();
+    assert!(!cases.is_empty());
+    for case in cases {
+        let name = case["name"].as_str().unwrap();
+        let mut operations = NexusProgressOperations::default();
+        for (index, step) in case["steps"].as_array().unwrap().iter().enumerate() {
+            let text = |value: &Value, field: &str| value[field].as_str().unwrap().to_string();
+            let seq = |value: &Value| value["seq"].as_u64().unwrap() as u32;
+            if let Some(scheduled) = step.get("schedule") {
+                operations.schedule(
+                    seq(scheduled),
+                    &text(scheduled, "endpoint"),
+                    &text(scheduled, "service"),
+                    &text(scheduled, "operation"),
+                );
+            } else if let Some(started) = step.get("start") {
+                operations.start(seq(started), &text(started, "operation_token"));
+            } else if let Some(resolved) = step.get("resolve") {
+                operations.resolve(seq(resolved));
+            } else {
+                let mut folded = vec![];
+                for progress in vector_progresses(&step["attachments"]) {
+                    fold_nexus_progress(&mut folded, &progress);
+                }
+                let delivered: Vec<(u32, String, i64)> = operations
+                    .deliver(&folded)
+                    .into_iter()
+                    .map(|(seq, progress)| (seq, progress.position, progress.counter))
+                    .collect();
+                let expected: Vec<(u32, String, i64)> = step["delivered"]
+                    .as_array()
+                    .unwrap()
+                    .iter()
+                    .map(|d| (seq(d), text(d, "position"), d["counter"].as_i64().unwrap()))
+                    .collect();
+                assert_eq!(delivered, expected, "{name}, step {index}");
+            }
+        }
+    }
+}

@@ -1,0 +1,991 @@
+{
+  "folds": [
+    {
+      "name": "no progress folds to none",
+      "progress": [],
+      "folded": []
+    },
+    {
+      "name": "one progress per operation is kept as it is",
+      "progress": [
+        {
+          "key": {
+            "endpoint": "endpoint",
+            "service": "service",
+            "operation": "operation",
+            "operation_token": "t1"
+          },
+          "position": "position-3",
+          "counter": 3,
+          "metadata": {
+            "records": "3"
+          }
+        }
+      ],
+      "folded": [
+        {
+          "key": {
+            "endpoint": "endpoint",
+            "service": "service",
+            "operation": "operation",
+            "operation_token": "t1"
+          },
+          "position": "position-3",
+          "counter": 3,
+          "metadata": {
+            "records": "3"
+          }
+        }
+      ]
+    },
+    {
+      "name": "the highest counter per operation is kept in first-seen order",
+      "progress": [
+        {
+          "key": {
+            "endpoint": "endpoint",
+            "service": "service",
+            "operation": "operation",
+            "operation_token": "b"
+          },
+          "position": "a",
+          "counter": 2
+        },
+        {
+          "key": {
+            "endpoint": "endpoint",
+            "service": "service",
+            "operation": "operation",
+            "operation_token": "a"
+          },
+          "position": "b",
+          "counter": 1
+        },
+        {
+          "key": {
+            "endpoint": "endpoint",
+            "service": "service",
+            "operation": "operation",
+            "operation_token": "b"
+          },
+          "position": "c",
+          "counter": 4
+        },
+        {
+          "key": {
+            "endpoint": "endpoint",
+            "service": "service",
+            "operation": "operation",
+            "operation_token": "b"
+          },
+          "position": "d",
+          "counter": 3
+        },
+        {
+          "key": {
+            "endpoint": "endpoint",
+            "service": "service",
+            "operation": "operation",
+            "operation_token": "a"
+          },
+          "position": "e",
+          "counter": 1
+        }
+      ],
+      "folded": [
+        {
+          "key": {
+            "endpoint": "endpoint",
+            "service": "service",
+            "operation": "operation",
+            "operation_token": "b"
+          },
+          "position": "c",
+          "counter": 4
+        },
+        {
+          "key": {
+            "endpoint": "endpoint",
+            "service": "service",
+            "operation": "operation",
+            "operation_token": "a"
+          },
+          "position": "b",
+          "counter": 1
+        }
+      ]
+    },
+    {
+      "name": "an equal counter keeps the first progress",
+      "progress": [
+        {
+          "key": {
+            "endpoint": "endpoint",
+            "service": "service",
+            "operation": "operation",
+            "operation_token": "t1"
+          },
+          "position": "first",
+          "counter": 5
+        },
+        {
+          "key": {
+            "endpoint": "endpoint",
+            "service": "service",
+            "operation": "operation",
+            "operation_token": "t1"
+          },
+          "position": "second",
+          "counter": 5
+        }
+      ],
+      "folded": [
+        {
+          "key": {
+            "endpoint": "endpoint",
+            "service": "service",
+            "operation": "operation",
+            "operation_token": "t1"
+          },
+          "position": "first",
+          "counter": 5
+        }
+      ]
+    },
+    {
+      "name": "keys that differ in any part are separate operations",
+      "progress": [
+        {
+          "key": {
+            "endpoint": "endpoint",
+            "service": "service",
+            "operation": "operation",
+            "operation_token": "t1"
+          },
+          "position": "position-1",
+          "counter": 1
+        },
+        {
+          "key": {
+            "endpoint": "other",
+            "service": "service",
+            "operation": "operation",
+            "operation_token": "t1"
+          },
+          "position": "position-2",
+          "counter": 2
+        },
+        {
+          "key": {
+            "endpoint": "endpoint",
+            "service": "other",
+            "operation": "operation",
+            "operation_token": "t1"
+          },
+          "position": "position-3",
+          "counter": 3
+        },
+        {
+          "key": {
+            "endpoint": "endpoint",
+            "service": "service",
+            "operation": "other",
+            "operation_token": "t1"
+          },
+          "position": "position-4",
+          "counter": 4
+        },
+        {
+          "key": {
+            "endpoint": "endpoint",
+            "service": "service",
+            "operation": "operation",
+            "operation_token": "t2"
+          },
+          "position": "position-5",
+          "counter": 5
+        }
+      ],
+      "folded": [
+        {
+          "key": {
+            "endpoint": "endpoint",
+            "service": "service",
+            "operation": "operation",
+            "operation_token": "t1"
+          },
+          "position": "position-1",
+          "counter": 1
+        },
+        {
+          "key": {
+            "endpoint": "other",
+            "service": "service",
+            "operation": "operation",
+            "operation_token": "t1"
+          },
+          "position": "position-2",
+          "counter": 2
+        },
+        {
+          "key": {
+            "endpoint": "endpoint",
+            "service": "other",
+            "operation": "operation",
+            "operation_token": "t1"
+          },
+          "position": "position-3",
+          "counter": 3
+        },
+        {
+          "key": {
+            "endpoint": "endpoint",
+            "service": "service",
+            "operation": "other",
+            "operation_token": "t1"
+          },
+          "position": "position-4",
+          "counter": 4
+        },
+        {
+          "key": {
+            "endpoint": "endpoint",
+            "service": "service",
+            "operation": "operation",
+            "operation_token": "t2"
+          },
+          "position": "position-5",
+          "counter": 5
+        }
+      ]
+    },
+    {
+      "name": "a higher counter replaces the position and the metadata",
+      "progress": [
+        {
+          "key": {
+            "endpoint": "endpoint",
+            "service": "service",
+            "operation": "operation",
+            "operation_token": "t1"
+          },
+          "position": "position-1",
+          "counter": 1,
+          "metadata": {
+            "records": "1"
+          }
+        },
+        {
+          "key": {
+            "endpoint": "endpoint",
+            "service": "service",
+            "operation": "operation",
+            "operation_token": "t1"
+          },
+          "position": "position-2",
+          "counter": 2
+        }
+      ],
+      "folded": [
+        {
+          "key": {
+            "endpoint": "endpoint",
+            "service": "service",
+            "operation": "operation",
+            "operation_token": "t1"
+          },
+          "position": "position-2",
+          "counter": 2
+        }
+      ]
+    }
+  ],
+  "deliveries": [
+    {
+      "name": "progress reaches a started operation",
+      "steps": [
+        {
+          "schedule": {
+            "seq": 1,
+            "endpoint": "endpoint",
+            "service": "service",
+            "operation": "operation"
+          }
+        },
+        {
+          "start": {
+            "seq": 1,
+            "operation_token": "t1"
+          }
+        },
+        {
+          "attachments": [
+            {
+              "key": {
+                "endpoint": "endpoint",
+                "service": "service",
+                "operation": "operation",
+                "operation_token": "t1"
+              },
+              "position": "position-1",
+              "counter": 1
+            }
+          ],
+          "delivered": [
+            {
+              "seq": 1,
+              "counter": 1,
+              "position": "position-1"
+            }
+          ]
+        },
+        {
+          "attachments": [
+            {
+              "key": {
+                "endpoint": "endpoint",
+                "service": "service",
+                "operation": "operation",
+                "operation_token": "t1"
+              },
+              "position": "position-2",
+              "counter": 2
+            }
+          ],
+          "delivered": [
+            {
+              "seq": 1,
+              "counter": 2,
+              "position": "position-2"
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "name": "progress follows the start it arrived with",
+      "steps": [
+        {
+          "schedule": {
+            "seq": 1,
+            "endpoint": "endpoint",
+            "service": "service",
+            "operation": "operation"
+          }
+        },
+        {
+          "start": {
+            "seq": 1,
+            "operation_token": "t1"
+          }
+        },
+        {
+          "attachments": [
+            {
+              "key": {
+                "endpoint": "endpoint",
+                "service": "service",
+                "operation": "operation",
+                "operation_token": "t1"
+              },
+              "position": "position-7",
+              "counter": 7
+            }
+          ],
+          "delivered": [
+            {
+              "seq": 1,
+              "counter": 7,
+              "position": "position-7"
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "name": "progress for an operation that has not started is dropped and not remembered",
+      "steps": [
+        {
+          "schedule": {
+            "seq": 1,
+            "endpoint": "endpoint",
+            "service": "service",
+            "operation": "operation"
+          }
+        },
+        {
+          "attachments": [
+            {
+              "key": {
+                "endpoint": "endpoint",
+                "service": "service",
+                "operation": "operation",
+                "operation_token": "t1"
+              },
+              "position": "position-4",
+              "counter": 4
+            }
+          ],
+          "delivered": []
+        },
+        {
+          "start": {
+            "seq": 1,
+            "operation_token": "t1"
+          }
+        },
+        {
+          "attachments": [
+            {
+              "key": {
+                "endpoint": "endpoint",
+                "service": "service",
+                "operation": "operation",
+                "operation_token": "t1"
+              },
+              "position": "position-4",
+              "counter": 4
+            }
+          ],
+          "delivered": [
+            {
+              "seq": 1,
+              "counter": 4,
+              "position": "position-4"
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "name": "an operation that resolves in the same task gets no progress",
+      "steps": [
+        {
+          "schedule": {
+            "seq": 1,
+            "endpoint": "endpoint",
+            "service": "service",
+            "operation": "operation"
+          }
+        },
+        {
+          "schedule": {
+            "seq": 2,
+            "endpoint": "endpoint",
+            "service": "service",
+            "operation": "operation"
+          }
+        },
+        {
+          "start": {
+            "seq": 1,
+            "operation_token": "t1"
+          }
+        },
+        {
+          "start": {
+            "seq": 2,
+            "operation_token": "t2"
+          }
+        },
+        {
+          "resolve": {
+            "seq": 2
+          }
+        },
+        {
+          "attachments": [
+            {
+              "key": {
+                "endpoint": "endpoint",
+                "service": "service",
+                "operation": "operation",
+                "operation_token": "t2"
+              },
+              "position": "position-1",
+              "counter": 1
+            },
+            {
+              "key": {
+                "endpoint": "endpoint",
+                "service": "service",
+                "operation": "operation",
+                "operation_token": "t1"
+              },
+              "position": "position-1",
+              "counter": 1
+            }
+          ],
+          "delivered": [
+            {
+              "seq": 1,
+              "counter": 1,
+              "position": "position-1"
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "name": "progress after the operation resolved is dropped",
+      "steps": [
+        {
+          "schedule": {
+            "seq": 1,
+            "endpoint": "endpoint",
+            "service": "service",
+            "operation": "operation"
+          }
+        },
+        {
+          "start": {
+            "seq": 1,
+            "operation_token": "t1"
+          }
+        },
+        {
+          "attachments": [
+            {
+              "key": {
+                "endpoint": "endpoint",
+                "service": "service",
+                "operation": "operation",
+                "operation_token": "t1"
+              },
+              "position": "position-1",
+              "counter": 1
+            }
+          ],
+          "delivered": [
+            {
+              "seq": 1,
+              "counter": 1,
+              "position": "position-1"
+            }
+          ]
+        },
+        {
+          "resolve": {
+            "seq": 1
+          }
+        },
+        {
+          "attachments": [
+            {
+              "key": {
+                "endpoint": "endpoint",
+                "service": "service",
+                "operation": "operation",
+                "operation_token": "t1"
+              },
+              "position": "position-2",
+              "counter": 2
+            }
+          ],
+          "delivered": []
+        }
+      ]
+    },
+    {
+      "name": "progress at or below a delivered counter is dropped in later tasks",
+      "steps": [
+        {
+          "schedule": {
+            "seq": 1,
+            "endpoint": "endpoint",
+            "service": "service",
+            "operation": "operation"
+          }
+        },
+        {
+          "start": {
+            "seq": 1,
+            "operation_token": "t1"
+          }
+        },
+        {
+          "attachments": [
+            {
+              "key": {
+                "endpoint": "endpoint",
+                "service": "service",
+                "operation": "operation",
+                "operation_token": "t1"
+              },
+              "position": "position-5",
+              "counter": 5
+            }
+          ],
+          "delivered": [
+            {
+              "seq": 1,
+              "counter": 5,
+              "position": "position-5"
+            }
+          ]
+        },
+        {
+          "attachments": [
+            {
+              "key": {
+                "endpoint": "endpoint",
+                "service": "service",
+                "operation": "operation",
+                "operation_token": "t1"
+              },
+              "position": "position-5",
+              "counter": 5
+            }
+          ],
+          "delivered": []
+        },
+        {
+          "attachments": [
+            {
+              "key": {
+                "endpoint": "endpoint",
+                "service": "service",
+                "operation": "operation",
+                "operation_token": "t1"
+              },
+              "position": "position-4",
+              "counter": 4
+            }
+          ],
+          "delivered": []
+        },
+        {
+          "attachments": [
+            {
+              "key": {
+                "endpoint": "endpoint",
+                "service": "service",
+                "operation": "operation",
+                "operation_token": "t1"
+              },
+              "position": "position-6",
+              "counter": 6
+            }
+          ],
+          "delivered": [
+            {
+              "seq": 1,
+              "counter": 6,
+              "position": "position-6"
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "name": "two operations with one key both get the progress",
+      "steps": [
+        {
+          "schedule": {
+            "seq": 1,
+            "endpoint": "endpoint",
+            "service": "service",
+            "operation": "operation"
+          }
+        },
+        {
+          "schedule": {
+            "seq": 2,
+            "endpoint": "endpoint",
+            "service": "service",
+            "operation": "operation"
+          }
+        },
+        {
+          "start": {
+            "seq": 1,
+            "operation_token": "t1"
+          }
+        },
+        {
+          "start": {
+            "seq": 2,
+            "operation_token": "t1"
+          }
+        },
+        {
+          "attachments": [
+            {
+              "key": {
+                "endpoint": "endpoint",
+                "service": "service",
+                "operation": "operation",
+                "operation_token": "t1"
+              },
+              "position": "position-3",
+              "counter": 3
+            }
+          ],
+          "delivered": [
+            {
+              "seq": 1,
+              "counter": 3,
+              "position": "position-3"
+            },
+            {
+              "seq": 2,
+              "counter": 3,
+              "position": "position-3"
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "name": "a token alone is not a key",
+      "steps": [
+        {
+          "schedule": {
+            "seq": 1,
+            "endpoint": "endpoint",
+            "service": "service",
+            "operation": "operation"
+          }
+        },
+        {
+          "schedule": {
+            "seq": 2,
+            "endpoint": "endpoint",
+            "service": "service",
+            "operation": "other"
+          }
+        },
+        {
+          "schedule": {
+            "seq": 3,
+            "endpoint": "elsewhere",
+            "service": "service",
+            "operation": "operation"
+          }
+        },
+        {
+          "start": {
+            "seq": 1,
+            "operation_token": "t1"
+          }
+        },
+        {
+          "start": {
+            "seq": 2,
+            "operation_token": "t1"
+          }
+        },
+        {
+          "start": {
+            "seq": 3,
+            "operation_token": "t1"
+          }
+        },
+        {
+          "attachments": [
+            {
+              "key": {
+                "endpoint": "endpoint",
+                "service": "service",
+                "operation": "other",
+                "operation_token": "t1"
+              },
+              "position": "position-1",
+              "counter": 1
+            }
+          ],
+          "delivered": [
+            {
+              "seq": 2,
+              "counter": 1,
+              "position": "position-1"
+            }
+          ]
+        },
+        {
+          "attachments": [
+            {
+              "key": {
+                "endpoint": "elsewhere",
+                "service": "service",
+                "operation": "operation",
+                "operation_token": "t1"
+              },
+              "position": "position-2",
+              "counter": 2
+            }
+          ],
+          "delivered": [
+            {
+              "seq": 3,
+              "counter": 2,
+              "position": "position-2"
+            }
+          ]
+        },
+        {
+          "attachments": [
+            {
+              "key": {
+                "endpoint": "endpoint",
+                "service": "unknown",
+                "operation": "operation",
+                "operation_token": "t1"
+              },
+              "position": "position-3",
+              "counter": 3
+            }
+          ],
+          "delivered": []
+        }
+      ]
+    },
+    {
+      "name": "progress for an unknown operation is dropped",
+      "steps": [
+        {
+          "schedule": {
+            "seq": 1,
+            "endpoint": "endpoint",
+            "service": "service",
+            "operation": "operation"
+          }
+        },
+        {
+          "start": {
+            "seq": 1,
+            "operation_token": "t1"
+          }
+        },
+        {
+          "attachments": [
+            {
+              "key": {
+                "endpoint": "endpoint",
+                "service": "service",
+                "operation": "operation",
+                "operation_token": "t9"
+              },
+              "position": "position-1",
+              "counter": 1
+            },
+            {
+              "key": {
+                "endpoint": "endpoint",
+                "service": "service",
+                "operation": "operation",
+                "operation_token": "t1"
+              },
+              "position": "position-1",
+              "counter": 1
+            }
+          ],
+          "delivered": [
+            {
+              "seq": 1,
+              "counter": 1,
+              "position": "position-1"
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "name": "progress with no operation key is dropped",
+      "steps": [
+        {
+          "schedule": {
+            "seq": 1,
+            "endpoint": "endpoint",
+            "service": "service",
+            "operation": "operation"
+          }
+        },
+        {
+          "start": {
+            "seq": 1,
+            "operation_token": "t1"
+          }
+        },
+        {
+          "attachments": [
+            {
+              "position": "position-1",
+              "counter": 1
+            }
+          ],
+          "delivered": []
+        }
+      ]
+    },
+    {
+      "name": "progress for many operations is delivered in the order of the task's fold",
+      "steps": [
+        {
+          "schedule": {
+            "seq": 1,
+            "endpoint": "endpoint",
+            "service": "service",
+            "operation": "operation"
+          }
+        },
+        {
+          "schedule": {
+            "seq": 2,
+            "endpoint": "endpoint",
+            "service": "service",
+            "operation": "operation"
+          }
+        },
+        {
+          "start": {
+            "seq": 1,
+            "operation_token": "t1"
+          }
+        },
+        {
+          "start": {
+            "seq": 2,
+            "operation_token": "t2"
+          }
+        },
+        {
+          "attachments": [
+            {
+              "key": {
+                "endpoint": "endpoint",
+                "service": "service",
+                "operation": "operation",
+                "operation_token": "t2"
+              },
+              "position": "position-4",
+              "counter": 4
+            },
+            {
+              "key": {
+                "endpoint": "endpoint",
+                "service": "service",
+                "operation": "operation",
+                "operation_token": "t1"
+              },
+              "position": "position-9",
+              "counter": 9
+            }
+          ],
+          "delivered": [
+            {
+              "seq": 2,
+              "counter": 4,
+              "position": "position-4"
+            },
+            {
+              "seq": 1,
+              "counter": 9,
+              "position": "position-9"
+            }
+          ]
+        }
+      ]
+    }
+  ]
+}
