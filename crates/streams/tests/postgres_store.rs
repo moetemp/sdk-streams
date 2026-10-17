@@ -662,7 +662,12 @@ async fn a_listener_that_lost_its_connection_wakes_every_waiter() {
     let waiting = wait_for_one(reader.clone(), &chain);
     tokio::time::sleep(Duration::from_millis(300)).await;
     // The writer sends no `NOTIFY` and the poll is an hour away, so only the listener's
-    // reconnect can wake the waiter.
+    // reconnect can wake the waiter. The record lands before the kill, since a reconnect that
+    // came before the append would wake the waiter to an empty topic.
+    writer
+        .append(append(&chain, "out", "p", 1, 1))
+        .await
+        .unwrap();
     let admin = raw(&url).await;
     let killed: i64 = admin
         .query_one(
@@ -674,10 +679,6 @@ async fn a_listener_that_lost_its_connection_wakes_every_waiter() {
         .unwrap()
         .get(0);
     assert_eq!(killed, 1);
-    writer
-        .append(append(&chain, "out", "p", 1, 1))
-        .await
-        .unwrap();
     let waited = waiting.await.unwrap();
     assert!(waited < Duration::from_secs(5), "{waited:?}");
 }
