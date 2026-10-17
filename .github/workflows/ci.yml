@@ -106,7 +106,7 @@ jobs:
       - run: |
           docker run -d --name minio -p 127.0.0.1:9000:9000 \
             -e MINIO_ROOT_USER="$AWS_ACCESS_KEY_ID" \
-            -e MINIO_ROOT_PASSWORD="$AWS_SECRET_ACCESS_KEY" minio/minio server /data
+            -e MINIO_ROOT_PASSWORD="$AWS_SECRET_ACCESS_KEY" cgr.dev/chainguard/minio server /data
           for _ in $(seq 50); do
             curl -fs http://127.0.0.1:9000/minio/health/ready && break
             sleep 0.2
