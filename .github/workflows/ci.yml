@@ -10,7 +10,7 @@ env:
 
 jobs:
   lint:
-    name: fmt, clippy and the API proto copy
+    name: fmt, clippy and the API proto copies
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -30,6 +30,10 @@ jobs:
         run: scripts/sync-api-protos.sh && git diff --exit-code
       - name: The stream API copy matches its moetemp/api commit
         run: scripts/sync-stream-api.sh && git diff --exit-code
+      - name: The Nexus API copy matches its moetemp/api commit
+        run: scripts/sync-nexus-api.sh && git diff --exit-code
+      - name: The API copies share no path and no name with the pinned sdk-rust
+        run: scripts/check-api-overlap.sh
 
   memory:
     name: memory store and Core mock tests

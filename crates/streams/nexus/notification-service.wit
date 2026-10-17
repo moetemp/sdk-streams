@@ -1,0 +1,96 @@
+// Nexus service that a Worker implements to take NexusHandler callbacks. The server calls
+// OnComplete for the callback's `operation` and OnProgress for its `progress_operation`. Both
+// operations complete synchronously. The records are backed by the messages in
+// temporal/api/notificationservice/v1/request_response.proto and progress.proto, which hold the
+// full comments.
+package temporal:nexus@1.0.0;
+
+world system {
+  export notification-service;
+}
+
+/// @nexus.service-name "temporal.api.notificationservice.v1.NotificationService"
+/// @nexus.experimental
+interface notification-service {
+  use nexus:temporal-types/model@1.0.0.{
+    failure,
+    payload,
+  };
+
+  /// @nexus.doc "The result of the source operation."
+  /// @nexus.proto "temporal.api.notificationservice.v1.OnCompleteRequest.result"
+  variant on-complete-request-result {
+    success(payload),
+    failure(failure),
+  }
+
+  /// @nexus.doc "The completion of the source operation."
+  /// @nexus.experimental
+  /// @nexus.proto "temporal.api.notificationservice.v1.OnCompleteRequest"
+  record on-complete-request {
+    /// @nexus.doc "The result of the source operation."
+    %result: on-complete-request-result,
+    /// @nexus.doc "User-supplied data which was added to the source invocation."
+    source-context: option<payload>,
+    /// @nexus.doc "The state of the last progress answer the server accepted, if any."
+    receiver-state: option<list<u8>>,
+  }
+
+  /// @nexus.doc "The answer to a completion."
+  /// @nexus.experimental
+  /// @nexus.proto "temporal.api.notificationservice.v1.OnCompleteResponse"
+  record on-complete-response {
+  }
+
+  /// @nexus.doc "The operation that a progress belongs to."
+  /// @nexus.proto "temporal.api.nexus.v1.NexusOperationProgress.operation"
+  variant nexus-operation-progress-operation {
+    scheduled-event-id(s64),
+  }
+
+  /// @nexus.doc "The non-terminal progress of an operation."
+  /// @nexus.experimental
+  /// @nexus.proto "temporal.api.nexus.v1.NexusOperationProgress"
+  record nexus-operation-progress {
+    /// @nexus.doc "The operation this progress belongs to. Not set on a delivery."
+    operation: option<nexus-operation-progress-operation>,
+    /// @nexus.doc "Where the operation's output stands, such as a stream cursor."
+    position: option<string>,
+    /// @nexus.doc "Orders the progress of one operation. The highest counter is kept."
+    counter: option<s64>,
+    /// @nexus.doc "Small details for the caller."
+    metadata: map<string, string>,
+  }
+
+  /// @nexus.doc "A progress of the source operation."
+  /// @nexus.experimental
+  /// @nexus.proto "temporal.api.notificationservice.v1.OnProgressRequest"
+  record on-progress-request {
+    /// @nexus.doc "The progress of the source operation."
+    progress: option<nexus-operation-progress>,
+    /// @nexus.doc "User-supplied data which was added to the source invocation."
+    source-context: option<payload>,
+    /// @nexus.doc "The handler token of a started standalone source operation."
+    operation-token: option<string>,
+    /// @nexus.doc "The state of the last progress answer the server accepted, if any."
+    receiver-state: option<list<u8>>,
+  }
+
+  /// @nexus.doc "The answer to a progress."
+  /// @nexus.experimental
+  /// @nexus.proto "temporal.api.notificationservice.v1.OnProgressResponse"
+  record on-progress-response {
+    /// @nexus.doc "State that the server sends back with the next delivery."
+    receiver-state: option<list<u8>>,
+    /// @nexus.doc "Set when the handler did not reach the progress position."
+    behind: option<bool>,
+  }
+
+  /// @nexus.doc "Receives the completion of the source operation. Called once."
+  /// @nexus.operation name="OnComplete"
+  on-complete: func(request: on-complete-request) -> on-complete-response;
+
+  /// @nexus.doc "Receives the progress of the source operation, any number of times."
+  /// @nexus.operation name="OnProgress"
+  on-progress: func(request: on-progress-request) -> on-progress-response;
+}

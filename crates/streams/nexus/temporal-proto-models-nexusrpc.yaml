@@ -1,0 +1,79 @@
+nexusrpc: 1.0.0
+services:
+  temporal.api.workflowservice.v1.WorkflowService:
+    operations:
+      SignalWithStartWorkflowExecution:
+        input:
+          $dotnetRef: Temporalio.Api.WorkflowService.V1.SignalWithStartWorkflowExecutionRequest
+          $goRef: go.temporal.io/api/workflowservice/v1.SignalWithStartWorkflowExecutionRequest
+          $javaRef: io.temporal.api.workflowservice.v1.SignalWithStartWorkflowExecutionRequest
+          $pythonRef: temporalio.api.workflowservice.v1.SignalWithStartWorkflowExecutionRequest
+          $rubyRef: Temporalio::Api::WorkflowService::V1::SignalWithStartWorkflowExecutionRequest
+          $typescriptRef: '@temporalio/api/workflowservice/v1.SignalWithStartWorkflowExecutionRequest'
+        output:
+          $dotnetRef: Temporalio.Api.WorkflowService.V1.SignalWithStartWorkflowExecutionResponse
+          $goRef: go.temporal.io/api/workflowservice/v1.SignalWithStartWorkflowExecutionResponse
+          $javaRef: io.temporal.api.workflowservice.v1.SignalWithStartWorkflowExecutionResponse
+          $pythonRef: temporalio.api.workflowservice.v1.SignalWithStartWorkflowExecutionResponse
+          $rubyRef: Temporalio::Api::WorkflowService::V1::SignalWithStartWorkflowExecutionResponse
+          $typescriptRef: '@temporalio/api/workflowservice/v1.SignalWithStartWorkflowExecutionResponse'
+      AttachStreamCallback:
+        input:
+          $dotnetRef: Temporalio.Api.WorkflowService.V1.AttachStreamCallbackRequest
+          $goRef: go.temporal.io/api/workflowservice/v1.AttachStreamCallbackRequest
+          $javaRef: io.temporal.api.workflowservice.v1.AttachStreamCallbackRequest
+          $pythonRef: temporalio.api.workflowservice.v1.AttachStreamCallbackRequest
+          $rubyRef: Temporalio::Api::WorkflowService::V1::AttachStreamCallbackRequest
+          $typescriptRef: '@temporalio/api/workflowservice/v1.AttachStreamCallbackRequest'
+        output:
+          $dotnetRef: Temporalio.Api.WorkflowService.V1.AttachStreamCallbackResponse
+          $goRef: go.temporal.io/api/workflowservice/v1.AttachStreamCallbackResponse
+          $javaRef: io.temporal.api.workflowservice.v1.AttachStreamCallbackResponse
+          $pythonRef: temporalio.api.workflowservice.v1.AttachStreamCallbackResponse
+          $rubyRef: Temporalio::Api::WorkflowService::V1::AttachStreamCallbackResponse
+          $typescriptRef: '@temporalio/api/workflowservice/v1.AttachStreamCallbackResponse'
+      DetachStreamCallback:
+        input:
+          $dotnetRef: Temporalio.Api.WorkflowService.V1.DetachStreamCallbackRequest
+          $goRef: go.temporal.io/api/workflowservice/v1.DetachStreamCallbackRequest
+          $javaRef: io.temporal.api.workflowservice.v1.DetachStreamCallbackRequest
+          $pythonRef: temporalio.api.workflowservice.v1.DetachStreamCallbackRequest
+          $rubyRef: Temporalio::Api::WorkflowService::V1::DetachStreamCallbackRequest
+          $typescriptRef: '@temporalio/api/workflowservice/v1.DetachStreamCallbackRequest'
+        output:
+          $dotnetRef: Temporalio.Api.WorkflowService.V1.DetachStreamCallbackResponse
+          $goRef: go.temporal.io/api/workflowservice/v1.DetachStreamCallbackResponse
+          $javaRef: io.temporal.api.workflowservice.v1.DetachStreamCallbackResponse
+          $pythonRef: temporalio.api.workflowservice.v1.DetachStreamCallbackResponse
+          $rubyRef: Temporalio::Api::WorkflowService::V1::DetachStreamCallbackResponse
+          $typescriptRef: '@temporalio/api/workflowservice/v1.DetachStreamCallbackResponse'
+      WaitStreamCallback:
+        input:
+          $dotnetRef: Temporalio.Api.WorkflowService.V1.WaitStreamCallbackRequest
+          $goRef: go.temporal.io/api/workflowservice/v1.WaitStreamCallbackRequest
+          $javaRef: io.temporal.api.workflowservice.v1.WaitStreamCallbackRequest
+          $pythonRef: temporalio.api.workflowservice.v1.WaitStreamCallbackRequest
+          $rubyRef: Temporalio::Api::WorkflowService::V1::WaitStreamCallbackRequest
+          $typescriptRef: '@temporalio/api/workflowservice/v1.WaitStreamCallbackRequest'
+        output:
+          $dotnetRef: Temporalio.Api.WorkflowService.V1.WaitStreamCallbackResponse
+          $goRef: go.temporal.io/api/workflowservice/v1.WaitStreamCallbackResponse
+          $javaRef: io.temporal.api.workflowservice.v1.WaitStreamCallbackResponse
+          $pythonRef: temporalio.api.workflowservice.v1.WaitStreamCallbackResponse
+          $rubyRef: Temporalio::Api::WorkflowService::V1::WaitStreamCallbackResponse
+          $typescriptRef: '@temporalio/api/workflowservice/v1.WaitStreamCallbackResponse'
+      NotifyStream:
+        input:
+          $dotnetRef: Temporalio.Api.WorkflowService.V1.NotifyStreamRequest
+          $goRef: go.temporal.io/api/workflowservice/v1.NotifyStreamRequest
+          $javaRef: io.temporal.api.workflowservice.v1.NotifyStreamRequest
+          $pythonRef: temporalio.api.workflowservice.v1.NotifyStreamRequest
+          $rubyRef: Temporalio::Api::WorkflowService::V1::NotifyStreamRequest
+          $typescriptRef: '@temporalio/api/workflowservice/v1.NotifyStreamRequest'
+        output:
+          $dotnetRef: Temporalio.Api.WorkflowService.V1.NotifyStreamResponse
+          $goRef: go.temporal.io/api/workflowservice/v1.NotifyStreamResponse
+          $javaRef: io.temporal.api.workflowservice.v1.NotifyStreamResponse
+          $pythonRef: temporalio.api.workflowservice.v1.NotifyStreamResponse
+          $rubyRef: Temporalio::Api::WorkflowService::V1::NotifyStreamResponse
+          $typescriptRef: '@temporalio/api/workflowservice/v1.NotifyStreamResponse'
