@@ -39,3 +39,12 @@
 - The stream API copy is a plain copy of `moetemp/api` `9d888ec4`, where the notifier RPC
   messages have their own `stream_request_response.proto`.
 - `StreamService` serves `DescribeStreamNotifier` through the notifier client.
+- Imported Bridge's stream runtime: the stream service's Nexus operations (`NexusAppend`,
+  `NexusRead`, `NexusReadRange`, `NexusFollow`, `NexusFollowRange`, `NexusResume`), the caller
+  attach and detach, the operation token and the `temporal_streams.nexusrpc.yaml` contract.
+  It builds on sdk-rust kb1.
+- The crate generates the Nexus progress API from its own copy in `protos/api_nexus`, and holds
+  the Nexus WIT and YAML in `crates/streams/nexus`, all taken from `moetemp/api` `7b34462b`. The
+  stream API copy moves to the same commit, with no file change.
+- CI checks that the crate's API copies share no file path and no full name with the API that
+  the pinned sdk-rust vendors.

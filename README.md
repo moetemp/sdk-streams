@@ -16,6 +16,7 @@ the crate.
 |---|---|---|
 | Brook | `moe/brook/ss1-import-store` and up | `moe/brook/k1-workflow-task-info` `4ebdacab` |
 | Jetty | `moe/jetty/sj1-import-jetty` and up | `moe/jetty/kj5-early-task-heartbeat` `4c05def9` |
+| Bridge | `moe/bridge/sb1-import-bridge` and up | `moe/bridge/kb1-pin` `037dc8d3` |
 
 ## Linking from a lang bridge
 
@@ -48,7 +49,13 @@ only. `scripts/sync-api-protos.sh` refreshes the copy from the pinned sdk-rust c
 when the copy differs. sdk-rust vendors no stream API, so the crate generates its own from
 `protos/api_stream`, a copy of the `moetemp/api` commit in `protos/api_stream/API_COMMIT`. It calls
 the stream notifier RPCs by method path through `Connection::raw_unary`.
-`scripts/sync-stream-api.sh` refreshes that copy, and CI fails when it differs.
+`scripts/sync-stream-api.sh` refreshes that copy, and CI fails when it differs. In the same way,
+`protos/api_nexus` holds the Nexus progress API (`NexusOperationProgress`, the `OnProgress`
+messages and the `ExecuteSyncNexusOperation` messages), and `crates/streams/nexus` holds the
+Nexus WIT and YAML that a lang's Nexus codegen reads. `scripts/sync-nexus-api.sh` refreshes them
+from the commit in `protos/api_nexus/API_COMMIT`. A lang loads the crate's API copies and the
+API that sdk-rust vendors into one descriptor pool, so `scripts/check-api-overlap.sh` fails when
+the two share a file path or a full name.
 
 - Format and lint: `cargo fmt --all -- --check`, then
   `cargo clippy --workspace --all-features --tests -- -D warnings`.
