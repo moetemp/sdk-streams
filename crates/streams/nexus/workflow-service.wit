@@ -142,6 +142,8 @@ interface workflow-service {
   enum stream-owner-kind {
     stream-owner-kind-unspecified,
     stream-owner-kind-workflow,
+    stream-owner-kind-activity,
+    stream-owner-kind-workflow-activity,
   }
 
   /// @nexus.proto "temporal.api.stream.v1.StreamReference"
@@ -151,6 +153,7 @@ interface workflow-service {
     /// @nexus.doc "The id of the first run in the owning Workflow's run chain. It is required, since the server refuses an empty run id."
     run-id: option<string>,
     topic: string,
+    activity-id: option<string>,
   }
 
   /// @nexus.proto "temporal.api.common.v1.Callback.Nexus"
