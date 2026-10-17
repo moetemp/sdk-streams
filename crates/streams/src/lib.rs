@@ -20,6 +20,7 @@ mod follow;
 mod handle;
 mod links;
 mod memory;
+pub mod nexus;
 mod notify;
 mod notifylog;
 mod owner;
@@ -55,10 +56,11 @@ pub use driver::{ArchiveSink, StreamDriver, StreamDriverOptions};
 pub use error::{StreamError, StreamResult};
 pub use handle::{OWNER_RECHECK, OWNER_START_GRACE, Streams, StreamsOptions};
 pub use memory::MemoryStore;
+pub use nexus::{OPERATION_TOKEN_VERSION, OperationToken};
 pub use notify::{
-    CLOSE_RETRY_CAP, CLOSE_RETRY_FIRST, CLOSE_RETRY_LIMIT, DEFAULT_MAX_NOTIFIERS, FLUSH_LIMIT,
-    Notifier, NotifierClient, NotifierPoll, NotifyError, NotifyingStore, StreamNotification,
-    WorkflowAttachment, progress_counter,
+    CLOSE_RETRY_CAP, CLOSE_RETRY_FIRST, CLOSE_RETRY_LIMIT, CallerAttachment, DEFAULT_MAX_NOTIFIERS,
+    FLUSH_LIMIT, Notifier, NotifierClient, NotifierPoll, NotifyError, NotifyingStore,
+    StreamNotification, WorkflowAttachment, progress_counter,
 };
 pub use notifylog::{ArchiveMark, NotificationEntry, NotificationLog};
 pub use owner::{OwnerClient, OwnerDescription, OwnerError, OwnerId, OwnerStatus, RunClose};

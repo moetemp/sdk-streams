@@ -127,6 +127,27 @@ struct Tracked {
     sequence: i64,
 }
 
+/// The producer attempts a read knows at one point of a page, so an answer cut short can hand back
+/// the state as it stood after the records it kept.
+#[derive(Debug, Clone, Default)]
+pub(crate) struct Attempts {
+    producers: HashMap<String, Tracked>,
+    clock: u64,
+}
+
+/// One page as [read_with] answers it.
+#[derive(Debug)]
+pub(crate) struct Page {
+    /// The records, with the answer's `state` left empty.
+    pub(crate) response: ReadResponse,
+    /// The store marked the chain or the topic closed.
+    pub(crate) closed: bool,
+    /// The topic's first close, when the store keeps one.
+    pub(crate) close: Option<StoredClose>,
+    /// The attempts the read knew before the page's first record.
+    pub(crate) before: Attempts,
+}
+
 /// What one record tells the read about its producer's attempts.
 #[derive(Debug, Clone, PartialEq, Eq)]
 enum Observed {
@@ -146,12 +167,30 @@ enum Observed {
 }
 
 impl ReadState {
+    /// The state a caller passed back. One with more producers than a read remembers is no state
+    /// Core returned, and trimming it would cost time on the caller's behalf.
     pub(crate) fn decode_from(state: &[u8]) -> StreamResult<Self> {
-        Self::decode(state).map_err(|error| {
+        let not_returned = |why: String| {
             StreamError::cursor(format!(
-                "the read state is not one an earlier call of this read returned: {error}"
+                "the read state is not one an earlier call of this read returned: {why}"
             ))
-        })
+        };
+        let state = Self::decode(state).map_err(|error| not_returned(error.to_string()))?;
+        let producers = state.producers.len();
+        if producers > MAX_TRACKED_PRODUCERS {
+            return Err(not_returned(format!(
+                "it names {producers} producers, above the {MAX_TRACKED_PRODUCERS} a read remembers"
+            )));
+        }
+        Ok(state)
+    }
+
+    /// A first call's state that knows only the chain the read follows.
+    pub(crate) fn of_chain(first_run_id: String) -> Self {
+        Self {
+            first_run_id,
+            ..Self::default()
+        }
     }
 
     /// The producers, least recently seen first.
@@ -179,9 +218,34 @@ impl ReadState {
         }
     }
 
+    pub(crate) fn attempts(&self) -> Attempts {
+        Attempts {
+            producers: self.producers.clone(),
+            clock: self.clock,
+        }
+    }
+
+    /// The state as it stood after `kept`, the first records of a page that began with `before`.
+    /// The rest of the state is this one's, since it doesn't depend on how far the page got.
+    pub(crate) fn at_cut<'a>(
+        &self,
+        before: &Attempts,
+        kept: impl IntoIterator<Item = &'a StreamRecord>,
+    ) -> ReadState {
+        let mut state = ReadState {
+            producers: before.producers.clone(),
+            clock: before.clock,
+            ..self.clone()
+        };
+        for record in kept {
+            state.observe(record);
+        }
+        state
+    }
+
     /// Forgets the least recently seen producers until the encoded state takes at most `bytes`.
     /// A forgotten producer's next attempt reads without `SUPERSEDED`, as past the producer cap.
-    fn fit_within(&mut self, bytes: usize) {
+    pub(crate) fn fit_within(&mut self, bytes: usize) {
         let mut size = self.encoded_len();
         if size <= bytes {
             return;
@@ -271,7 +335,9 @@ pub async fn read_page(
     request: &ReadRequest,
 ) -> StreamResult<ReadResponse> {
     let mut state = ReadState::decode_from(&request.state)?;
-    let (mut response, _, _) = read_with(store, target, request, &mut state).await?;
+    let mut response = read_with(store, target, request, &mut state)
+        .await?
+        .response;
     response.state = state.encode_to_vec();
     Ok(response)
 }
@@ -284,7 +350,7 @@ pub(crate) async fn read_with(
     target: &ReadTarget,
     request: &ReadRequest,
     state: &mut ReadState,
-) -> StreamResult<(ReadResponse, bool, Option<StoredClose>)> {
+) -> StreamResult<Page> {
     read_bounded(store, target, request, state, None).await
 }
 
@@ -296,7 +362,7 @@ pub(crate) async fn read_bounded(
     request: &ReadRequest,
     state: &mut ReadState,
     until: Option<&str>,
-) -> StreamResult<(ReadResponse, bool, Option<StoredClose>)> {
+) -> StreamResult<Page> {
     let from_end = request.after == END;
     let position = if from_end {
         store
@@ -383,6 +449,7 @@ pub(crate) async fn read_bounded(
         .await?;
     }
     let (mut closed, mut close) = (page.closed, page.close);
+    let before = state.attempts();
     let mut records = Vec::with_capacity(page.records.len());
     let mut previous = start.clone();
     let max_bytes = usize::try_from(request.max_bytes).unwrap_or(usize::MAX);
@@ -463,8 +530,8 @@ pub(crate) async fn read_bounded(
         previous = cursor;
     }
     state.fit_within(MAX_STATE_BYTES);
-    Ok((
-        ReadResponse {
+    Ok(Page {
+        response: ReadResponse {
             cursor: previous,
             state: Vec::new(),
             done: false,
@@ -483,7 +550,8 @@ pub(crate) async fn read_bounded(
         },
         closed,
         close,
-    ))
+        before,
+    })
 }
 
 /// The digest of a read's answer that a replay read checks (RR-1). It covers what a reader acts
@@ -953,9 +1021,10 @@ mod tests {
             after: BEGINNING.to_string(),
             ..Default::default()
         };
-        let (page, closed, _) = read_with(&log, &target(), &request, &mut state)
+        let first = read_with(&log, &target(), &request, &mut state)
             .await
             .unwrap();
+        let (page, closed) = (first.response, first.closed);
         assert!(closed);
         assert_eq!(values(&page), ["1", "2"]);
         // The cursor stays before the close, so a read that resumes there ends at it too.
@@ -965,7 +1034,8 @@ mod tests {
             after: page.cursor.clone(),
             ..Default::default()
         };
-        let (again, closed, _) = read_with(&log, &target(), &next, &mut state).await.unwrap();
+        let next = read_with(&log, &target(), &next, &mut state).await.unwrap();
+        let (again, closed) = (next.response, next.closed);
         assert!(closed && again.records.is_empty());
         assert_eq!(log.lookups.load(Ordering::Relaxed), lookups);
         let resumed = read(&log, &page.cursor, &[]).await.unwrap();
@@ -1123,9 +1193,10 @@ mod tests {
                 after,
                 ..Default::default()
             };
-            let (page, closed, _) = read_with(&log, &target(), &request, &mut state)
+            let answer = read_with(&log, &target(), &request, &mut state)
                 .await
                 .unwrap();
+            let (page, closed) = (answer.response, answer.closed);
             assert_eq!(closed, case["closed"].as_bool().unwrap_or(false), "{label}");
             let delivered: Vec<u64> = page
                 .records
@@ -1320,6 +1391,18 @@ mod tests {
                 case["prefix"].as_i64().unwrap()
             );
         }
+    }
+
+    #[test]
+    fn a_state_with_more_producers_than_a_read_remembers_is_refused() {
+        let mut state = ReadState::default();
+        for producer in 0..=MAX_TRACKED_PRODUCERS {
+            state
+                .producers
+                .insert(format!("p{producer}"), Tracked::default());
+        }
+        let error = ReadState::decode_from(&state.encode_to_vec()).unwrap_err();
+        assert_eq!(error.kind, StreamFailureKind::Cursor);
     }
 
     #[test]

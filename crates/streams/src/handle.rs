@@ -16,7 +16,7 @@ use crate::{
         StoredClose, StreamAddress, StreamFailureKind, StreamOwnerKind, append_request,
         read_record, retire_producer_request,
     },
-    reader::{ReadState, read_bounded, read_with},
+    reader::{Attempts, ReadState, read_bounded, read_with},
     stored_append_record, stream_hash,
 };
 use prost::Message;
@@ -193,6 +193,15 @@ impl<K: std::hash::Hash + Eq + Clone> Remembered<K> {
     }
 }
 
+/// A read as [Streams::read_carried] answers it.
+#[derive(Debug)]
+pub(crate) struct CarriedRead {
+    pub(crate) response: ReadResponse,
+    pub(crate) state: ReadState,
+    /// The attempts the read knew before the answer's first record.
+    pub(crate) before: Attempts,
+}
+
 /// The producer attempt a call writes as, and the topic it writes, so a close at its owner check
 /// reaches the topic on a store without close flags.
 #[derive(Debug, Clone, Copy)]
@@ -212,6 +221,8 @@ pub struct Streams {
     /// The chain each producer attempt began on.
     producers: Remembered<ProducerKey>,
     chains: Remembered<OwnerKey>,
+    /// The chains carried read states named that a describe showed are the Workflow's own.
+    carried_chains: Remembered<OwnerKey>,
     /// When Temporal first answered that an owner is gone, per Workflow id. A failover can
     /// answer `NotFound` until replication catches up, so one answer doesn't close a chain.
     missing: Remembered<OwnerKey>,
@@ -238,6 +249,7 @@ impl Streams {
             owner,
             owners: Remembered::new(options.remembered),
             producers: Remembered::new(options.remembered),
+            carried_chains: Remembered::new(options.remembered),
             chains: Remembered::new(options.remembered),
             missing: Remembered::new(options.remembered),
             options,
@@ -335,6 +347,17 @@ impl Streams {
     /// `wake_after`. A read whose owner Temporal doesn't know yet answers empty within
     /// [StreamsOptions::owner_start_grace], so it can start before its owner does.
     pub async fn read(&self, request: ReadRequest) -> StreamResult<ReadResponse> {
+        let read = self.read_carried(request).await?;
+        Ok(ReadResponse {
+            state: read.state.encode_to_vec(),
+            ..read.response
+        })
+    }
+
+    /// [Streams::read], answering the state undecoded and the attempts the read knew before the
+    /// answer's records, so a caller that keeps only some of them can hand back the state at its
+    /// cut. The answer's `state` is left empty.
+    pub(crate) async fn read_carried(&self, request: ReadRequest) -> StreamResult<CarriedRead> {
         let stream = address(request.stream.as_ref())?;
         let mut state = ReadState::decode_from(&request.state)?;
         let wait = request
@@ -350,13 +373,27 @@ impl Streams {
                 } else {
                     request.after.clone()
                 };
-                return Ok(ReadResponse {
-                    cursor,
-                    state: state.encode_to_vec(),
-                    ..Default::default()
+                return Ok(CarriedRead {
+                    response: ReadResponse {
+                        cursor,
+                        ..Default::default()
+                    },
+                    before: state.attempts(),
+                    state,
                 });
             };
             state.first_run_id = chain.first_run_id;
+            // Resolved here, so it is the Workflow's own, and the state it rides in back needs
+            // no check.
+            let key = OwnerKey {
+                run_id: state.first_run_id.clone(),
+                ..owner_key(stream)
+            };
+            self.carried_chains
+                .put(key, &state.first_run_id, self.options.owner_recheck);
+        } else {
+            self.check_carried_chain(stream, &state.first_run_id)
+                .await?;
         }
         let target = ReadTarget {
             chain: chain_of(stream, &state.first_run_id),
@@ -370,6 +407,7 @@ impl Streams {
         let minimum = self.options.owner_check_min;
         let mut page_request = request.clone();
         let mut topic_close = None;
+        let mut before;
         let response = loop {
             let now = unix_ms();
             if state.check_interval_ms == 0 {
@@ -384,11 +422,13 @@ impl Streams {
                 remaining.min(until_check)
             };
             page_request.wait = wait.try_into().ok();
-            let (mut page, closed, close) =
-                read_with(&*self.store, &target, &page_request, &mut state).await?;
-            if close.is_some() {
-                topic_close = close;
+            let read = read_with(&*self.store, &target, &page_request, &mut state).await?;
+            before = read.before;
+            let closed = read.closed;
+            if read.close.is_some() {
+                topic_close = read.close;
             }
+            let mut page = read.response;
             page_request.after = page.cursor.clone();
             if !page.records.is_empty() {
                 state.check_interval_ms = millis(minimum);
@@ -427,10 +467,59 @@ impl Streams {
                 break page;
             }
         };
-        Ok(ReadResponse {
-            state: state.encode_to_vec(),
-            ..response
+        Ok(CarriedRead {
+            response,
+            state,
+            before,
         })
+    }
+
+    /// The first run of the chain `stream` names now, as the last read resolved it.
+    pub(crate) async fn first_run_of(&self, stream: &StreamAddress) -> StreamResult<String> {
+        Ok(self.chain(stream).await?.first_run_id)
+    }
+
+    /// Refuses a carried state whose chain is not one of the Workflow's. A caller outside the
+    /// process could otherwise point a read at another run's chain by editing its state. Asked
+    /// once per chain in a process.
+    pub(crate) async fn check_carried_chain(
+        &self,
+        stream: &StreamAddress,
+        first_run_id: &str,
+    ) -> StreamResult<()> {
+        if stream.owner_kind == StreamOwnerKind::WorkflowActivity as i32 {
+            // The address names the run that keys the stream, so no describe is needed.
+            if first_run_id != stream.run_id {
+                return Err(StreamError::cursor(format!(
+                    "the read state names run {first_run_id:?}, which is not the run of {}",
+                    owner_key(stream).label()
+                )));
+            }
+            return Ok(());
+        }
+        let key = OwnerKey {
+            run_id: first_run_id.to_string(),
+            ..owner_key(stream)
+        };
+        if self.carried_chains.get(&key).is_some() {
+            return Ok(());
+        }
+        match self.describe(&key, first_run_id).await {
+            Ok(described) if described.first_run_id != first_run_id => {
+                return Err(StreamError::cursor(format!(
+                    "the read state names run {first_run_id:?}, which doesn't start a run chain \
+                     of {}",
+                    key.label()
+                )));
+            }
+            // A chain Temporal no longer holds leaves nothing another chain's reader could
+            // reach, so its streams stay readable to the end of their retention.
+            Ok(_) | Err(OwnerError::NotFound(_)) => {}
+            Err(error) => return Err(describe_failed(&error)),
+        }
+        self.carried_chains
+            .put(key, first_run_id, self.options.owner_recheck);
+        Ok(())
     }
 
     /// Holds the records after `after` against retention for `holder`, a positions-only reader.
@@ -544,7 +633,7 @@ impl Streams {
                 )
                 .await
                 {
-                    Ok((page, _, _)) => page,
+                    Ok(read) => read.response,
                     Err(error)
                         if matches!(
                             error.kind,
@@ -737,6 +826,11 @@ impl Streams {
             Ok(described) if !key.run_id.is_empty() => Ok(described.status != OwnerStatus::Running),
             Ok(latest) => Ok(latest.chain_ended() || latest.first_run_id != chain.first_run_id),
         }
+    }
+
+    /// The store the handles serve.
+    pub(crate) fn store(&self) -> &dyn StreamStore {
+        self.store.as_ref()
     }
 
     /// The cursor of a stream's newest record, empty when it holds none.

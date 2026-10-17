@@ -1,0 +1,134 @@
+{
+  "comment": "Token v2 of a stream-returning Nexus operation: base64url JSON, no padding, keys sorted, non-ASCII escaped, no chain_run_id for a ref to the newest chain, and no activity_id for a Workflow's ref. An Activity's ref has kind activity, an empty workflow_id and its activity_id, and its chain is the Activity run. A Workflow Activity's ref has kind workflow_activity, its workflow_id, its activity_id and the scheduling run as chain_run_id, which is also its chain. Core's encoder and every SDK's encoder write the vectors, and every decoder reads them. Decoders also read decode_only, the null chain_run_id that SDK releases before Core wrote.",
+  "vectors": [
+    {
+      "ref": {
+        "kind": "workflow",
+        "workflow_id": "owner-1",
+        "topic": "tokens"
+      },
+      "attach": "attach-1",
+      "chain": "chain-1",
+      "token": "eyJhdHRhY2giOiJhdHRhY2gtMSIsImNoYWluIjoiY2hhaW4tMSIsInJlZiI6eyJraW5kIjoid29ya2Zsb3ciLCJ0b3BpYyI6InRva2VucyIsIndvcmtmbG93X2lkIjoib3duZXItMSJ9LCJ2IjoyfQ"
+    },
+    {
+      "ref": {
+        "kind": "workflow",
+        "workflow_id": "owner-1",
+        "chain_run_id": "run-2",
+        "topic": "tokens"
+      },
+      "attach": "attach-1",
+      "chain": "run-1",
+      "token": "eyJhdHRhY2giOiJhdHRhY2gtMSIsImNoYWluIjoicnVuLTEiLCJyZWYiOnsiY2hhaW5fcnVuX2lkIjoicnVuLTIiLCJraW5kIjoid29ya2Zsb3ciLCJ0b3BpYyI6InRva2VucyIsIndvcmtmbG93X2lkIjoib3duZXItMSJ9LCJ2IjoyfQ"
+    },
+    {
+      "ref": {
+        "kind": "workflow",
+        "workflow_id": "order/42 \"quoted\"",
+        "topic": "t\\back\nline"
+      },
+      "attach": "req-é",
+      "chain": "chain-ü",
+      "token": "eyJhdHRhY2giOiJyZXEtXHUwMGU5IiwiY2hhaW4iOiJjaGFpbi1cdTAwZmMiLCJyZWYiOnsia2luZCI6IndvcmtmbG93IiwidG9waWMiOiJ0XFxiYWNrXG5saW5lIiwid29ya2Zsb3dfaWQiOiJvcmRlci80MiBcInF1b3RlZFwiIn0sInYiOjJ9"
+    },
+    {
+      "ref": {
+        "kind": "workflow",
+        "workflow_id": "日本語-wf",
+        "topic": "emoji-😀"
+      },
+      "attach": "r",
+      "chain": "c",
+      "token": "eyJhdHRhY2giOiJyIiwiY2hhaW4iOiJjIiwicmVmIjp7ImtpbmQiOiJ3b3JrZmxvdyIsInRvcGljIjoiZW1vamktXHVkODNkXHVkZTAwIiwid29ya2Zsb3dfaWQiOiJcdTY1ZTVcdTY3MmNcdThhOWUtd2YifSwidiI6Mn0"
+    },
+    {
+      "ref": {
+        "kind": "workflow",
+        "workflow_id": "delwf",
+        "topic": "t"
+      },
+      "attach": "a",
+      "chain": "c",
+      "token": "eyJhdHRhY2giOiJhXHUwMDdmIiwiY2hhaW4iOiJjIiwicmVmIjp7ImtpbmQiOiJ3b3JrZmxvdyIsInRvcGljIjoidFx1MDA3ZiIsIndvcmtmbG93X2lkIjoiZGVsXHUwMDdmd2YifSwidiI6Mn0"
+    },
+    {
+      "ref": {
+        "kind": "activity",
+        "workflow_id": "",
+        "activity_id": "tool-1",
+        "chain_run_id": "act-run-1",
+        "topic": "tokens"
+      },
+      "attach": "attach-1",
+      "chain": "act-run-1",
+      "token": "eyJhdHRhY2giOiJhdHRhY2gtMSIsImNoYWluIjoiYWN0LXJ1bi0xIiwicmVmIjp7ImFjdGl2aXR5X2lkIjoidG9vbC0xIiwiY2hhaW5fcnVuX2lkIjoiYWN0LXJ1bi0xIiwia2luZCI6ImFjdGl2aXR5IiwidG9waWMiOiJ0b2tlbnMiLCJ3b3JrZmxvd19pZCI6IiJ9LCJ2IjoyfQ"
+    },
+    {
+      "ref": {
+        "kind": "activity",
+        "workflow_id": "",
+        "activity_id": "tool \"é\"",
+        "topic": "tokens"
+      },
+      "attach": "attach-2",
+      "chain": "act-run-2",
+      "token": "eyJhdHRhY2giOiJhdHRhY2gtMiIsImNoYWluIjoiYWN0LXJ1bi0yIiwicmVmIjp7ImFjdGl2aXR5X2lkIjoidG9vbCBcIlx1MDBlOVwiIiwia2luZCI6ImFjdGl2aXR5IiwidG9waWMiOiJ0b2tlbnMiLCJ3b3JrZmxvd19pZCI6IiJ9LCJ2IjoyfQ"
+    },
+    {
+      "ref": {
+        "kind": "workflow_activity",
+        "workflow_id": "agent",
+        "activity_id": "tool-42",
+        "chain_run_id": "run-1",
+        "topic": "tokens"
+      },
+      "attach": "attach-3",
+      "chain": "run-1",
+      "token": "eyJhdHRhY2giOiJhdHRhY2gtMyIsImNoYWluIjoicnVuLTEiLCJyZWYiOnsiYWN0aXZpdHlfaWQiOiJ0b29sLTQyIiwiY2hhaW5fcnVuX2lkIjoicnVuLTEiLCJraW5kIjoid29ya2Zsb3dfYWN0aXZpdHkiLCJ0b3BpYyI6InRva2VucyIsIndvcmtmbG93X2lkIjoiYWdlbnQifSwidiI6Mn0"
+    },
+    {
+      "ref": {
+        "kind": "workflow_activity",
+        "workflow_id": "agent \"é\"",
+        "activity_id": "1",
+        "chain_run_id": "run-2",
+        "topic": "out"
+      },
+      "attach": "attach-4",
+      "chain": "run-2",
+      "token": "eyJhdHRhY2giOiJhdHRhY2gtNCIsImNoYWluIjoicnVuLTIiLCJyZWYiOnsiYWN0aXZpdHlfaWQiOiIxIiwiY2hhaW5fcnVuX2lkIjoicnVuLTIiLCJraW5kIjoid29ya2Zsb3dfYWN0aXZpdHkiLCJ0b3BpYyI6Im91dCIsIndvcmtmbG93X2lkIjoiYWdlbnQgXCJcdTAwZTlcIiJ9LCJ2IjoyfQ"
+    }
+  ],
+  "decode_only": [
+    {
+      "ref": {
+        "kind": "workflow",
+        "workflow_id": "owner-1",
+        "chain_run_id": null,
+        "topic": "tokens"
+      },
+      "attach": "attach-1",
+      "chain": "chain-1",
+      "token": "eyJhdHRhY2giOiJhdHRhY2gtMSIsImNoYWluIjoiY2hhaW4tMSIsInJlZiI6eyJjaGFpbl9ydW5faWQiOm51bGwsImtpbmQiOiJ3b3JrZmxvdyIsInRvcGljIjoidG9rZW5zIiwid29ya2Zsb3dfaWQiOiJvd25lci0xIn0sInYiOjJ9"
+    }
+  ],
+  "refused": [
+    "",
+    "not-a-token",
+    "eyJ2IjogMn0",
+    "eyJ2IjogMSwgImF0dGFjaCI6ICJhdHRhY2gtMSIsICJjaGFpbiI6ICJjaGFpbi0xIiwgInJlZiI6IHsia2luZCI6ICJ3b3JrZmxvdyIsICJ3b3JrZmxvd19pZCI6ICJvd25lci0xIiwgInJ1bl9pZCI6IG51bGwsICJ0b3BpYyI6ICJ0b2tlbnMifX0=",
+    "eyJhdHRhY2giOiJhIiwiY2hhaW4iOiJjIiwiZXh0cmEiOjEsInJlZiI6eyJraW5kIjoid29ya2Zsb3ciLCJ0b3BpYyI6InQiLCJ3b3JrZmxvd19pZCI6IncifSwidiI6Mn0",
+    "eyJhdHRhY2giOiJhIiwiY2hhaW4iOiJjIiwicmVmIjp7ImN1cnNvciI6IngiLCJraW5kIjoid29ya2Zsb3ciLCJ0b3BpYyI6InQiLCJ3b3JrZmxvd19pZCI6IncifSwidiI6Mn0",
+    "eyJhdHRhY2giOiJhdHRhY2gtMSIsImNoYWluIjoicnVuLTEiLCJyZWYiOnsia2luZCI6IndvcmtmbG93IiwicnVuX2lkIjoicnVuLTIiLCJ0b3BpYyI6InRva2VucyIsIndvcmtmbG93X2lkIjoib3duZXItMSJ9LCJ2IjoyfQ",
+    "eyJhdHRhY2giOiJhIiwiY2hhaW4iOiJjIiwicmVmIjp7ImtpbmQiOiJhY3Rpdml0eSIsInRvcGljIjoidCIsIndvcmtmbG93X2lkIjoiIn0sInYiOjJ9",
+    "eyJhdHRhY2giOiJhIiwiY2hhaW4iOiJjIiwicmVmIjp7ImFjdGl2aXR5X2lkIjoiIiwia2luZCI6ImFjdGl2aXR5IiwidG9waWMiOiJ0Iiwid29ya2Zsb3dfaWQiOiIifSwidiI6Mn0",
+    "eyJhdHRhY2giOiJhIiwiY2hhaW4iOiJjIiwicmVmIjp7ImFjdGl2aXR5X2lkIjoiYSIsImtpbmQiOiJhY3Rpdml0eSIsInRvcGljIjoidCIsIndvcmtmbG93X2lkIjoidyJ9LCJ2IjoyfQ",
+    "eyJhdHRhY2giOiJhIiwiY2hhaW4iOiJjIiwicmVmIjp7ImFjdGl2aXR5X2lkIjoiYSIsImtpbmQiOiJ3b3JrZmxvdyIsInRvcGljIjoidCIsIndvcmtmbG93X2lkIjoidyJ9LCJ2IjoyfQ",
+    "eyJhdHRhY2giOiJhIiwiY2hhaW4iOiJjIiwicmVmIjp7ImtpbmQiOiJuZXh1cyIsInRvcGljIjoidCIsIndvcmtmbG93X2lkIjoidyJ9LCJ2IjoyfQ",
+    "eyJhdHRhY2giOiJhIiwiY2hhaW4iOiJjIiwicmVmIjp7ImFjdGl2aXR5X2lkIjoiYSIsImtpbmQiOiJ3b3JrZmxvd19hY3Rpdml0eSIsInRvcGljIjoidCIsIndvcmtmbG93X2lkIjoidyJ9LCJ2IjoyfQ",
+    "eyJhdHRhY2giOiJhIiwiY2hhaW4iOiJjIiwicmVmIjp7ImFjdGl2aXR5X2lkIjoiYSIsImNoYWluX3J1bl9pZCI6InIiLCJraW5kIjoid29ya2Zsb3dfYWN0aXZpdHkiLCJ0b3BpYyI6InQiLCJ3b3JrZmxvd19pZCI6IiJ9LCJ2IjoyfQ",
+    "eyJhdHRhY2giOiJhIiwiY2hhaW4iOiJjIiwicmVmIjp7ImNoYWluX3J1bl9pZCI6InIiLCJraW5kIjoid29ya2Zsb3dfYWN0aXZpdHkiLCJ0b3BpYyI6InQiLCJ3b3JrZmxvd19pZCI6IncifSwidiI6Mn0",
+    "eyJhdHRhY2giOiJhIiwiY2hhaW4iOiJjIiwicmVmIjp7ImFjdGl2aXR5X2lkIjoiIiwiY2hhaW5fcnVuX2lkIjoiciIsImtpbmQiOiJ3b3JrZmxvd19hY3Rpdml0eSIsInRvcGljIjoidCIsIndvcmtmbG93X2lkIjoidyJ9LCJ2IjoyfQ"
+  ]
+}

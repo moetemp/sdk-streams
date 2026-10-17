@@ -4,10 +4,12 @@ use crate::{
     ArchiveSink, DEFAULT_MAX_NOTIFIERS, LocalFileArchive, Notifier, NotifierClient, NotifyingStore,
     OwnerClient, SegmentLimits, StreamArchive, StreamError, StreamResult, StreamStore, Streams,
     StreamsOptions, TieredStore,
+    nexus::{NexusCalls, NexusOptions},
     proto::{
-        AppendRequest, ArchiveConfig, CloseRequest, DeleteOwnerRequest, DescribeStoreRequest,
-        DescribeStoreResponse, FlushNotificationsRequest, FlushNotificationsResponse,
-        FollowRangeRequest, FollowRequest, LatestRequest, PublishWorkflowTaskRequest,
+        AppendRequest, ArchiveConfig, AttachCallerRequest, CloseRequest, DeleteOwnerRequest,
+        DescribeStoreRequest, DescribeStoreResponse, DetachCallerRequest,
+        FlushNotificationsRequest, FlushNotificationsResponse, FollowRangeRequest, FollowRequest,
+        LatestRequest, NexusCall, NexusResumeRequest, PublishWorkflowTaskRequest,
         ReadRangeRequest, ReadRequest, ReleaseFloorRequest, RetireProducerRequest,
         RunEvictedRequest, RunEvictedResponse, RunStreamDriverRequest, RunStreamDriverResponse,
         ShutdownWorkerRequest, ShutdownWorkerResponse, StreamFailure, StreamStoreConfig,
@@ -40,10 +42,14 @@ const MAX_READ_WAIT: Duration = Duration::from_secs(60);
 pub struct StreamService {
     store: Arc<dyn StreamStore>,
     owner: Arc<dyn OwnerClient>,
-    streams: Streams,
+    streams: Arc<Streams>,
     workflows: WorkflowOutput,
     meter: TemporalMeter,
     subscriptions: Subscriptions,
+    nexus: NexusCalls,
+    callers: Option<Arc<dyn NotifierClient>>,
+    /// The chain each start's attach went to, by request id, so a retried start attaches there.
+    caller_chains: crate::handle::Remembered<String>,
     /// What a driver archives into, when the config names an archive.
     archive: Option<ArchiveSink>,
 }
@@ -68,7 +74,8 @@ impl StreamService {
 
     /// Like [StreamService::connect], closing each stream's notifier through `notifier` after
     /// the store closes the stream, sending progress too when the config turns it on, attaching
-    /// and detaching Workflow readers through it, and waiting on it for client readers.
+    /// and detaching Workflow readers and stream operation callers through it, and waiting on it
+    /// for client readers.
     pub async fn connect_with_notifier(
         config: StreamStoreConfig,
         owner: Arc<dyn OwnerClient>,
@@ -131,17 +138,17 @@ impl StreamService {
                 "stream notifications need a client to send them with",
             ));
         }
-        let store: Arc<dyn StreamStore> = match notifier.clone() {
-            Some(client) => {
-                let max_notifiers = match config.max_notifiers {
-                    0 => DEFAULT_MAX_NOTIFIERS,
-                    max => max as usize,
-                };
-                Arc::new(
-                    NotifyingStore::new(store, Arc::new(Notifier::new(client, max_notifiers)))
-                        .with_progress(config.notify_on_append),
-                )
-            }
+        let folding = notifier.as_ref().map(|client| {
+            let max_notifiers = match config.max_notifiers {
+                0 => DEFAULT_MAX_NOTIFIERS,
+                max => max as usize,
+            };
+            Arc::new(Notifier::new(client.clone(), max_notifiers))
+        });
+        let store: Arc<dyn StreamStore> = match &folding {
+            Some(folding) => Arc::new(
+                NotifyingStore::new(store, folding.clone()).with_progress(config.notify_on_append),
+            ),
             None => store,
         };
         let mut options = StreamsOptions::for_retention(retention);
@@ -153,7 +160,9 @@ impl StreamService {
         let mut service = Self::new(store, owner, options);
         service.archive = archive;
         Ok(match notifier {
-            Some(client) => service.with_subscriptions(client),
+            Some(client) => service
+                .with_subscriptions(client.clone())
+                .with_callers(client),
             None => service,
         })
     }
@@ -164,7 +173,8 @@ impl StreamService {
         owner: Arc<dyn OwnerClient>,
         options: StreamsOptions,
     ) -> Self {
-        let streams = Streams::new(store.clone(), owner.clone(), options);
+        let streams = Arc::new(Streams::new(store.clone(), owner.clone(), options));
+        let nexus = NexusCalls::new(streams.clone(), NexusOptions::default());
         let meter = TemporalMeter::no_op();
         let workflows = WorkflowOutput::new(store.clone(), owner.clone(), meter.clone());
         Self {
@@ -174,6 +184,9 @@ impl StreamService {
             workflows,
             meter,
             subscriptions: Subscriptions::default(),
+            nexus,
+            callers: None,
+            caller_chains: crate::handle::Remembered::new(StreamsOptions::default().remembered),
             archive: None,
         }
     }
@@ -195,6 +208,14 @@ impl StreamService {
     /// The meter the service counts on.
     pub fn meter(&self) -> &TemporalMeter {
         &self.meter
+    }
+
+    /// Attaches and detaches stream operation callers through `client`, and wakes the callback
+    /// of a caught-up Nexus reader through it.
+    pub fn with_callers(mut self, client: Arc<dyn NotifierClient>) -> Self {
+        self.nexus = self.nexus.with_callers(client.clone());
+        self.callers = Some(client);
+        self
     }
 
     /// The store the service serves.
@@ -304,6 +325,53 @@ impl StreamService {
                 )
                 .await
                 .map(|r| r.encode_to_vec()),
+            // A Nexus call answers with a step, its failure included, so lang hands the failure
+            // to its Nexus handler as it is.
+            "NexusAppend" => Ok(self
+                .nexus
+                .append(decode::<NexusCall>(rpc, request)?)
+                .await
+                .encode_to_vec()),
+            "NexusRead" => Ok(self
+                .nexus
+                .read(decode::<NexusCall>(rpc, request)?)
+                .await
+                .encode_to_vec()),
+            "NexusReadRange" => Ok(self
+                .nexus
+                .read_range(decode::<NexusCall>(rpc, request)?)
+                .await
+                .encode_to_vec()),
+            "NexusFollow" => Ok(self
+                .nexus
+                .follow(decode::<NexusCall>(rpc, request)?)
+                .await
+                .encode_to_vec()),
+            "NexusFollowRange" => Ok(self
+                .nexus
+                .follow_range(decode::<NexusCall>(rpc, request)?)
+                .await
+                .encode_to_vec()),
+            "NexusResume" => Ok(self
+                .nexus
+                .resume(decode::<NexusResumeRequest>(rpc, request)?)
+                .await
+                .encode_to_vec()),
+            // Like the Nexus calls, a caller call answers its failure in the response.
+            "AttachCaller" => Ok(crate::nexus::attach_caller(
+                &self.streams,
+                self.callers.as_ref(),
+                &self.caller_chains,
+                decode::<AttachCallerRequest>(rpc, request)?,
+            )
+            .await
+            .encode_to_vec()),
+            "DetachCaller" => Ok(crate::nexus::detach_caller(
+                self.callers.as_ref(),
+                decode::<DetachCallerRequest>(rpc, request)?,
+            )
+            .await
+            .encode_to_vec()),
             "DescribeStore" => {
                 decode::<DescribeStoreRequest>(rpc, request)?;
                 Ok(DescribeStoreResponse {
@@ -1790,5 +1858,96 @@ mod tests {
             .await
             .unwrap_err();
         assert_eq!(failure.kind, StreamFailureKind::Unsupported as i32);
+    }
+
+    #[tokio::test]
+    async fn a_nexus_append_notifies_its_streams_notifier() {
+        use crate::proto::{NexusCall, NexusStep, nexus_step};
+        let recorder = Arc::new(Recorder::default());
+        let service = service_notifying(true, recorder.clone()).await;
+        let input = serde_json::json!({
+            "stream": {"kind": "workflow", "workflow_id": "wf", "topic": "t"},
+            "producer_id": "p",
+            "attempt": 1,
+            "sequence": 1,
+            "finish": true,
+        });
+        let answer = service
+            .call(
+                "NexusAppend",
+                &NexusCall {
+                    input: serde_json::to_vec(&input).unwrap(),
+                    namespace: "ns".to_string(),
+                    ..Default::default()
+                }
+                .encode_to_vec(),
+            )
+            .await
+            .unwrap();
+        let step = NexusStep::decode(answer.as_slice()).unwrap();
+        let Some(nexus_step::Step::Output(output)) = step.step else {
+            panic!("a finish needs no codec work, so it answers at once");
+        };
+        let output: serde_json::Value = serde_json::from_slice(&output).unwrap();
+        flush(&service).await;
+        let sent = recorder.0.lock().unwrap().clone();
+        assert_eq!(
+            sent.len(),
+            1,
+            "the Nexus append goes through the notifying store"
+        );
+        assert_eq!(sent[0].chain.first_run_id, "run-1");
+        assert_eq!(sent[0].topic, "t");
+        assert_eq!(sent[0].position, output["cursor"].as_str().unwrap());
+    }
+
+    #[tokio::test]
+    async fn the_nexus_calls_go_through_the_one_call_entry() {
+        use crate::proto::{NexusCall, NexusResumeRequest, NexusStep, nexus_step};
+        let service = service().await;
+        let input = serde_json::json!({
+            "stream": {"kind": "workflow", "workflow_id": "wf", "topic": "t"},
+            "producer_id": "p",
+            "attempt": 1,
+            "sequence": 1,
+            "finish": true,
+        });
+        let call = NexusCall {
+            input: serde_json::to_vec(&input).unwrap(),
+            namespace: "ns".to_string(),
+            ..Default::default()
+        };
+        let answer = service
+            .call("NexusAppend", &call.encode_to_vec())
+            .await
+            .unwrap();
+        let step = NexusStep::decode(answer.as_slice()).unwrap();
+        let Some(nexus_step::Step::Output(output)) = step.step else {
+            panic!("a finish needs no codec work, so it answers at once");
+        };
+        let output: serde_json::Value = serde_json::from_slice(&output).unwrap();
+        assert!(output["cursor"].as_str().unwrap().starts_with("memory:"));
+        // A resume of nothing is a step too, a failure lang hands its Nexus handler.
+        let answer = service
+            .call(
+                "NexusResume",
+                &NexusResumeRequest {
+                    continuation: 99,
+                    results: Vec::new(),
+                }
+                .encode_to_vec(),
+            )
+            .await
+            .unwrap();
+        let step = NexusStep::decode(answer.as_slice()).unwrap();
+        assert!(matches!(step.step, Some(nexus_step::Step::Failure(_))));
+        for rpc in ["NexusRead", "NexusReadRange"] {
+            let invalid = service.call(rpc, b"\xff").await.unwrap_err();
+            assert_eq!(
+                invalid.kind,
+                StreamFailureKind::InvalidArgument as i32,
+                "{rpc}"
+            );
+        }
     }
 }

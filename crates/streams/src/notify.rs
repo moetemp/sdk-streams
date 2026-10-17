@@ -119,8 +119,30 @@ pub struct NotifierPoll {
     pub close_failure: Option<temporalio_common::protos::temporal::api::failure::v1::Failure>,
 }
 
+/// One Nexus caller's callback, to attach to a stream's notifier.
+#[derive(Debug, Clone, PartialEq)]
+pub struct CallerAttachment {
+    /// The run chain whose stream it is. Its first run keys the notifier.
+    pub chain: ChainId,
+    /// The stream's topic.
+    pub topic: String,
+    /// The start's request id. The attach is idempotent by it, and a detach names it.
+    pub request_id: String,
+    /// Where the server delivers progress and the completion.
+    pub callback_url: String,
+    /// Headers the server sends with each delivery.
+    pub callback_headers: std::collections::HashMap<String, String>,
+    /// The operation's token, which the server hands back with each delivery.
+    pub operation_token: String,
+    /// When the operation started, which the server hands back too.
+    pub start_time: std::time::SystemTime,
+    /// The callback hears no progress until a wait after a counter, and still gets the
+    /// completion.
+    pub idle: bool,
+}
+
 /// Sends notifications to the stream notifier on the server, attaches and detaches the
-/// Workflows it wakes, and waits on it for clients.
+/// Workflows it wakes and the Nexus callers it completes, and waits on it for clients.
 #[async_trait::async_trait]
 pub trait NotifierClient: Send + Sync {
     /// Sends one notification.
@@ -155,6 +177,14 @@ pub trait NotifierClient: Send + Sync {
         let _ = attachment;
         Err(NotifyError::Unsupported(
             "this client can't attach readers".to_string(),
+        ))
+    }
+
+    /// Attaches a Nexus caller's callback to a stream's notifier. Idempotent by its request id.
+    async fn attach_caller(&self, attachment: CallerAttachment) -> Result<(), NotifyError> {
+        let _ = attachment;
+        Err(NotifyError::Unsupported(
+            "this client can't attach callers".to_string(),
         ))
     }
 
@@ -735,7 +765,7 @@ fn cursor_of(store: &dyn StreamStore, chain: &ChainId, topic: &str, position: &s
 }
 
 /// The cursor and counter that tell a reader about the record at `position`.
-fn notification_at(
+pub(crate) fn notification_at(
     store: &dyn StreamStore,
     chain: &ChainId,
     topic: &str,

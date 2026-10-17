@@ -1,0 +1,674 @@
+# The stream service's wire contract. Core serves it, so this copy in Core is
+# the canonical one. Every SDK generates its models, its forwarding handler and
+# its HTTP caller from the copy in the Core it vendors. Core's serde types are
+# checked against it by tests/nexus_contract.rs.
+#
+# Inputs reject unknown members so a typo fails at the handler. Outputs accept
+# them so a handler can add a member before every caller is rebuilt.
+nexusrpc: "1.0.0"
+
+services:
+  TemporalStreams:
+    fqn: temporal.sdk.streams.v1.TemporalStreams
+    description: >-
+      Appends to and reads from streams through one Nexus endpoint, so the
+      store behind it stays the endpoint's business and an operator can change
+      it without touching callers. An append carries one batch and a read
+      answers with a batch, because a Nexus operation per record costs too
+      much for token streams. A record crosses as the serialized
+      temporal.sdk.streams.v1.StreamRecord, the bytes every store keeps, so a
+      caller in any language decodes it with that proto alone. The generated
+      HTTP caller runs no payload codec, so it suits a namespace whose Workers
+      use none. A Workflow caller goes through its Worker, whose codec applies.
+    x-nexus-handle:
+      StreamHandle: [stream]
+      StreamProducer: [stream, producer_id, attempt]
+    operations:
+      append:
+        fqn: append
+        description: >-
+          Write one batch as one producer attempt, or finish the producer. The
+          store numbers the batch from sequence and deduplicates a retry: a
+          repeat of the producer attempt's newest batch with the same content
+          answers with where the original landed and writes nothing. A
+          sequence already used with other content, or below the newest one
+          the store holds for the attempt, is refused. Supersession records
+          are never written: a reader synthesizes them from the attempts it
+          observes.
+        input: { $ref: "#/$defs/AppendInput" }
+        output: { $ref: "#/$defs/AppendOutput" }
+      read:
+        fqn: read
+        description: >-
+          Answer with the records after the caller's cursor. The call waits
+          until it has max_records records or wait_ms passes, whichever comes
+          first, and answers with what it collected. It says when the stream
+          has ended for the reader, so the caller can stop.
+        x-nexus-long-poll:
+          wait-field: wait_ms
+          result-field: records
+          done-field: done
+          state-field: state
+        input: { $ref: "#/$defs/ReadInput" }
+        output: { $ref: "#/$defs/ReadOutput" }
+      readRange:
+        fqn: read_range
+        description: >-
+          Answer again the records of an earlier read that named a
+          floor_holder, for a Workflow that replays that read. The call reads
+          the range its replay names with the read's input state, so the
+          superseded and stale marks come out the same, and checks the records
+          against the read's digest. It waits for nothing, asks nothing of the
+          owner and has no byte budget, since it must answer exactly what the
+          read answered. Records with other content are refused as
+          StreamReplayMismatchError, and records the store no longer holds as
+          StreamReplayRangeLostError. The answer holds the records and
+          next_token only, since the caller keeps the read's state, done and
+          replay.
+        input: { $ref: "#/$defs/ReadRangeInput" }
+        output: { $ref: "#/$defs/ReadOutput" }
+      follow:
+        fqn: follow
+        description: >-
+          Answer with the records after the caller's position on a stream and
+          on every stream its link records open, in one order. Order within
+          each stream is kept. A linked stream's records come after its OPEN
+          link, and the linking stream's records after a JOIN come after the
+          linked stream reached the JOIN's point. Each item names its source,
+          and a linked stream's state comes as a link_state item. A linked
+          stream that can't be read or that ends never fails the call. Links
+          to another namespace or endpoint are not followed. The call waits
+          like read, and the state resumes every open stream.
+        x-nexus-long-poll:
+          wait-field: wait_ms
+          result-field: records
+          done-field: done
+          state-field: state
+        input: { $ref: "#/$defs/FollowInput" }
+        output: { $ref: "#/$defs/FollowOutput" }
+      followRange:
+        fqn: follow_range
+        description: >-
+          Answer again the records of an earlier follow that named a
+          floor_holder, for a Workflow that replays that follow. The call
+          reads each range again with the follow's input state, checks each
+          against its digest and the order against the follow's digest, and
+          answers the same records in the same order. Other records or
+          another order are refused as StreamReplayMismatchError.
+        input: { $ref: "#/$defs/FollowRangeInput" }
+        output: { $ref: "#/$defs/FollowOutput" }
+
+$defs:
+  StreamRef:
+    type: object
+    description: >-
+      One stream, named by its owner and a topic. It names no cursor and no
+      store, so the same reference is good behind any endpoint that serves the
+      owner.
+    x-nexus-stream-ref: { py: temporalio.contrib.streams.StreamRef }
+    properties:
+      kind:
+        type: string
+        description: >-
+          What owns the stream: "workflow", "activity" for a standalone
+          Activity, or "workflow_activity" for an Activity that a Workflow
+          run scheduled. A call with another kind is refused.
+      workflow_id:
+        type: string
+        description: >-
+          The owning Workflow, or for kind workflow_activity the Workflow that
+          scheduled the Activity. Empty for kind activity.
+      activity_id:
+        oneOf: [{ type: string }, { type: "null" }]
+        description: >-
+          The owning Activity, for kinds activity and workflow_activity. Absent
+          or null for kind workflow.
+      chain_run_id:
+        oneOf: [{ type: string }, { type: "null" }]
+        description: >-
+          For kind workflow, names the run chain that holds this run. Absent
+          or null names the Workflow id's newest chain. It never stops a read
+          at this run: a read follows the chain across Continue-as-New and
+          ends with the chain. For kind activity, the Activity run. Absent or
+          null names the Activity id's newest run when the read starts. For
+          kind workflow_activity, the run that scheduled the Activity, which is
+          required, since an Activity id repeats in each run.
+      topic:
+        type: string
+        description: "The topic on the owner's stream."
+    required: [kind, workflow_id, topic]
+    additionalProperties: false
+
+  AppendInput:
+    type: object
+    description: "One append call: who writes, where, and what."
+    properties:
+      stream: { $ref: "#/$defs/StreamRef" }
+      producer_id:
+        type: string
+        description: >-
+          Names the writer across its retries, so the store can deduplicate a
+          retry and a reader can tell a retry from a new attempt. Never empty.
+      attempt:
+        type: integer
+        minimum: 1
+        description: >-
+          The producer attempt this call writes. A higher attempt supersedes a
+          lower one, and its sequence starts again at one.
+      sequence:
+        type: integer
+        minimum: 1
+        description: >-
+          The sequence of the first record this call writes. Records of an
+          attempt are numbered from one with no gaps, so it continues where
+          the attempt's previous call ended, or repeats that call's sequence
+          for a retry.
+      payloads:
+        type: array
+        items:
+          type: string
+          contentEncoding: base64
+        description: >-
+          The record bodies, in order, each a serialized
+          temporal.api.common.v1.Payload as the caller's payload converter
+          left it, before any codec. The call crosses encoded as a whole by
+          the caller's codec, like any Nexus input, and the store encodes each
+          body with the serving Worker's codec, so a body is never plaintext
+          in transit or at rest. The store recognizes a retry by the bodies'
+          plaintext, so a codec that encodes with a fresh nonce does not make
+          a retry look like other content. A call with a record larger than
+          the handler's per-record limit (1.5 MiB by default, below what one
+          read result can carry) is refused, so every record can be read.
+          Empty on a call that finishes.
+      finish:
+        type: boolean
+        description: >-
+          Write FINISH for this producer at sequence: it writes nothing more on
+          the topic. A finishing call carries no payloads, so every call is one
+          store write and a retry of it is deduplicated whole. Says nothing
+          about the producer's outcome.
+    required: [stream, producer_id, attempt, sequence]
+    additionalProperties: false
+
+  AppendOutput:
+    type: object
+    description: "Where the append landed."
+    properties:
+      cursor:
+        type: string
+        x-nexus-cursor: StreamCursor
+        description: >-
+          The cursor of the last record this call wrote, or of the original's
+          last record when the call was a deduplicated retry.
+    required: [cursor]
+    additionalProperties: true
+
+  ReadInput:
+    type: object
+    description: "One read call: where to resume and how long to wait."
+    properties:
+      stream: { $ref: "#/$defs/StreamRef" }
+      after_token:
+        type: string
+        x-nexus-cursor: StreamCursor
+        description: >-
+          A cursor from an earlier record, read or append of this stream. The
+          read resumes strictly after the record it names. Absent or empty
+          starts at the oldest record the stream retains. A cursor from another
+          stream or another store is refused, and one whose record retention
+          dropped is refused as expired.
+      max_records:
+        type: integer
+        minimum: 1
+        maximum: 1000
+        description: >-
+          Answer with at most this many stored records. 100 when absent. A
+          supersession comes on top.
+      wait_ms:
+        type: integer
+        minimum: 0
+        maximum: 60000
+        description: >-
+          Wait at most this long for a record before answering. The handler
+          shortens it to fit the request deadline. A call that collects
+          nothing answers with no records and the caller's own cursor.
+      latest_only:
+        type: boolean
+        description: >-
+          Answer with the cursor of the newest record and no records, for a
+          reader that follows from now. Refused beside after_token.
+      state:
+        type: string
+        contentEncoding: base64
+        description: >-
+          The state of this read's previous answer, opaque to the caller.
+          Absent on a read's first call. With it the endpoint knows which
+          producer attempts the reader already saw, so its superseded and
+          stale marks are exact across calls and across handler Workers. A
+          state that doesn't parse is refused as a cursor mistake.
+      floor_holder:
+        type: string
+        description: >-
+          Names a reader that keeps the range of each answer in place of its
+          records and reads the range again through read_range on replay. With
+          it the endpoint holds the records after the read's start against
+          retention for this holder, and the answer carries replay. Each read
+          and read_range of the holder renews the hold, which lapses the
+          store's floor lease after the last one. At most 512 bytes. Refused
+          beside latest_only, which answers no records.
+      wake_token:
+        type: string
+        description: >-
+          The operation token of the reader's stream operation. When the call
+          answers no records and not done, the endpoint asks the stream's
+          notifier to wake that operation's callback once the stream moves
+          past the answer, then reads once more, so a record that landed
+          meanwhile is in the answer. A reader that finds records on each
+          call never waits, and its operation hears nothing. Refused when the
+          token names another stream.
+    required: [stream]
+    additionalProperties: false
+
+  ReadRangeInput:
+    type: object
+    description: >-
+      One replay of an earlier read that named a floor_holder. Every member
+      but stream and floor_holder comes from that read's input and answer.
+    properties:
+      stream: { $ref: "#/$defs/StreamRef" }
+      chain_first_run_id:
+        type: string
+        description: "The replay's chain_first_run_id."
+      after_token:
+        type: string
+        x-nexus-cursor: StreamCursor
+        description: "The replay's after_token."
+      to_token:
+        type: string
+        x-nexus-cursor: StreamCursor
+        description: "The read answer's next_token."
+      stored_records:
+        type: integer
+        minimum: 0
+        maximum: 1000
+        description: "The replay's stored_records."
+      state:
+        type: string
+        contentEncoding: base64
+        description: >-
+          The state the read sent, so the replay's superseded and stale marks
+          are the read's. Absent when the read sent none.
+      records_digest:
+        type: string
+        contentEncoding: base64
+        description: "The replay's records_digest."
+      floor_holder:
+        type: string
+        description: >-
+          As on read, so a replay renews the hold, also after a reset that
+          replays a run whose reads stopped long ago.
+    required: [stream, chain_first_run_id, after_token, to_token, stored_records, records_digest]
+    additionalProperties: false
+
+  RecordWire:
+    type: object
+    description: "One record on the wire: its cursor and the record."
+    properties:
+      token:
+        type: string
+        x-nexus-cursor: StreamCursor
+        description: "The cursor of this record. Pass it as after_token to resume past it."
+      record:
+        type: string
+        contentEncoding: base64
+        description: >-
+          The serialized temporal.sdk.streams.v1.StreamRecord: topic, kind,
+          producer, attempt, sequence and body. The body is the producer's
+          payload decoded by the serving Worker's data converter, payload
+          codec and external storage included. The answer as a whole is
+          encoded on its way back like any operation result, so the caller's
+          codec decodes it and the body crosses encoded once. Empty when
+          error or superseded is set.
+      error:
+        type: string
+        description: >-
+          Why the endpoint can't hand over the record at this cursor, such as
+          one written to the store directly that is larger than a read result
+          can carry. The record is left out, and a reader goes on past the
+          cursor.
+      stale:
+        type: boolean
+        description: >-
+          The record is from an attempt of its producer below the newest one
+          this read delivered: an older attempt wrote after a newer one
+          started. It is still delivered, so a reader can keep it out of the
+          current answer.
+      superseded:
+        $ref: "#/$defs/Supersession"
+        description: >-
+          Set instead of a record when a later attempt of a producer started
+          writing. The store's reader reports it, at the cursor before the
+          new attempt's first record, also on a read that resumes after a
+          cursor and saw no earlier attempt itself.
+    required: [token, record]
+    additionalProperties: true
+
+  Supersession:
+    type: object
+    description: "A later attempt of a producer started writing."
+    properties:
+      producer_id:
+        type: string
+        description: "The producer whose attempt changed."
+      previous_attempt:
+        type: integer
+        description: "The attempt readers saw before."
+      attempt:
+        type: integer
+        description: "The attempt that started writing."
+    required: [producer_id, previous_attempt, attempt]
+    additionalProperties: true
+
+  ReadOutput:
+    type: object
+    description: "What one read answered, and where to resume."
+    properties:
+      records:
+        type: array
+        items: { $ref: "#/$defs/RecordWire" }
+        description: "The records after the caller's cursor, in stream order."
+      next_token:
+        type: string
+        x-nexus-cursor: StreamCursor
+        description: >-
+          The cursor to pass as after_token next. The caller's own cursor when
+          the call collected nothing.
+      done:
+        type: boolean
+        description: >-
+          The stream ended for this reader: the stream is closed, or its
+          owner's run chain ended, and every retained record after the cursor
+          has been delivered.
+          Nothing more will arrive, so the caller stops.
+      state:
+        type: string
+        contentEncoding: base64
+        description: >-
+          Pass as state on the next call of this read. It matches next_token,
+          also when the answer was cut short by its byte budget. It holds at
+          most 16 KiB, which is about 22 KiB as base64, so it can ride in a
+          Workflow's History. A longer state is refused.
+      replay:
+        $ref: "#/$defs/ReplayRange"
+        description: >-
+          Set when the call named a floor_holder. What a replay passes to
+          read_range to get these records again.
+    required: [records, next_token, done]
+    additionalProperties: true
+
+  ReplayRange:
+    type: object
+    description: >-
+      The range one read answered, after its byte budget cut it. A Workflow
+      keeps it with the answer's next_token and state in place of the records.
+    properties:
+      chain_first_run_id:
+        type: string
+        description: "The first run of the run chain the read read."
+      after_token:
+        type: string
+        x-nexus-cursor: StreamCursor
+        description: >-
+          The cursor the answer reads strictly after, with the read's start
+          resolved. Empty when the answer starts at the oldest record. An
+          answer whose only record is an error the store's reader raised has
+          an empty range at that record's cursor.
+      stored_records:
+        type: integer
+        minimum: 0
+        description: >-
+          How many stored records the answer holds, the ones that crossed as
+          an error included and supersessions not counted.
+      records_digest:
+        type: string
+        contentEncoding: base64
+        description: >-
+          SHA-256 over the answer's records. Per record it covers the cursor,
+          the stale mark, and the kind, producer, attempt, sequence and
+          content hash of a stored record or the producer and both attempts of
+          a supersession. It leaves out the bodies, so a codec change keeps it.
+    required: [chain_first_run_id, after_token, stored_records, records_digest]
+    additionalProperties: true
+
+  FollowInput:
+    type: object
+    description: "One follow call: the root stream, where to resume, the limits and the wait."
+    properties:
+      stream: { $ref: "#/$defs/StreamRef" }
+      after_token:
+        type: string
+        x-nexus-cursor: StreamCursor
+        description: >-
+          The root cursor on the follow's first call. Absent or empty starts
+          at the oldest record the root retains. A call with state ignores it.
+      state:
+        type: string
+        contentEncoding: base64
+        description: >-
+          The state of this follow's previous answer, opaque to the caller.
+          Absent on the first call. It holds every open stream's position.
+      max_records:
+        type: integer
+        minimum: 1
+        maximum: 1000
+        description: "Answer with at most this many stored records, across all streams. 100 when absent."
+      wait_ms:
+        type: integer
+        minimum: 0
+        maximum: 60000
+        description: >-
+          Wait at most this long for a record on any open stream before
+          answering. The handler shortens it to fit the request deadline.
+      max_depth:
+        type: integer
+        minimum: 1
+        maximum: 16
+        description: >-
+          How deep links are followed, the root being depth zero. 4 when
+          absent. The first call's limits hold for the whole follow.
+      max_open:
+        type: integer
+        minimum: 1
+        maximum: 32
+        description: "How many linked streams are open at once. 16 when absent."
+      floor_holder:
+        type: string
+        description: >-
+          As on read: each stream holds its records for this holder, and the
+          answer carries replay. At most 480 bytes.
+      wake_token:
+        type: string
+        description: >-
+          The operation token of the caller's stream operation on the root.
+          When the call answers no records and not done, the endpoint asks
+          the root's notifier to wake that operation once the root moves, then
+          follows once more. Refused when the token names another stream.
+    required: [stream]
+    additionalProperties: false
+
+  FollowRangeInput:
+    type: object
+    description: >-
+      One replay of an earlier follow that named a floor_holder. Every member
+      but stream and floor_holder comes from that follow's input and answer.
+    properties:
+      stream: { $ref: "#/$defs/StreamRef" }
+      state:
+        type: string
+        contentEncoding: base64
+        description: "The state the follow sent. Absent when it sent none."
+      ranges:
+        type: array
+        items:
+          type: string
+          contentEncoding: base64
+        description: "The follow answer's replay ranges, as they came."
+      follow_digest:
+        type: string
+        contentEncoding: base64
+        description: "The follow answer's replay follow_digest."
+      max_depth:
+        type: integer
+        minimum: 1
+        maximum: 16
+        description: "As the follow's first call sent it, for a replay of that call."
+      max_open:
+        type: integer
+        minimum: 1
+        maximum: 32
+        description: "As the follow's first call sent it, for a replay of that call."
+      floor_holder:
+        type: string
+        description: "As on follow, so a replay renews the holds."
+    required: [stream, ranges, follow_digest]
+    additionalProperties: false
+
+  FollowedWire:
+    type: object
+    description: "One item of a follow: a record of a source, or the state of a link."
+    properties:
+      source:
+        type: integer
+        minimum: 0
+        description: "The stream the item belongs to. 0 is the root. See sources."
+      record:
+        $ref: "#/$defs/RecordWire"
+        description: "A record of the source, as read answers it."
+      link_state:
+        $ref: "#/$defs/LinkStateWire"
+        description: "What happened to a link of the source."
+    required: [source]
+    additionalProperties: true
+
+  LinkStateWire:
+    type: object
+    description: "What happened to a link, as the follower saw it."
+    properties:
+      kind:
+        type: string
+        description: >-
+          "opened": the linked stream's records follow. "done": its segment
+          ended. "unavailable": it can't be read, and error says why.
+          "skipped": the link was not followed, and reason says why.
+      link:
+        type: string
+        contentEncoding: base64
+        description: "The serialized temporal.sdk.streams.v1.StreamLink."
+      error:
+        type: string
+        description: "Why a linked stream can't be read, for kind unavailable."
+      reason:
+        type: string
+        description: >-
+          Why a link was not followed, for kind skipped: depth, limit, cycle,
+          open or endpoint.
+    required: [kind, link]
+    additionalProperties: true
+
+  FollowSourceWire:
+    type: object
+    description: "A stream that a follow answer's items name."
+    properties:
+      number:
+        type: integer
+        minimum: 0
+        description: "The source number items use."
+      parent:
+        type: integer
+        minimum: 0
+        description: "The source that holds the link that opened it. 0 for the root."
+      depth:
+        type: integer
+        minimum: 0
+        description: "How many links from the root."
+      stream: { $ref: "#/$defs/StreamRef" }
+      name:
+        type: string
+        description: "The link's name. Empty for the root."
+    required: [number, parent, depth, stream, name]
+    additionalProperties: true
+
+  FollowReplay:
+    type: object
+    description: >-
+      What a replay passes to follow_range to get a follow answer's records
+      again, with the state that follow sent.
+    properties:
+      ranges:
+        type: array
+        items:
+          type: string
+          contentEncoding: base64
+        description: "One opaque range per read the follow made, in read order."
+      follow_digest:
+        type: string
+        contentEncoding: base64
+        description: "SHA-256 over the order of the answer's items."
+    required: [ranges, follow_digest]
+    additionalProperties: true
+
+  FollowOutput:
+    type: object
+    description: "What one follow answered, and where to resume."
+    properties:
+      records:
+        type: array
+        items: { $ref: "#/$defs/FollowedWire" }
+        description: "The items, in follow order."
+      done:
+        type: boolean
+        description: >-
+          The root ended and every linked segment ended. Nothing more will
+          arrive, so the caller stops.
+      state:
+        type: string
+        contentEncoding: base64
+        description: >-
+          Pass as state on the next call of this follow. Core always sets it.
+          At most 64 KiB, which is about 86 KiB as base64.
+      sources:
+        type: array
+        items: { $ref: "#/$defs/FollowSourceWire" }
+        description: "Each source that records name."
+      replay:
+        $ref: "#/$defs/FollowReplay"
+        description: "Set when the call named a floor_holder."
+    required: [records, done, sources]
+    additionalProperties: true
+
+  StreamOperationToken:
+    type: object
+    description: >-
+      What a stream-returning operation's token carries. Core mints it when
+      the operation starts, and a caller reads the stream back from it. The
+      token is this model's transfer form as JSON with sorted keys and no
+      spaces, in base64url with no padding.
+    x-nexus-operation-token: { version-field: v }
+    properties:
+      v:
+        type: integer
+        const: 2
+        description: "The token version. A token of another version is refused."
+      ref: { $ref: "#/$defs/StreamRef" }
+      attach:
+        type: string
+        description: "The request id of the start that attached the caller."
+      chain:
+        type: string
+        description: >-
+          The first run of the run chain the start attached to, so a cancel
+          detaches from it even after the Workflow id moved on to a new chain.
+          For an Activity owner, the Activity run. For a Workflow Activity
+          owner, the run that scheduled it.
+    required: [v, ref, attach, chain]
+    additionalProperties: false

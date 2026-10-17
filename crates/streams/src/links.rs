@@ -175,6 +175,11 @@ impl FollowState {
         ))
     }
 
+    /// Whether a linked stream is open.
+    pub(crate) fn has_linked(&self) -> bool {
+        self.sources.len() > 1
+    }
+
     /// Whether the root ended and every linked segment ended.
     pub(crate) fn done(&self) -> bool {
         self.root_done && self.sources.len() == 1 && self.sources[0].held.is_none()

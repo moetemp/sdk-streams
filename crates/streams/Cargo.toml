@@ -21,7 +21,7 @@ envconfig = ["temporalio-client/envconfig", "temporalio-common/envconfig"]
 # A FIPS build: `tls-aws-lc`, and `aws-lc-rs` in FIPS mode, so the shared rustls provider links
 # `aws-lc-fips-sys`. Take it with no default features, so no crate in the build pulls `ring`.
 fips = ["tls-aws-lc", "dep:aws-lc-rs"]
-serde_serialize = ["dep:serde", "temporalio-common/serde_serialize"]
+serde_serialize = ["temporalio-common/serde_serialize"]
 # The Redis store. Off by default, so a build that needs only the trait takes no Redis client.
 # TLS uses the rustls provider the process installs, the same one Core uses.
 redis = ["dep:redis", "dep:crc16"]
@@ -39,6 +39,7 @@ postgres = [
 
 [dependencies]
 async-trait = "0.1"
+base64 = "0.23"
 bytes = "1"
 # Only under `fips`. The crate never calls it. Its `fips` feature switches the one `aws-lc-rs` in
 # the build into FIPS mode.
@@ -61,7 +62,8 @@ redis = { version = "1.7", optional = true, default-features = false, features =
 ] }
 rustls = { version = "0.23", optional = true, default-features = false, features = ["std"] }
 rustls-native-certs = { version = "0.8", optional = true }
-serde = { workspace = true, optional = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
 sha2 = "0.10"
 temporalio-client = { workspace = true }
 temporalio-common = { workspace = true }
@@ -85,7 +87,7 @@ parking_lot = "0.12"
 rstest = "0.26"
 rustls = { version = "0.23", default-features = false, features = ["ring", "std"] }
 tonic = { workspace = true }
-serde_json = { workspace = true }
+serde_yaml = "0.9"
 tracing-subscriber = { version = "0.3", default-features = false, features = ["fmt"] }
 tokio = { version = "1.47", features = [
     "io-util",
