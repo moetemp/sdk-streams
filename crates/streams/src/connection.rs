@@ -2,9 +2,9 @@
 //! client's server about streams' owners and sending it the stream notifications.
 
 use crate::{
-    CloseOutcome, NotifierClient, NotifierPoll, NotifyError, OwnerClient, OwnerDescription,
-    OwnerError, OwnerId, OwnerStatus, RunClose, StreamNotification, StreamResult, StreamService,
-    WorkflowAttachment,
+    CallerAttachment, CloseOutcome, NotifierClient, NotifierPoll, NotifyError, OwnerClient,
+    OwnerDescription, OwnerError, OwnerId, OwnerStatus, RunClose, StreamNotification, StreamResult,
+    StreamService, WorkflowAttachment,
     proto::{self, ChainId},
     protos::temporal::api::{
         enums::v1::StreamOwnerKind,
@@ -26,7 +26,7 @@ use temporalio_common::{
     protos::{
         google::rpc::Status as RpcStatus,
         temporal::api::{
-            common::v1::WorkflowExecution,
+            common::v1::{WorkflowExecution, callback},
             enums::v1::{EventType, WorkflowExecutionStatus},
             history::v1::{HistoryEvent, history_event},
             workflowservice::v1::{
@@ -190,6 +190,21 @@ impl NotifierClient for ConnectionNotifierClient {
         .map_err(notify_error)
     }
 
+    async fn attach_caller(&self, attachment: CallerAttachment) -> Result<(), NotifyError> {
+        let request = caller_attach_request(attachment);
+        let namespace = request.namespace.clone();
+        notifier_call::<AttachStreamCallbackResponse>(
+            &self.connection,
+            method::ATTACH,
+            &namespace,
+            request,
+            None,
+        )
+        .await
+        .map(drop)
+        .map_err(notify_error)
+    }
+
     async fn wait_callback(
         &self,
         chain: ChainId,
@@ -338,6 +353,22 @@ fn attach_request(attachment: WorkflowAttachment) -> AttachStreamCallbackRequest
             run_id: attachment.run_id,
             subscription_id: attachment.subscription_id,
         }),
+        idle: attachment.idle,
+        ..Default::default()
+    }
+}
+
+fn caller_attach_request(attachment: CallerAttachment) -> AttachStreamCallbackRequest {
+    AttachStreamCallbackRequest {
+        namespace: attachment.chain.namespace.clone(),
+        stream_ref: Some(chain_reference(&attachment.chain, attachment.topic)),
+        request_id: attachment.request_id,
+        callback: Some(callback::Nexus {
+            url: attachment.callback_url,
+            header: attachment.callback_headers,
+        }),
+        operation_token: attachment.operation_token,
+        start_time: Some(attachment.start_time.into()),
         idle: attachment.idle,
         ..Default::default()
     }
@@ -865,6 +896,55 @@ mod tests {
         assert!(request.close_result.is_none());
     }
 
+    fn chain() -> ChainId {
+        ChainId {
+            namespace: "default".to_string(),
+            workflow_id: "owner-1".to_string(),
+            first_run_id: "chain-1".to_string(),
+            ..Default::default()
+        }
+    }
+
+    fn caller_attachment() -> CallerAttachment {
+        CallerAttachment {
+            chain: chain(),
+            topic: "tokens".to_string(),
+            request_id: "attach-1".to_string(),
+            callback_url: "temporal://system".to_string(),
+            callback_headers: [("nexus-callback-token".to_string(), "abc".to_string())].into(),
+            operation_token: "token".to_string(),
+            start_time: std::time::UNIX_EPOCH + std::time::Duration::from_secs(1_700_000_000),
+            idle: true,
+        }
+    }
+
+    #[test]
+    fn a_caller_attach_names_the_chains_notifier_and_carries_the_start() {
+        let request = caller_attach_request(caller_attachment());
+        assert_eq!(request.namespace, "default");
+        assert_eq!(
+            request.stream_ref,
+            Some(StreamReference {
+                owner_kind: StreamOwnerKind::Workflow as i32,
+                workflow_id: "owner-1".to_string(),
+                run_id: "chain-1".to_string(),
+                topic: "tokens".to_string(),
+                ..Default::default()
+            })
+        );
+        assert_eq!(request.request_id, "attach-1");
+        let callback = request.callback.unwrap();
+        assert_eq!(callback.url, "temporal://system");
+        assert_eq!(callback.header["nexus-callback-token"], "abc");
+        assert_eq!(request.operation_token, "token");
+        assert_eq!(request.start_time.unwrap().seconds, 1_700_000_000);
+        assert!(request.workflow_target.is_none(), "exactly one target");
+        assert!(
+            request.idle,
+            "the reader wakes the callback when it is caught up"
+        );
+    }
+
     #[test]
     fn a_notification_of_a_workflow_activity_stream_names_its_scheduling_run() {
         let request = notify_request(StreamNotification {
@@ -1149,6 +1229,40 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn a_caller_attach_goes_to_the_rpc_by_its_path_and_a_refusal_keeps_its_code() {
+        let (client, seen) = served(|request| match request.rpc.as_str() {
+            "AttachStreamCallback" if request.headers["temporal-namespace"] == "default" => {
+                Ok(vec![])
+            }
+            _ => Err(tonic::Status::permission_denied("not this namespace")),
+        })
+        .await;
+        client.attach_caller(caller_attachment()).await.unwrap();
+        {
+            let seen = seen.lock().unwrap();
+            let [call] = seen.as_slice() else {
+                panic!("one call, not {seen:?}");
+            };
+            assert_eq!(
+                (call.service.as_str(), call.rpc.as_str()),
+                (
+                    "temporal.api.workflowservice.v1.WorkflowService",
+                    "AttachStreamCallback"
+                )
+            );
+            let request = AttachStreamCallbackRequest::decode(call.proto.clone()).unwrap();
+            assert_eq!(request, caller_attach_request(caller_attachment()));
+        }
+        let mut other = caller_attachment();
+        other.chain.namespace = "other".to_string();
+        let refused = client.attach_caller(other).await.unwrap_err();
+        assert!(
+            matches!(refused, NotifyError::Refused(_)),
+            "a refusal is final: {refused:?}"
+        );
+    }
+
+    #[tokio::test]
     async fn a_poll_decodes_the_answer_and_a_refusal_keeps_its_code() {
         let (client, seen) = served(|request| match request.rpc.as_str() {
             "PollStreamNotifier" => Ok(PollStreamNotifierResponse {
@@ -1287,6 +1401,9 @@ mod tests {
         stream: proto::StreamAddress,
         workflow_id: String,
         run_id: String,
+        /// The chain the caller's operation token names.
+        token_first_run_id: String,
+        operation_token: String,
         // The live tests share the callback listener's address.
         _turn: tokio::sync::MutexGuard<'static, ()>,
     }
@@ -1299,9 +1416,12 @@ mod tests {
     /// `STREAMS_NOTIFIER_NEXUS_PROGRESS`, since a Jetty server sends progress only to Workflow
     /// wake targets.
     async fn live() -> Option<Live> {
-        use crate::protos::temporal::api::workflowservice::v1::{
-            AttachStreamCallbackRequest, AttachStreamCallbackResponse,
-        };
+        live_after(0).await
+    }
+
+    /// `live()`, with `appends` records written before the caller attaches. The server keeps no
+    /// notifier before an attach, so it drops the notifications of these records.
+    async fn live_after(appends: i64) -> Option<Live> {
         use temporalio_common::protos::temporal::api::{
             common::v1::WorkflowType, taskqueue::v1::TaskQueue,
             workflowservice::v1::StartWorkflowExecutionRequest,
@@ -1345,32 +1465,6 @@ mod tests {
             .into_inner();
         // An earlier live test may have left deliveries behind.
         while deliveries().lock().unwrap().try_recv().is_ok() {}
-        notifier_call::<AttachStreamCallbackResponse>(
-            &connection,
-            method::ATTACH,
-            "default",
-            AttachStreamCallbackRequest {
-                namespace: "default".to_string(),
-                stream_ref: Some(StreamReference {
-                    owner_kind: StreamOwnerKind::Workflow as i32,
-                    workflow_id: workflow_id.clone(),
-                    run_id: started.run_id.clone(),
-                    topic: "tokens".to_string(),
-                    ..Default::default()
-                }),
-                request_id: "caller".to_string(),
-                callback: Some(
-                    temporalio_common::protos::temporal::api::common::v1::callback::Nexus {
-                        url: "http://127.0.0.1:7899/callback".to_string(),
-                        ..Default::default()
-                    },
-                ),
-                ..Default::default()
-            },
-            None,
-        )
-        .await
-        .unwrap();
         let service = connect_stream_service(
             proto::StreamStoreConfig {
                 store: Some(proto::stream_store_config::Store::Memory(
@@ -1392,44 +1486,78 @@ mod tests {
             topic: "tokens".to_string(),
             ..Default::default()
         };
+        use prost::Message;
+        for sequence in 1..=appends {
+            service
+                .call("Append", &one_append(&stream, sequence).encode_to_vec())
+                .await
+                .unwrap();
+        }
+        let attached = proto::AttachCallerResponse::decode(
+            service
+                .call(
+                    "AttachCaller",
+                    &proto::AttachCallerRequest {
+                        stream: Some(stream.clone()),
+                        request_id: "caller".to_string(),
+                        callback_url: "http://127.0.0.1:7899/callback".to_string(),
+                        // The caller reads nothing, so only a first wait from the start gets
+                        // its idle callback the first append's progress.
+                        wake_after_counter: Some(0),
+                        ..Default::default()
+                    }
+                    .encode_to_vec(),
+                )
+                .await
+                .unwrap()
+                .as_slice(),
+        )
+        .unwrap();
+        let token = crate::OperationToken::decode("default", &attached.operation_token).unwrap();
         Some(Live {
             connection,
             service,
             stream,
             workflow_id,
             run_id: started.run_id,
+            token_first_run_id: token.chain_first_run_id,
+            operation_token: attached.operation_token,
             _turn: turn,
         })
+    }
+
+    /// One record from one producer, as its batch at `sequence`.
+    fn one_append(stream: &proto::StreamAddress, sequence: i64) -> proto::AppendRequest {
+        proto::AppendRequest {
+            stream: Some(stream.clone()),
+            producer: Some(proto::append_request::Producer::Named(
+                proto::NamedProducer {
+                    producer_id: "producer".to_string(),
+                    attempt: 1,
+                },
+            )),
+            sequence,
+            records: vec![proto::AppendRecord {
+                kind: proto::StreamRecordKind::Data as i32,
+                body: Some(
+                    temporalio_common::protos::temporal::api::common::v1::Payload {
+                        data: b"token".to_vec(),
+                        ..Default::default()
+                    },
+                ),
+                content_hash: vec![7; 32],
+                ..Default::default()
+            }],
+            // Any value names the batch, since the producer writes each batch once.
+            digest: vec![sequence as u8; 32],
+        }
     }
 
     impl Live {
         async fn append_one(&self) {
             use prost::Message;
-            let append = proto::AppendRequest {
-                stream: Some(self.stream.clone()),
-                producer: Some(proto::append_request::Producer::Named(
-                    proto::NamedProducer {
-                        producer_id: "producer".to_string(),
-                        attempt: 1,
-                    },
-                )),
-                sequence: 1,
-                records: vec![proto::AppendRecord {
-                    kind: proto::StreamRecordKind::Data as i32,
-                    body: Some(
-                        temporalio_common::protos::temporal::api::common::v1::Payload {
-                            data: b"token".to_vec(),
-                            ..Default::default()
-                        },
-                    ),
-                    content_hash: vec![7; 32],
-                    ..Default::default()
-                }],
-                // Any value names the batch, since this producer writes it once.
-                digest: vec![9; 32],
-            };
             self.service
-                .call("Append", &append.encode_to_vec())
+                .call("Append", &one_append(&self.stream, 1).encode_to_vec())
                 .await
                 .unwrap();
             let (state, body) = next_delivery();
@@ -1453,7 +1581,23 @@ mod tests {
         }
 
         async fn end(self) {
+            use prost::Message;
             use temporalio_common::protos::temporal::api::workflowservice::v1 as service;
+            // The owner check closes a terminated owner's stream after the test ended. Its
+            // completion to a closed listener fails, and enough such failures open the server's
+            // circuit breaker for the address the next run listens on. A detached caller gets
+            // no completion, and a caller already completed is not found, which is fine.
+            self.service
+                .call(
+                    "DetachCaller",
+                    &proto::DetachCallerRequest {
+                        namespace: "default".to_string(),
+                        operation_token: self.operation_token.clone(),
+                    }
+                    .encode_to_vec(),
+                )
+                .await
+                .unwrap();
             self.connection
                 .workflow_service()
                 .terminate_workflow_execution(
@@ -1476,6 +1620,7 @@ mod tests {
     async fn a_live_notifier_hears_appends_as_progress_and_the_close_as_the_result() {
         use temporalio_common::protos::temporal::api::common::v1::Payload;
         let Some(live) = live().await else { return };
+        assert_eq!(live.token_first_run_id, live.run_id);
         live.append_one().await;
         let (state, body) = live
             .close(proto::CloseRequest {
@@ -1491,6 +1636,17 @@ mod tests {
             .await;
         assert_eq!(state, "succeeded", "{body}");
         assert!(body.contains("summary"), "{body}");
+        live.end().await;
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_live_caller_hears_the_records_that_landed_before_its_attach() {
+        let Some(live) = live_after(2).await else {
+            return;
+        };
+        let (state, body) = next_delivery();
+        assert_eq!(state, "running", "{body}");
+        assert!(body.contains(r#""counter":"2""#), "{body}");
         live.end().await;
     }
 
@@ -1545,32 +1701,6 @@ mod tests {
             Some("the agent gave up".to_string())
         );
         live.end().await;
-    }
-
-    /// One record from one producer, as its batch at `sequence`.
-    fn record_append(stream: &proto::StreamAddress, sequence: i64) -> proto::AppendRequest {
-        proto::AppendRequest {
-            stream: Some(stream.clone()),
-            producer: Some(proto::append_request::Producer::Named(
-                proto::NamedProducer {
-                    producer_id: "producer".to_string(),
-                    attempt: 1,
-                },
-            )),
-            sequence,
-            records: vec![proto::AppendRecord {
-                kind: proto::StreamRecordKind::Data as i32,
-                body: Some(
-                    temporalio_common::protos::temporal::api::common::v1::Payload {
-                        data: b"token".to_vec(),
-                        ..Default::default()
-                    },
-                ),
-                content_hash: vec![7; 32],
-                ..Default::default()
-            }],
-            digest: vec![sequence as u8; 32],
-        }
     }
 
     /// Needs a server with idle Workflow targets at `STREAMS_NOTIFIER_SERVER`, and a recheck
@@ -1672,7 +1802,7 @@ mod tests {
             }
         };
         let append = |sequence: i64| {
-            let request = record_append(&stream, sequence);
+            let request = one_append(&stream, sequence);
             let service = service.clone();
             async move {
                 service
