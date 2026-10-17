@@ -1,7 +1,8 @@
 #!/usr/bin/env bash
 # Copies the Temporal API protos that the crate's own protos import, and the protos those import,
 # from the sdk-rust commit the workspace pins. The copy is for imports only. The crate maps
-# `.temporal.api` to `temporalio-common`, so it generates no API types of its own.
+# `.temporal.api` to `temporalio-common`, so it generates no API types of its own, apart from the
+# stream API under `protos/api_stream`, which `sync-stream-api.sh` copies.
 #
 #   scripts/sync-api-protos.sh [rev]
 #
@@ -16,6 +17,7 @@ rev=${1:-$(sed -n "$section"'s/^rev = "\([0-9a-f]*\)"/\1/p' "$root/Cargo.toml")}
 src="https://raw.githubusercontent.com/moetemp/sdk-rust/$rev/crates/protos/protos/api_upstream"
 protos="$root/crates/streams/protos"
 out="$protos/api_include"
+stream="$protos/api_stream"
 
 imports() {
   sed -n 's/^import \(public \)\{0,1\}"\(temporal\/api\/[^"]*\)";.*/\2/p' "$1"
@@ -31,6 +33,7 @@ while [ -n "$todo" ]; do
   next=""
   for path in $todo; do
     case " $seen " in *" $path "*) continue ;; esac
+    [ -f "$stream/$path" ] && continue
     seen="$seen $path"
     mkdir -p "$out/$(dirname "$path")"
     curl -fsSL "$src/$path" -o "$out/$path"
