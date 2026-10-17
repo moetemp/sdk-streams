@@ -1887,10 +1887,10 @@ async fn a_try_cancel_closes_the_streams_with_the_canceled_failure() {
 
 #[tokio::test]
 async fn a_publish_with_a_link_lands_before_the_completion() {
-    use temporalio_common::protos::temporal::api::{
-        enums::v1::StreamOwnerKind as Kind, stream::v1::StreamReference,
+    use temporalio_streams::{
+        proto::{StreamLink, stream_link},
+        protos::temporal::api::{enums::v1::StreamOwnerKind as Kind, stream::v1::StreamReference},
     };
-    use temporalio_streams::proto::{StreamLink, stream_link};
     let store = Arc::new(RecordingStore::default());
     let appended_at_completion: Arc<Mutex<Vec<usize>>> = Default::default();
     let lang = lang_appending_to(

@@ -14,7 +14,6 @@ use temporalio_common::{
             common::v1::Payload,
             enums::v1::{EventType, WorkflowTaskFailedCause},
             failure::v1::Failure,
-            stream::v1::StreamWake,
         },
     },
     worker::WorkerTaskTypes,
@@ -24,7 +23,9 @@ use temporalio_sdk_core::{
     replay::TestHistoryBuilder,
     test_help::{MockPollCfg, ResponseType, build_mock_pollers, mock_worker},
 };
-use temporalio_streams::{STREAM_WAKE_TYPE_URL, fold_stream_wakes};
+use temporalio_streams::{
+    STREAM_WAKE_TYPE_URL, fold_stream_wakes, protos::temporal::api::stream::v1::StreamWake,
+};
 
 fn wake(subscription_id: &str, counter: i64) -> StreamWake {
     StreamWake {
