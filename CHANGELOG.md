@@ -30,3 +30,5 @@
 - `PublishWorkflowTask` takes `resolved_owner_activities`, the owner Activities an activation
   resolves. The service closes each one's streams after the records land, and `ShutdownWorker`
   waits for the closes. `STREAM_OWNER_HEADER` names the header lang marks an owner with.
+- Ported Jetty's Core tests onto Core's mock Worker with the test as lang: owner Activity closes,
+  LINK records in the publish, and the stream wakes on a task's attachments.
