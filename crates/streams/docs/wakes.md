@@ -11,8 +11,9 @@ The server writes each wake as one entry of `WorkflowTaskScheduledEventAttribute
 `google.protobuf.Any` of `temporal.api.stream.v1.StreamWake` with the type URL
 `type.googleapis.com/temporal.api.stream.v1.StreamWake` (`STREAM_WAKE_TYPE_URL`). Core gives lang
 the attachments of one task as one `WorkflowTaskAttachments` job, in event order, in the task's
-first activation and after the task's other jobs. The job comes from History, so replay gives the
-same job at the same point. Lang skips attachments of other types.
+first activation. The job sorts after the task's signals, updates and resolutions, and before
+Local Activity resolutions. It comes from History, so replay gives the same job at the same point.
+Lang skips attachments of other types.
 
 ## Fold
 
