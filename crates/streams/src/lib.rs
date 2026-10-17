@@ -36,7 +36,7 @@ pub use cursor::{BEGINNING, END, cursor_position, mint_cursor, stream_hash};
 pub use error::{StreamError, StreamResult};
 pub use handle::{OWNER_RECHECK, OWNER_START_GRACE, Streams, StreamsOptions};
 pub use memory::MemoryStore;
-pub use owner::{OwnerClient, OwnerDescription, OwnerError};
+pub use owner::{OwnerClient, OwnerDescription, OwnerError, RunClose};
 pub use reader::{
     DEFAULT_MAX_RECORDS, MAX_STATE_BYTES, MAX_TRACKED_PRODUCERS, ReadTarget, read_page,
 };

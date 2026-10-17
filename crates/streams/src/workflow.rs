@@ -3,8 +3,8 @@
 //! gives, as the activation's `WorkflowTaskHistoryInfo` names it.
 
 use crate::{
-    OwnerClient, StreamError, StreamResult, StreamStore, append_batch, check_record_limit,
-    check_topic, close_chain,
+    OwnerClient, RunClose, StreamError, StreamResult, StreamStore, append_batch,
+    check_record_limit, check_topic, close_chain,
     proto::{
         AppendRecord, ChainId, OutputRecord, PublishWorkflowTaskRequest,
         PublishWorkflowTaskResponse, StoreAppendRequest, StreamFailureKind, StreamRecordKind,
@@ -190,8 +190,36 @@ struct RunState {
     /// The attempts the run appended records under, with their topics, whose store sessions are
     /// not retired yet.
     sessions: BTreeMap<i64, BTreeSet<String>>,
-    /// The attempt to close the chain at, when the run's last live completion ended the chain.
-    chain_end: Option<i64>,
+    /// What closing the chain needs, when the run's last live completion ended the chain.
+    chain_end: Option<ChainEnd>,
+}
+
+/// A live completion of this Worker whose terminal command ends the run's chain.
+#[derive(Debug, Clone, Copy)]
+struct ChainEnd {
+    /// The attempt to close the chain at.
+    attempt: i64,
+    command: WorkflowTerminalCommand,
+    /// The WorkflowTaskStarted event id of the completed task. Only a close of the run by this
+    /// task proves that the server took the command.
+    task_started: i64,
+}
+
+impl ChainEnd {
+    /// Whether the run's close is the one this completion asked for. The close event must match
+    /// the terminal command, and the task before it must be this one. A later task that closed
+    /// the run, or a terminate or timeout, fails the check.
+    fn closed_by(&self, close: &RunClose) -> bool {
+        let status = match self.command {
+            WorkflowTerminalCommand::Complete => WorkflowExecutionStatus::Completed,
+            WorkflowTerminalCommand::Fail => WorkflowExecutionStatus::Failed,
+            WorkflowTerminalCommand::Cancel => WorkflowExecutionStatus::Canceled,
+            WorkflowTerminalCommand::ContinueAsNew | WorkflowTerminalCommand::Unspecified => {
+                return false;
+            }
+        };
+        close.status == status && close.closing_task_started_event_id == Some(self.task_started)
+    }
 }
 
 impl RunState {
@@ -297,7 +325,11 @@ impl WorkflowOutput {
             .try_into()
             .ok()
             .filter(|command| ends_chain(*command, request.cron, request.has_retry_policy))
-            .map(|_| attempt);
+            .map(|command| ChainEnd {
+                attempt,
+                command,
+                task_started: request.task_started_event_id,
+            });
         let max_batch_bytes = self.store.capabilities().max_batch_bytes;
         let topics = output_by_topic(
             request.records,
@@ -443,13 +475,15 @@ impl WorkflowOutput {
         });
     }
 
-    /// Drops `worker_id`'s state for `run_id`. When the eviction comes from the run's end, closes
-    /// the chain once the server shows the run closed. The close runs in the background.
+    /// Drops `worker_id`'s state for `run_id` and returns. When the eviction comes from the run's
+    /// end, a background task closes the chain once the run's History proves that this Worker's
+    /// terminal completion closed the run.
     ///
     /// The eviction reason alone is no proof that the server accepted the terminal command. The
-    /// close needs a live terminal completion of this Worker that ended the chain, and a
-    /// description of the run that shows it closed. A run that is still open, or that continued
-    /// as new, keeps its chain open, and the producers' owner checks cover the rest.
+    /// close needs a live terminal completion of this Worker that ended the chain. Then the run's
+    /// close event must match the command, and the `WorkflowTaskCompleted` before it must belong
+    /// to the completed task. A run that is still open, that continued as new, or that another
+    /// task closed keeps its chain open, and the producers' owner checks cover the rest.
     pub(crate) async fn run_evicted(&self, worker_id: &str, run_id: &str, ending: bool) {
         let Some(run) = self
             .runs
@@ -458,46 +492,48 @@ impl WorkflowOutput {
         else {
             return;
         };
-        // Waits for a publish of the run that is still running.
+        // Lang awaits each publish before it completes an activation, so this lock is free.
         let mut run = run.lock().await;
         let current = run.attempt;
         let retired = run.sessions_below(current);
         self.retire(worker_id, &run, retired);
-        if let Some(attempt) = run.chain_end.filter(|_| ending) {
-            self.close_if_run_closed(worker_id, &run, attempt);
+        if let Some(end) = run.chain_end.filter(|_| ending) {
+            self.close_if_closed_by(worker_id, &run, end);
         }
     }
 
-    /// Closes the run's chain at `attempt` in the background, once the server shows the run
-    /// closed.
-    fn close_if_run_closed(&self, worker_id: &str, run: &RunState, attempt: i64) {
+    /// Closes the run's chain in the background, when the run's History shows that the completion
+    /// `end` describes closed the run.
+    fn close_if_closed_by(&self, worker_id: &str, run: &RunState, end: ChainEnd) {
         let store = self.store.clone();
         let owner = self.owner.clone();
         let chain = run.chain.clone();
         let run_id = run.run_id.clone();
         self.spawn(worker_id, async move {
             match owner
-                .describe(&chain.namespace, &chain.workflow_id, &run_id)
+                .run_close(&chain.namespace, &chain.workflow_id, &run_id)
                 .await
             {
-                Ok(description) if run_closed(description.status) => {
+                Ok(Some(close)) if end.closed_by(&close) => {
                     let producer_id = workflow_producer_id(&run_id);
-                    if let Err(error) = close_chain(&*store, &chain, &producer_id, attempt).await {
+                    if let Err(error) =
+                        close_chain(&*store, &chain, &producer_id, end.attempt).await
+                    {
                         warn!(%error, "Could not close the streams of a run that ended its chain");
                     }
                 }
-                Ok(description) => {
+                Ok(close) => {
                     debug!(
                         %run_id,
-                        status = ?description.status,
-                        "Kept the chain open, since the server shows the run not closed"
+                        ?close,
+                        "Kept the chain open, since History shows no close by this completion"
                     );
                 }
                 Err(error) => {
                     debug!(
                         %run_id,
                         %error,
-                        "Kept the chain open, since the run could not be described"
+                        "Kept the chain open, since the run's History could not be read"
                     );
                 }
             }
@@ -523,9 +559,9 @@ impl WorkflowOutput {
             let retired = run.sessions_below(current);
             self.retire(worker_id, &run, retired);
             // A Worker that shuts down may never hand lang the eviction of a run that just ended,
-            // so the shutdown takes its place. The Describe check still guards the close.
-            if let Some(attempt) = run.chain_end {
-                self.close_if_run_closed(worker_id, &run, attempt);
+            // so the shutdown takes its place. The History check still guards the close.
+            if let Some(end) = run.chain_end {
+                self.close_if_closed_by(worker_id, &run, end);
             }
         }
         let tasks = self.tasks.lock().remove(worker_id);
@@ -534,18 +570,6 @@ impl WorkflowOutput {
             tasks.wait().await;
         }
     }
-}
-
-/// Whether a run with `status` is closed in a way that ends its chain.
-fn run_closed(status: WorkflowExecutionStatus) -> bool {
-    matches!(
-        status,
-        WorkflowExecutionStatus::Completed
-            | WorkflowExecutionStatus::Failed
-            | WorkflowExecutionStatus::Canceled
-            | WorkflowExecutionStatus::Terminated
-            | WorkflowExecutionStatus::TimedOut
-    )
 }
 
 #[cfg(test)]

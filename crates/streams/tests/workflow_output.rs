@@ -255,20 +255,25 @@ async fn a_closed_topic_drops_its_records_and_the_other_topics_go_on() {
     assert_eq!(store.read("other").await, ["encrypted c"]);
 }
 
-/// Publishes a run's last live completion with `command`, evicts it, and answers whether the
-/// chain closed.
+/// The started event id of the task whose live completion [chain_closed] publishes last.
+const LAST_TASK: i64 = 8;
+
+/// Publishes a run's last live completion with `command` in the task that started at
+/// [LAST_TASK], evicts it, and answers whether the chain closed. The run's History shows
+/// `status` and a close by the task that started at `closing_task`.
 async fn chain_closed(
     command: WorkflowTerminalCommand,
     status: WorkflowExecutionStatus,
+    closing_task: Option<i64>,
     eviction_ends_run: bool,
     cron: bool,
     has_retry_policy: bool,
 ) -> bool {
     let store = Arc::new(RecordingStore::default());
-    let owner = Owner::with(status);
+    let owner = Owner::closed_by(status, closing_task);
     let service = service_on(&store, &owner);
     send(&service, publish(3, 0, &[], &["a"])).await.unwrap();
-    let mut last = ending(publish(8, 0, &[3], &[]), command);
+    let mut last = ending(publish(LAST_TASK, 0, &[3], &[]), command);
     last.cron = cron;
     last.has_retry_policy = has_retry_policy;
     send(&service, last).await.unwrap();
@@ -278,29 +283,53 @@ async fn chain_closed(
 }
 
 #[tokio::test]
-async fn the_chain_closes_only_after_a_live_terminal_completion_and_a_closed_run() {
+async fn the_chain_closes_only_when_history_shows_this_completion_closed_the_run() {
     use WorkflowExecutionStatus as S;
     use WorkflowTerminalCommand as C;
-    assert!(chain_closed(C::Complete, S::Completed, true, false, false).await);
-    assert!(chain_closed(C::Fail, S::Failed, true, false, false).await);
-    assert!(chain_closed(C::Cancel, S::Canceled, true, false, false).await);
-    assert!(chain_closed(C::Complete, S::Terminated, true, false, false).await);
+    let ours = Some(LAST_TASK);
+    assert!(chain_closed(C::Complete, S::Completed, ours, true, false, false).await);
+    assert!(chain_closed(C::Fail, S::Failed, ours, true, false, false).await);
+    assert!(chain_closed(C::Cancel, S::Canceled, ours, true, false, false).await);
     assert!(
-        !chain_closed(C::Complete, S::Running, true, false, false).await,
+        !chain_closed(C::Complete, S::Completed, Some(12), true, false, false).await,
+        "a later task closed the run"
+    );
+    assert!(
+        !chain_closed(C::Complete, S::Completed, None, true, false, false).await,
+        "History shows no task before the close"
+    );
+    assert!(
+        !chain_closed(C::Complete, S::Terminated, ours, true, false, false).await,
+        "the close does not match the command"
+    );
+    assert!(!chain_closed(C::Complete, S::Failed, ours, true, false, false).await);
+    assert!(!chain_closed(C::Fail, S::TimedOut, ours, true, false, false).await);
+    assert!(
+        !chain_closed(C::Complete, S::Running, ours, true, false, false).await,
         "a rejected completion leaves the run open"
     );
-    assert!(!chain_closed(C::Complete, S::ContinuedAsNew, true, false, false).await);
-    assert!(!chain_closed(C::Complete, S::Completed, false, false, false).await);
-    assert!(!chain_closed(C::Complete, S::Completed, true, true, false).await);
-    assert!(!chain_closed(C::Fail, S::Failed, true, false, true).await);
-    assert!(!chain_closed(C::ContinueAsNew, S::ContinuedAsNew, true, false, false).await);
-    assert!(!chain_closed(C::Unspecified, S::Completed, true, false, false).await);
+    assert!(!chain_closed(C::Complete, S::ContinuedAsNew, ours, true, false, false).await);
+    assert!(!chain_closed(C::Complete, S::Completed, ours, false, false, false).await);
+    assert!(!chain_closed(C::Complete, S::Completed, ours, true, true, false).await);
+    assert!(!chain_closed(C::Fail, S::Failed, ours, true, false, true).await);
+    assert!(
+        !chain_closed(
+            C::ContinueAsNew,
+            S::ContinuedAsNew,
+            ours,
+            true,
+            false,
+            false
+        )
+        .await
+    );
+    assert!(!chain_closed(C::Unspecified, S::Completed, ours, true, false, false).await);
 }
 
 #[tokio::test]
 async fn the_close_uses_the_attempt_and_run_of_the_terminal_completion() {
     let store = Arc::new(RecordingStore::default());
-    let owner = Owner::with(WorkflowExecutionStatus::Completed);
+    let owner = Owner::closed_by(WorkflowExecutionStatus::Completed, Some(3));
     let service = service_on(&store, &owner);
     send(
         &service,
@@ -368,7 +397,7 @@ async fn a_shutdown_without_the_eviction_closes_a_chain_the_run_ended() {
         (WorkflowExecutionStatus::Running, false),
     ] {
         let store = Arc::new(RecordingStore::default());
-        let service = service_on(&store, &Owner::with(status));
+        let service = service_on(&store, &Owner::closed_by(status, Some(3)));
         let last = ending(
             publish(3, 0, &[], &["a"]),
             WorkflowTerminalCommand::Complete,
@@ -377,4 +406,33 @@ async fn a_shutdown_without_the_eviction_closes_a_chain_the_run_ended() {
         shutdown(&service, "worker-1").await;
         assert_eq!(store.calls().contains(&"close_chain"), closes, "{status:?}");
     }
+}
+
+#[tokio::test]
+async fn an_eviction_returns_before_the_history_read_and_shutdown_waits_for_it() {
+    let store = Arc::new(RecordingStore::default());
+    let owner = Owner::closed_by(WorkflowExecutionStatus::Completed, Some(3));
+    let gate = Arc::new(tokio::sync::Semaphore::new(0));
+    *owner.read_gate.lock() = Some(gate.clone());
+    let service = service_on(&store, &owner);
+    let last = ending(
+        publish(3, 0, &[], &["a"]),
+        WorkflowTerminalCommand::Complete,
+    );
+    send(&service, last).await.unwrap();
+    tokio::time::timeout(Duration::from_secs(5), evict(&service, "worker-1", true))
+        .await
+        .expect("the eviction returns while the History read waits");
+    let shutdown = shutdown(&service, "worker-1");
+    tokio::pin!(shutdown);
+    assert!(
+        tokio::time::timeout(Duration::from_millis(200), &mut shutdown)
+            .await
+            .is_err(),
+        "shutdown waits for the History read and the close"
+    );
+    assert!(!store.calls().contains(&"close_chain"));
+    gate.add_permits(1);
+    shutdown.await;
+    assert_eq!(store.calls(), ["append", "close_chain"]);
 }

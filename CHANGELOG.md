@@ -11,5 +11,7 @@
 - Added the Workflow publish calls `PublishWorkflowTask`, `RunEvicted` and `ShutdownWorker`. Lang
   appends a live activation's records before it completes the activation, under the attempt its
   `WorkflowTaskHistoryInfo` gives. The chain closes after a live terminal completion once the
-  server shows the run closed.
+  run's History shows that completion closed the run.
 - Added the `fips` feature, which builds TLS on `aws-lc-rs` in FIPS mode with no `ring`.
+- Read the run's History tail for the chain close, not its description. The close event must match
+  the terminal command, and the task before it must be the completed one.

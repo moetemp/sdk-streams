@@ -10,7 +10,7 @@ use temporalio_common::protos::temporal::api::{
 };
 use temporalio_streams::{
     BEGINNING, Capabilities, MemoryStore, OwnerClient, OwnerDescription, OwnerError, ReadTarget,
-    StreamError, StreamResult, StreamStore,
+    RunClose, StreamError, StreamResult, StreamStore,
     proto::{
         ChainId, DeleteOwnerRequest, DeleteOwnerResponse, OutputRecord, ReadRequest,
         StoreAppendRequest, StoreAppendResponse, StoreLatestRequest, StoreLatestResponse,
@@ -221,17 +221,30 @@ impl StreamStore for RecordingStore {
     }
 }
 
-/// An owner every run of which stands as the test sets it, and that logs what it was asked.
+/// An owner every run of which stands as the test sets it. Its History read logs what it was
+/// asked and answers with the close the test set.
 pub struct Owner {
     pub status: Mutex<WorkflowExecutionStatus>,
+    /// The started event id of the `WorkflowTaskCompleted` before the close event.
+    pub closing_task: Mutex<Option<i64>>,
     pub asked: Mutex<Vec<(String, String, String)>>,
+    /// A History read waits for a permit here, when set.
+    pub read_gate: Mutex<Option<Arc<tokio::sync::Semaphore>>>,
 }
 
 impl Owner {
+    /// A run that stands at `status`, with no Workflow Task before its close event.
     pub fn with(status: WorkflowExecutionStatus) -> Arc<Self> {
+        Self::closed_by(status, None)
+    }
+
+    /// A run that stands at `status`, closed by the task that started at `closing_task`.
+    pub fn closed_by(status: WorkflowExecutionStatus, closing_task: Option<i64>) -> Arc<Self> {
         Arc::new(Self {
             status: Mutex::new(status),
+            closing_task: Mutex::new(closing_task),
             asked: Default::default(),
+            read_gate: Default::default(),
         })
     }
 }
@@ -240,19 +253,38 @@ impl Owner {
 impl OwnerClient for Owner {
     async fn describe(
         &self,
-        namespace: &str,
-        workflow_id: &str,
+        _namespace: &str,
+        _workflow_id: &str,
         run_id: &str,
     ) -> Result<OwnerDescription, OwnerError> {
-        self.asked.lock().push((
-            namespace.to_string(),
-            workflow_id.to_string(),
-            run_id.to_string(),
-        ));
         Ok(OwnerDescription {
             run_id: run_id.to_string(),
             first_run_id: run_id.to_string(),
             status: *self.status.lock(),
         })
+    }
+
+    async fn run_close(
+        &self,
+        namespace: &str,
+        workflow_id: &str,
+        run_id: &str,
+    ) -> Result<Option<RunClose>, OwnerError> {
+        self.asked.lock().push((
+            namespace.to_string(),
+            workflow_id.to_string(),
+            run_id.to_string(),
+        ));
+        let gate = self.read_gate.lock().clone();
+        if let Some(gate) = gate {
+            let _permit = gate.acquire().await.unwrap();
+        }
+        let status = *self.status.lock();
+        Ok(
+            (status != WorkflowExecutionStatus::Running).then(|| RunClose {
+                status,
+                closing_task_started_event_id: *self.closing_task.lock(),
+            }),
+        )
     }
 }
