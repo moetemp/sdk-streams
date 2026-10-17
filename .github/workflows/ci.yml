@@ -30,7 +30,7 @@ jobs:
         run: scripts/sync-api-protos.sh && git diff --exit-code
 
   memory:
-    name: memory store tests
+    name: memory store and Core mock tests
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4

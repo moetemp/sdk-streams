@@ -12,3 +12,4 @@
   appends a live activation's records before it completes the activation, under the attempt its
   `WorkflowTaskHistoryInfo` gives. The chain closes after a live terminal completion once the
   server shows the run closed.
+- Added the Core mock tests of the Workflow publish, including the chain-close contract cases.

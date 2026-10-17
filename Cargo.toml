@@ -24,6 +24,11 @@ git = "https://github.com/moetemp/sdk-rust"
 rev = "4ebdacab5d78dfaf13cfdb1f340ba96b6ad7f6c0"
 default-features = false
 
+[workspace.dependencies.temporalio-sdk-core]
+git = "https://github.com/moetemp/sdk-rust"
+rev = "4ebdacab5d78dfaf13cfdb1f340ba96b6ad7f6c0"
+default-features = false
+
 [workspace.dependencies.temporalio-client]
 git = "https://github.com/moetemp/sdk-rust"
 rev = "4ebdacab5d78dfaf13cfdb1f340ba96b6ad7f6c0"

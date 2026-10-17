@@ -50,6 +50,13 @@ tracing = "0.1"
 tonic-prost-build = { workspace = true }
 
 [dev-dependencies]
+# Core's mock Worker, so the tests drive the publish calls as lang does around real activations.
+temporalio-sdk-core = { workspace = true, features = ["test-utilities"] }
+assert_matches = "1.5"
+futures-util = { version = "0.3", default-features = false }
+parking_lot = "0.12"
+rstest = "0.26"
+tonic = { workspace = true }
 serde_json = { workspace = true }
 tracing-subscriber = { version = "0.3", default-features = false, features = ["fmt"] }
 tokio = { version = "1.47", features = [

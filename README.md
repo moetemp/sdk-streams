@@ -47,7 +47,9 @@ when the copy differs.
 
 - Format and lint: `cargo fmt --all -- --check`, then
   `cargo clippy --workspace --all-features --tests -- -D warnings`.
-- Memory store: `cargo test --workspace --all-features`.
+- Memory store and Core mock tests: `cargo test --workspace --all-features`. The Core mock tests
+  in `tests/core_workflow.rs` drive Core's mock Worker from the pinned sdk-rust, with the test in
+  lang's place.
 - FIPS: `cargo tree -e normal --no-default-features --features tls-aws-lc,redis -i ring` prints
   nothing.
 - Redis: run `crates/streams/scripts/redis-test-servers.sh`, then the test command with the two
