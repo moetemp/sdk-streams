@@ -24,3 +24,5 @@
   polls through the client `Connection`, and describes standalone Activity and Workflow Activity
   owners.
 - The Workflow publish takes LINK records and checks each link as a follower reads it.
+- The crate generates the stream API from its own copy in `protos/api_stream`, taken from
+  `moetemp/api` `c1a8d975`, since sdk-rust no longer vendors it. It builds on sdk-rust kj5.

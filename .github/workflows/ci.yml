@@ -28,6 +28,8 @@ jobs:
           --features tls-aws-lc,redis,postgres,archive --tests -- -D warnings
       - name: The API proto copy matches the pinned sdk-rust
         run: scripts/sync-api-protos.sh && git diff --exit-code
+      - name: The stream API copy matches its moetemp/api commit
+        run: scripts/sync-stream-api.sh && git diff --exit-code
 
   memory:
     name: memory store and Core mock tests
