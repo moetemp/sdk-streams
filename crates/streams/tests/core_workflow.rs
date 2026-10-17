@@ -30,7 +30,7 @@ use temporalio_common::{
         temporal::api::{
             common::v1::{Payload, RetryPolicy},
             enums::v1::{EventType, TimeoutType, WorkflowExecutionStatus, WorkflowTaskFailedCause},
-            failure::v1::Failure,
+            failure::v1::{Failure, failure::FailureInfo},
             history::v1::{
                 WorkflowExecutionStartedEventAttributes, WorkflowTaskTimedOutEventAttributes,
                 history_event,
@@ -1745,7 +1745,7 @@ async fn a_marked_activity_that_fails_closes_with_the_failure_the_workflow_saw()
     assert!(
         matches!(
             failure.failure_info,
-            Some(temporalio_common::protos::temporal::api::failure::v1::failure::FailureInfo::ActivityFailureInfo(_))
+            Some(FailureInfo::ActivityFailureInfo(_))
         ),
         "{failure:?}"
     );
@@ -1875,8 +1875,11 @@ async fn a_try_cancel_closes_the_streams_with_the_canceled_failure() {
     let failure = closes[0].1.failure.clone().unwrap();
     assert!(
         matches!(
-            failure.cause.as_deref().and_then(|cause| cause.failure_info.as_ref()),
-            Some(temporalio_common::protos::temporal::api::failure::v1::failure::FailureInfo::CanceledFailureInfo(_))
+            failure
+                .cause
+                .as_deref()
+                .and_then(|cause| cause.failure_info.as_ref()),
+            Some(FailureInfo::CanceledFailureInfo(_))
         ),
         "{failure:?}"
     );
