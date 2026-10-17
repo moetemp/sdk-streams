@@ -66,7 +66,8 @@ mod method {
 /// at its own wait limit before that.
 const POLL_TIMEOUT: Duration = Duration::from_secs(70);
 
-/// Calls the RPC at `method` through `connection`, with its TLS, API key, headers and retries. The namespace header routes the call, as the client's own RPCs do.
+/// Calls the RPC at `method` through `connection`, with its TLS, API key, headers and retries. The
+/// namespace header routes the call, as the client's own RPCs do.
 async fn notifier_call<Resp: Message + Default>(
     connection: &Connection,
     method: &'static str,
