@@ -8,8 +8,9 @@ link this crate through their bridges. Temporal Core holds no stream code.
 
 ## Stage pins
 
-The crate depends on `temporalio-common` from one sdk-rust commit per stage. That commit must equal
-the `sdk-core` submodule commit of the sdk-python stage that links the crate.
+The crate depends on `temporalio-common` and `temporalio-client` from one sdk-rust commit per
+stage. That commit must equal the `sdk-core` submodule commit of the sdk-python stage that links
+the crate.
 
 | Stage | sdk-streams branch | sdk-rust commit |
 |---|---|---|
@@ -31,6 +32,7 @@ features = ["redis"]
 
 [patch."https://github.com/moetemp/sdk-rust"]
 temporalio-common = { path = "./sdk-core/crates/common" }
+temporalio-client = { path = "./sdk-core/crates/client" }
 ```
 
 The crate features `tls-ring`, `tls-aws-lc` and `envconfig` forward to the sdk-rust crates. A FIPS

@@ -10,6 +10,7 @@ use crate::{
 };
 use prost::Message;
 use std::{sync::Arc, time::Duration};
+use temporalio_common::telemetry::metrics::TemporalMeter;
 
 /// How long a store keeps records when its configuration doesn't say.
 const DEFAULT_RETENTION: Duration = Duration::from_secs(7 * 24 * 60 * 60);
@@ -26,6 +27,7 @@ const MAX_READ_WAIT: Duration = Duration::from_secs(60);
 pub struct StreamService {
     store: Arc<dyn StreamStore>,
     streams: Streams,
+    meter: TemporalMeter,
 }
 
 impl std::fmt::Debug for StreamService {
@@ -73,7 +75,22 @@ impl StreamService {
         options: StreamsOptions,
     ) -> Self {
         let streams = Streams::new(store.clone(), owner, options);
-        Self { store, streams }
+        Self {
+            store,
+            streams,
+            meter: TemporalMeter::no_op(),
+        }
+    }
+
+    /// Counts on `meter`, which is the no-op meter until lang gives one.
+    pub fn with_meter(mut self, meter: TemporalMeter) -> Self {
+        self.meter = meter;
+        self
+    }
+
+    /// The meter the service counts on.
+    pub fn meter(&self) -> &TemporalMeter {
+        &self.meter
     }
 
     /// The store, for the Workers that append Workflow output to it.

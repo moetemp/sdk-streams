@@ -15,9 +15,9 @@ categories = ["development-tools"]
 default = ["envconfig", "tls-ring"]
 # The TLS providers and the config loader of the sdk-rust crates. A FIPS build takes
 # `tls-aws-lc` with no default features, so no crate in the build pulls `ring`.
-tls-ring = ["temporalio-common/tls-ring"]
-tls-aws-lc = ["temporalio-common/tls-aws-lc"]
-envconfig = ["temporalio-common/envconfig"]
+tls-ring = ["temporalio-client/tls-ring", "temporalio-common/tls-ring"]
+tls-aws-lc = ["temporalio-client/tls-aws-lc", "temporalio-common/tls-aws-lc"]
+envconfig = ["temporalio-client/envconfig", "temporalio-common/envconfig"]
 serde_serialize = ["dep:serde", "temporalio-common/serde_serialize"]
 # The Redis store. Off by default, so a build that needs only the trait takes no Redis client.
 # TLS uses the rustls provider the process installs, the same one Core uses.
@@ -37,8 +37,10 @@ redis = { version = "1.7", optional = true, default-features = false, features =
 ] }
 serde = { workspace = true, optional = true }
 sha2 = "0.10"
+temporalio-client = { workspace = true }
 temporalio-common = { workspace = true }
 thiserror = { workspace = true }
+tonic = { workspace = true }
 tokio = { version = "1.47", default-features = false, features = ["sync", "time"] }
 tracing = "0.1"
 

@@ -9,6 +9,7 @@
 //! [StreamService].
 
 mod close;
+mod connection;
 mod conventions;
 mod cursor;
 mod error;
@@ -26,6 +27,7 @@ mod store;
 #[cfg(feature = "redis")]
 pub use self::redis::{RedisStore, RedisStoreOptions};
 pub use close::{CHAIN_LOG, append_batch, close_chain, close_topic};
+pub use connection::connect_stream_service;
 pub use conventions::{
     CONTENT_HASH_KEY, MAX_TOPIC_BYTES, METADATA_ENCODING, check_topic, content_hash_text,
 };

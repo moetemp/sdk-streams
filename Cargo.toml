@@ -13,12 +13,18 @@ prost-types = { version = "0.7", package = "prost-wkt-types" }
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
 thiserror = "2"
+tonic = { version = "0.14.6", default-features = false }
 tonic-prost-build = "0.14.6"
 
 # One sdk-rust commit for every sdk-rust crate. It must equal the `sdk-core` submodule commit of
 # the sdk-python stage that links this crate. Keep the URL in this exact form, with no `.git`,
 # since a lang's `[patch]` key must match it byte for byte.
 [workspace.dependencies.temporalio-common]
+git = "https://github.com/moetemp/sdk-rust"
+rev = "4ebdacab5d78dfaf13cfdb1f340ba96b6ad7f6c0"
+default-features = false
+
+[workspace.dependencies.temporalio-client]
 git = "https://github.com/moetemp/sdk-rust"
 rev = "4ebdacab5d78dfaf13cfdb1f340ba96b6ad7f6c0"
 default-features = false
