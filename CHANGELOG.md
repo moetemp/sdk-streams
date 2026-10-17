@@ -12,3 +12,4 @@
   appends a live activation's records before it completes the activation, under the attempt its
   `WorkflowTaskHistoryInfo` gives. The chain closes after a live terminal completion once the
   server shows the run closed.
+- Added the `fips` feature, which builds TLS on `aws-lc-rs` in FIPS mode with no `ring`.
