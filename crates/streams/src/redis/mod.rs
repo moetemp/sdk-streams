@@ -90,8 +90,8 @@ pub struct RedisStoreOptions {
     /// archive holds while the archive keeps up. When the archive stops for longer, the hold
     /// ends and retention goes on. Needs `notification_log`, since a driver archives.
     pub archive_lease: Option<Duration>,
-    /// Runs with no Lua: no dedupe entries, no close flags and no topic meta. Core then takes
-    /// the fallbacks of producer state and the kept last position, as on a store that has
+    /// Runs with no Lua: no dedupe entries, no close flags and no topic meta. The service then
+    /// takes the fallbacks of producer state and the kept last position, as on a store that has
     /// only a log. For tests of those fallbacks on a real store.
     pub plain: bool,
 }
@@ -314,7 +314,7 @@ impl RedisStore {
     }
 
     /// Reads with `XREAD` alone. With no topic meta, the read can't tell lost records apart, and
-    /// Core decides expiry from the record at the cursor.
+    /// the service decides expiry from the record at the cursor.
     async fn read_plain(&self, request: &StoreReadRequest) -> StreamResult<StoreReadResponse> {
         let keys = self.keys(request.chain.as_ref())?;
         let topic = request.topic.as_str();

@@ -1,4 +1,4 @@
-//! The Lua scripts, on the stored format the SDKs used before the store moved into Core.
+//! The Lua scripts, on the stored format the SDKs used before the store moved into this crate.
 //!
 //! The append script is the one the SDKs sent, with one more check, the topic's close flag, so a
 //! batch can't land after the topic's close returned (DD-16), and its trim keeps what
@@ -25,7 +25,7 @@ const TOPICS_KEY: &str = "local topics = KEYS[5]\n";
 
 /// What a store with a notification log writes after the batch, in place of the append's last
 /// answer: an entry in the chain's notification stream (`KEYS[5]`), and the stream's length, so
-/// Core rings the doorbell when the entry is the stream's only one. A repeat writes no entry.
+/// The store rings the doorbell when the entry is the stream's only one. A repeat writes no entry.
 const LOGGED_ANSWER: &str = "redis.call('XADD', KEYS[5], 'MAXLEN', '~', 10000, '*', \
 'k', KEYS[1], 'p', last)
 return {first, last, redis.call('XLEN', KEYS[5])}

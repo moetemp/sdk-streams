@@ -1,11 +1,11 @@
 //! Readers that sleep on a stream's notifier.
 //!
-//! A Workflow's reader attaches to the stream's notifier as an idle callback at its first read
-//! that finds nothing. Each read that finds nothing asks the notifier for one wake after the
-//! read's counter, which reaches the Workflow on its next Workflow Task. A read that finds records
-//! asks for nothing, so a reader that keeps up costs the notifier nothing. The attach names the
-//! reader by its run and its subscription id, which replay gives back, so a rerun attaches as the
-//! same reader and the server keeps one callback. A client reader has no task to wake, so it waits on
+//! A Workflow's reader attaches to the stream's notifier as an idle callback at its first read that
+//! finds nothing. Each read that finds nothing asks the notifier for one wake after the read's
+//! counter, which reaches the Workflow on its next Workflow Task. A read that finds records asks
+//! for nothing, so a reader that keeps up costs the notifier nothing. The attach names the reader
+//! by its run and its subscription id, which replay gives back, so a rerun attaches as the same
+//! reader and the server keeps one callback. A client reader has no task to wake, so it waits on
 //! the notifier with a long poll.
 
 use crate::{
@@ -26,8 +26,8 @@ use std::{
     time::Duration,
 };
 
-/// How long after it sends a poll Core reads the stream once more. The poll starts the stream's
-/// notifier, and a record that lands later notifies it.
+/// How long after it sends a poll the service reads the stream once more. The poll starts the
+/// stream's notifier, and a record that lands later notifies it.
 const REREAD_AFTER: Duration = Duration::from_millis(200);
 
 /// The longest subscription id the server takes.

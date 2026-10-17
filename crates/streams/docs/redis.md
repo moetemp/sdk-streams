@@ -3,7 +3,7 @@
 The store on the application's Redis.
 
 Records live in Redis and never pass through Temporal. The key layout, the stored values and
-the Lua scripts are the ones the SDKs used before the store moved into Core, apart from the
+the Lua scripts are the ones the SDKs used before the store moved into this crate, apart from the
 append's topic check, so a stream one wrote stays readable and writable by the other.
 
 **Appends.** One script writes a whole batch, so a reader never sees part of one. The topic's
@@ -39,9 +39,9 @@ A stream close releases no hold, since the readers of a closed stream still repl
 reader's `ReleaseFloor` and its grace, or a lapsed lease, end one.
 
 **Mixed providers and floors.** An SDK's own Redis provider trims with its own append script and
-doesn't read the floors hash, so its appends can trim records that a positions-only reader holds.
-A topic that a positions-only reader reads must take its appends only through Core's store. Other
-providers on such a topic are unsupported.
+doesn't read the floors hash, so its appends can trim records that a positions-only reader holds. A
+topic that a positions-only reader reads must take its appends only through this crate's store.
+Other providers on such a topic are unsupported.
 
 **Notification log.** With `notification_log` on, the append script also adds an entry to the
 notification stream of the chain's Cluster slot, `<prefix>:{<tag>}:n`, where the tag is the one
@@ -51,15 +51,15 @@ keys. An entry holds `k`, the log key, and `p`, the append's last entry id. The 
 the newest 10,000 entries, also ones a driver took and has not acked. So a driver that falls more
 than 10,000 appends behind on a slot loses the oldest entries, and a quiet stream that shares the
 slot with a busy one can lose its only entry. Its readers then wake on their recheck. A repeat of
-the newest batch adds none. The script answers the stream's length too, and when it is 1, Core adds
-the slot to doorbell `d = s % doorbells`, at `<prefix>:{<tag of slot d * 16384 / doorbells>}:bell`,
-apart from the script, so a lost ring is possible. The doorbells spread over the slot range, so a
-cluster's primaries share them, and an application and its drivers must agree on the number of
-doorbells. Drivers read the slot streams and the doorbells as the consumer group `streams-driver`
-(`XREADGROUP`, `XAUTOCLAIM`, `XACK`, `XDEL`, `XGROUP CREATE`), and sweep with `XLEN` over each
-primary's slots from `CLUSTER SLOTS`. The slot streams have no expiry, and a driver empties them.
-The logged append script has its own hash. The plain one is unchanged, and an SDK's provider writes
-no entries.
+the newest batch adds none. The script answers the stream's length too, and when it is 1, the store
+adds the slot to doorbell `d = s % doorbells`, at `<prefix>:{<tag of slot d * 16384 /
+doorbells>}:bell`, apart from the script, so a lost ring is possible. The doorbells spread over the
+slot range, so a cluster's primaries share them, and an application and its drivers must agree on
+the number of doorbells. Drivers read the slot streams and the doorbells as the consumer group
+`streams-driver` (`XREADGROUP`, `XAUTOCLAIM`, `XACK`, `XDEL`, `XGROUP CREATE`), and sweep with
+`XLEN` over each primary's slots from `CLUSTER SLOTS`. The slot streams have no expiry, and a driver
+empties them. The logged append script has its own hash. The plain one is unchanged, and an SDK's
+provider writes no entries.
 
 **Archive hold.** With `archive_lease` set, a driver copies each topic into an archive, and the
 store holds what the archive doesn't hold yet. The floors hash keeps the holder `archive`. The
@@ -105,7 +105,7 @@ Activity lands in a slot of its own and Activity `1` of the next run is another 
 chain has one more key, `<prefix>:{<tag>}:topics`, a set of the log keys its producers wrote. The
 append script adds the log key with `SADD` on every batch, since a first batch can be lost, and
 slides the set's expiry to the retention plus the grace on each append. The scheduling Workflow's
-Core reads it with `SMEMBERS` to close every topic when the Activity ends.
+stream service reads it with `SMEMBERS` to close every topic when the Activity ends.
 
 **Deletes.** Deleting an owner's streams scans every primary for the owner id's keys, across all
 the Workflow's chains or all the Activity's runs. A Workflow's delete also scans for the keys of
@@ -123,7 +123,10 @@ percent-encoded. A Redis ACL user for one namespace's applications, with the rul
 conformance suite runs as:
 
 ```text
-ACL SETUSER streams-app on >secret resetkeys ~temporal-streams:{my-ns:* resetchannels -@all +evalsha +eval +script|load +multi +exec +xadd +xread +xrevrange +xrange +xtrim +xlen +hget +hset +hgetall +hlen +hincrby +hdel +hscan +sadd +smembers +rpush +lrange +exists +del +unlink +pexpire +pttl +time +info +config|get +ping +hello +client|setinfo +cluster|slots
+ACL SETUSER streams-app on >secret resetkeys ~temporal-streams:{my-ns:* resetchannels -@all +evalsha
++eval +script|load +multi +exec +xadd +xread +xrevrange +xrange +xtrim +xlen +hget +hset +hgetall
++hlen +hincrby +hdel +hscan +sadd +smembers +rpush +lrange +exists +del +unlink +pexpire +pttl +time
++info +config|get +ping +hello +client|setinfo +cluster|slots
 ```
 
 A cluster client reads the topology with `CLUSTER SLOTS` first. An ACL user lives on one node,
@@ -136,7 +139,7 @@ write, and `+xreadgroup +xautoclaim +xack +xdel +xgroup|create +xlen +xadd +clus
 
 **Plain mode.** `RedisStoreOptions::plain` runs the store with no Lua. An append is a
 `MULTI` of `XADD`s that trim by age, a read is `XREAD` alone, and no meta and no close flag is
-kept. So the store declares neither producer state nor a kept last position, and Core takes
+kept. So the store declares neither producer state nor a kept last position, and the service takes
 their fallbacks: readers drop copies and end at the first `CLOSE` record, and a read decides
 expiry from the record at its cursor. It exists so tests run those fallbacks on a real store.
 Listing a chain's topics scans every primary, as a delete does, and needs `+scan`. With no script

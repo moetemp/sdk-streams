@@ -34,7 +34,7 @@ message StreamRecord {
     // when it does not number its records.
     int64 sequence = 7;
     // Set on LINK only. It stays out of the payload codec, as ids in History
-    // do, so Core can follow it.
+    // do, so the stream service can follow it.
     StreamLink link = 8;
     // Set by a Workflow run's own producer only: the WorkflowTaskStarted
     // event id of the task attempt that wrote the record.

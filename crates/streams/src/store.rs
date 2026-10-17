@@ -367,10 +367,10 @@ pub trait StreamStore: Send + Sync {
         unsupported("list the topics of a chain")
     }
 
-    /// The topics that producers wrote on a Workflow Activity's chain, so the scheduling
-    /// Workflow's Core can close each one when the Activity ends. A topic enters the set with
-    /// every batch, and a topic that no producer wrote is not in it. Other
-    /// chains keep no set and answer empty. A store that keeps no set lists the chain's topics.
+    /// The topics that producers wrote on a Workflow Activity's chain, so the scheduling Workflow's
+    /// stream service can close each one when the Activity ends. A topic enters the set with every
+    /// batch, and a topic that no producer wrote is not in it. Other chains keep no set and answer
+    /// empty. A store that keeps no set lists the chain's topics.
     async fn written_topics(&self, chain: &ChainId) -> StreamResult<Vec<String>> {
         self.list_topics(chain).await
     }

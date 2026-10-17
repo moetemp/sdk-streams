@@ -1,5 +1,5 @@
 //! The Redis key layout, shared with every SDK that wrote streams before the store moved into
-//! Core.
+//! this crate.
 //!
 //! Every key of one run chain shares a Redis Cluster hash tag, the chain itself, so one script
 //! can touch all of them:
@@ -18,7 +18,7 @@
 //! A Workflow Activity is a chain of one too. Its tag is
 //! `{<namespace>:!wa:<workflow id>:<scheduling run id>:<activity id>}`, so each tool call lands in
 //! a slot of its own. It has one more key, the set of log keys its producers wrote, which the
-//! scheduling Workflow's Core reads to close every topic when the Activity ends:
+//! scheduling Workflow's stream service reads to close every topic when the Activity ends:
 //!
 //! ```text
 //! <prefix>:{<namespace>:!wa:<workflow id>:<run id>:<activity id>}:topics
@@ -290,7 +290,7 @@ mod tests {
 
     #[test]
     fn keys_match_the_python_sdk() {
-        // Streams written by an SDK before the store moved into Core must stay readable.
+        // Streams written by an SDK before the store moved into this crate must stay readable.
         let cases: Vec<Value> =
             serde_json::from_str(include_str!("../../testdata/redis/keys.json")).unwrap();
         assert!(cases.len() >= 4);
