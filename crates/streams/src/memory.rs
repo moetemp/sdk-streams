@@ -5,7 +5,7 @@
 //! and to show in one file what a store owes. Positions are offsets that are never reused, so a
 //! position keeps naming the same record after [MemoryStore::truncate] drops older ones.
 //!
-//! [MemoryStore::with_capabilities] masks capabilities off, so Core's fallbacks run in tests.
+//! [MemoryStore::with_capabilities] masks capabilities off, so the fallbacks run in tests.
 
 use crate::{
     Capabilities, ConditionForms, MAX_BATCH_BYTES, MAX_RECORD_BYTES, StreamError, StreamResult,

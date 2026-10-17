@@ -1,8 +1,8 @@
 //! What the stream layer asks Temporal about a stream's owner.
 //!
 //! A store can't see a Workflow close, so the layer above it asks: to find the chain a stream is
-//! keyed by, to refuse a producer once the chain ended, and to end a read. Core implements this
-//! over its client, and tests use a fake.
+//! keyed by, to refuse a producer once the chain ended, and to end a read. The crate implements
+//! this over its client, and tests use a fake.
 
 use temporalio_common::protos::temporal::api::enums::v1::WorkflowExecutionStatus;
 

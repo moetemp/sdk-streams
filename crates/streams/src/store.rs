@@ -13,8 +13,8 @@ pub const MAX_RECORD_BYTES: usize = 1536 * 1024;
 /// The most record bytes one append takes by default.
 pub const MAX_BATCH_BYTES: usize = 4 << 20;
 
-/// What a store can do beyond the log every store gives. Core reads it once and takes the full
-/// path or a fallback for each capability, so a store that gives only the log still serves
+/// What a store can do beyond the log every store gives. The service reads it once and takes the
+/// full path or a fallback for each capability, so a store that gives only the log still serves
 /// streams, with the weaker guarantees each fallback names.
 ///
 /// The log every store gives: a batch lands whole and in order, a read after a position returns
@@ -31,7 +31,7 @@ pub struct Capabilities {
     pub conditional: ConditionForms,
     /// C3. The store knows a topic's newest position also after retention dropped every record,
     /// and [StreamStore::newest_ever] and [StreamStore::dropped_after] answer it. Without it,
-    /// Core decides expiry from the record at the read's position.
+    /// the service decides expiry from the record at the read's position.
     pub kept_last: bool,
     /// C4. A holder can keep records from retention.
     pub holds: bool,
@@ -44,7 +44,7 @@ pub struct Capabilities {
     /// C8. [StreamStore::list_topics] works. Without it, producers write a `TOPIC` record to
     /// the chain's control log.
     pub topic_listing: bool,
-    /// C9. A read can wait for the next record. Without it, Core polls.
+    /// C9. A read can wait for the next record. Without it, the service polls.
     pub long_poll: bool,
     /// The next record's position is always the last one plus one.
     pub dense_positions: bool,
@@ -67,7 +67,7 @@ pub struct ConditionForms {
 }
 
 impl Capabilities {
-    /// A store that gives only the log, so Core takes every fallback.
+    /// A store that gives only the log, so the service takes every fallback.
     pub const fn log_only() -> Self {
         Self {
             producer_state: false,
@@ -179,7 +179,7 @@ fn unsupported<T>(what: &str) -> StreamResult<T> {
 /// store behaves the same where the contract says so, and a new store only implements this.
 ///
 /// Every store implements the log calls. A call of a capability the store doesn't declare in
-/// [StreamStore::capabilities] keeps its default, which fails as unsupported, and Core never
+/// [StreamStore::capabilities] keeps its default, which fails as unsupported, and the service never
 /// makes it.
 ///
 /// Every call is safe to repeat. A call that fails while the store may have acted reports
@@ -293,7 +293,8 @@ mod tests {
 
     #[test]
     fn a_store_can_be_shared_as_a_trait_object() {
-        // Core holds the configured store behind one pointer for every Worker and client call.
+        // The service holds the configured store behind one pointer for every Worker and client
+        // call.
         fn _shared(_: Arc<dyn StreamStore>) {}
     }
 }

@@ -91,7 +91,7 @@ mod tests {
 
     #[test]
     fn the_stream_hash_matches_the_python_sdk() {
-        // Cursors minted before the store moved into Core must keep resuming.
+        // Cursors that older releases minted must keep resuming.
         assert_eq!(stream_hash("ns", "workflow", "wf", "a"), "8162b717");
         assert_eq!(
             stream_hash("default", "workflow", "order-17", "tokens"),

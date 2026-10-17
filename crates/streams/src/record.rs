@@ -30,8 +30,8 @@ pub fn workflow_producer_id(run_id: &str) -> String {
 }
 
 /// The digest of a batch of a Workflow's records on `topic`, from each record's kind and content
-/// hash, so it never depends on the codec. A Workflow's records reach Core after the codec, and a
-/// task that runs again must repeat the digest of the same records.
+/// hash, so it never depends on the codec. A Workflow's records reach the service after the codec,
+/// and a task that runs again must repeat the digest of the same records.
 ///
 /// It is the SHA-256 over each record as its length in 8 bytes big-endian, then the record as its
 /// topic's length in 8 bytes big-endian, the topic's UTF-8 bytes, its kind in 4 bytes big-endian,
@@ -56,8 +56,8 @@ pub fn workflow_batch_digest<'a>(
 
 /// Refuses an append batch digest that isn't the 32-byte SHA-256 lang takes before the codec.
 ///
-/// Stores compare it unchanged when a producer repeats its newest batch, so a digest Core made
-/// another way would turn a retry into a divergent write.
+/// Stores compare it unchanged when a producer repeats its newest batch, so a digest the service
+/// made another way would turn a retry into a divergent write.
 pub fn check_append_digest(digest: &[u8]) -> StreamResult<()> {
     if digest.len() != HASH_LENGTH {
         return Err(StreamError::invalid_argument(format!(
@@ -156,7 +156,7 @@ pub fn check_record_limit(records: &[Vec<u8>], capabilities: &Capabilities) -> S
     Ok(())
 }
 
-/// Refuses a batch above the store's record or batch limit. Core doesn't split a producer's
+/// Refuses a batch above the store's record or batch limit. The service doesn't split a producer's
 /// batch, since lang numbered its records as one sequence range.
 pub fn check_store_limits(records: &[Vec<u8>], capabilities: &Capabilities) -> StreamResult<()> {
     check_record_limit(records, capabilities)?;

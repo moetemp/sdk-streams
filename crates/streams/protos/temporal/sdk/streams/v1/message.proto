@@ -15,7 +15,7 @@ import "temporal/api/common/v1/message.proto";
 message StreamRecord {
     // The value the producer published. Lang runs it through the payload
     // codec and external storage before it reaches any store, so a store and
-    // Core see only the encoded payload.
+    // the service see only the encoded payload.
     temporal.api.common.v1.Payload body = 1;
     // Provenance stamped by the SDK, such as the plaintext content hash.
     map<string, temporal.api.common.v1.Payload> metadata = 2;
@@ -58,7 +58,7 @@ enum StreamRecordKind {
     reserved 4;
     // Ends `topic` for every reader, or every topic of the chain when `topic`
     // is empty. Readers drop every record after the first one. On a store
-    // without close flags, producers and the owner's Core write it to close.
+    // without close flags, producers and the owner's Worker write it to close.
     STREAM_RECORD_KIND_CLOSE = 5;
     // Names `topic` in the chain's control log `_chain`, so a closer finds the
     // chain's topics on a store that can't list them. Topic readers skip it.

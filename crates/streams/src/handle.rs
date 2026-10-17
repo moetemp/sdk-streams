@@ -399,7 +399,7 @@ impl Streams {
 
     /// Whether the owner a read follows ended. Following the chain, a run that continued as
     /// new is not the end, and a new chain on the Workflow id is. A reader only ends its own read,
-    /// so it needs no write access. Producers and the owner's Core close the chain.
+    /// so it needs no write access. Producers and the owner's Worker close the chain.
     async fn owner_ended(&self, stream: &StreamAddress, chain: &ChainId) -> StreamResult<bool> {
         let key = owner_key(stream);
         match self.describe(&key, &key.run_id).await {
@@ -697,7 +697,7 @@ fn address(stream: Option<&StreamAddress>) -> StreamResult<&StreamAddress> {
     Ok(stream)
 }
 
-/// Refuses a topic no store keys reliably, by the rules Core's Workflow path also applies.
+/// Refuses a topic no store keys reliably, by the rules the Workflow publish also applies.
 /// The producer id and attempt a named producer or an Activity attempt writes as.
 fn producer(
     named: Option<&NamedProducer>,

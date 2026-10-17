@@ -2,7 +2,7 @@
 //!
 //! A store with producer state keeps close flags that its append checks. On other stores a close
 //! is a `CLOSE` record, and readers drop every record after the first one. Readers never call
-//! this. Producers and the owner's Core do.
+//! this. Producers and the owner's Worker do.
 
 use crate::{
     StreamResult, StreamStore, close_record,

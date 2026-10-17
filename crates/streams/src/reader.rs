@@ -52,7 +52,7 @@ pub const MAX_TRACKED_PRODUCERS: usize = 1_000;
 /// Workflow reader may keep it in History.
 pub const MAX_STATE_BYTES: usize = 16 << 10;
 
-/// How many records one call returns when the request leaves it to Core.
+/// How many records one call returns when the request leaves it to the service.
 pub const DEFAULT_MAX_RECORDS: u32 = 100;
 
 /// One stream, resolved to what its store keys it by.
