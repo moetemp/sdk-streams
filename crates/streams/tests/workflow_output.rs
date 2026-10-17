@@ -6,13 +6,16 @@ mod support;
 use prost::Message;
 use std::{sync::Arc, time::Duration};
 use support::*;
-use temporalio_common::protos::temporal::api::enums::v1::WorkflowExecutionStatus;
+use temporalio_common::protos::temporal::api::{
+    enums::v1::WorkflowExecutionStatus, failure::v1::Failure,
+};
 use temporalio_streams::{
-    CONTENT_HASH_KEY, StreamError, StreamService, StreamsOptions, content_hash_text,
+    CONTENT_HASH_KEY, StreamError, StreamService, StreamStore, StreamsOptions, content_hash_text,
+    empty_close_result,
     proto::{
-        PublishWorkflowTaskRequest, PublishWorkflowTaskResponse, RunEvictedRequest,
-        ShutdownWorkerRequest, StreamFailure, StreamFailureKind, StreamRecord,
-        WorkflowTerminalCommand,
+        ChainId, PublishWorkflowTaskRequest, PublishWorkflowTaskResponse, ResolvedActivityOutcome,
+        ResolvedOwnerActivity, RunEvictedRequest, ShutdownWorkerRequest, StoreAppendRequest,
+        StreamFailure, StreamFailureKind, StreamOwnerKind, StreamRecord, WorkflowTerminalCommand,
     },
     workflow_batch_digest,
 };
@@ -435,4 +438,178 @@ async fn an_eviction_returns_before_the_history_read_and_shutdown_waits_for_it()
     gate.add_permits(1);
     shutdown.await;
     assert_eq!(store.calls(), ["append", "close_chain"]);
+}
+
+/// What a Workflow Activity's stream holds once [RUN] scheduled Activity `tool`.
+fn activity_chain() -> ChainId {
+    ChainId {
+        namespace: "ns".to_string(),
+        workflow_id: "wf-id".to_string(),
+        first_run_id: RUN.to_string(),
+        owner_kind: StreamOwnerKind::WorkflowActivity as i32,
+        activity_id: "tool".to_string(),
+    }
+}
+
+/// Appends one record to each of `topics` of the Activity's stream, as its producer would.
+async fn activity_wrote(store: &RecordingStore, topics: &[&str]) {
+    for topic in topics {
+        store
+            .inner
+            .append(StoreAppendRequest {
+                chain: Some(activity_chain()),
+                topic: topic.to_string(),
+                producer_id: format!("tool@{RUN}"),
+                attempt: 1,
+                sequence: 1,
+                digest: vec![1; 32],
+                records: vec![b"record".to_vec()],
+            })
+            .await
+            .unwrap();
+    }
+}
+
+fn resolving(
+    mut request: PublishWorkflowTaskRequest,
+    outcome: ResolvedActivityOutcome,
+    failure: Option<Failure>,
+) -> PublishWorkflowTaskRequest {
+    request
+        .resolved_owner_activities
+        .push(ResolvedOwnerActivity {
+            activity_id: "tool".to_string(),
+            outcome: outcome as i32,
+            failure,
+        });
+    request
+}
+
+#[tokio::test]
+async fn a_resolved_owner_activity_closes_each_topic_it_wrote_after_the_records_land() {
+    let store = Arc::new(RecordingStore::default());
+    let service = service_on(&store, &Owner::with(WorkflowExecutionStatus::Running));
+    activity_wrote(&store, &["status", "tokens"]).await;
+    send(
+        &service,
+        resolving(
+            publish(3, 0, &[], &["ab"]),
+            ResolvedActivityOutcome::Completed,
+            None,
+        ),
+    )
+    .await
+    .unwrap();
+    shutdown(&service, "worker-1").await;
+
+    let calls = store.calls();
+    assert_eq!(calls[0], "append", "the records land first: {calls:?}");
+    let closes = store.closes.lock().clone();
+    assert_eq!(
+        closes
+            .iter()
+            .map(|(chain, topic, _)| (chain.clone(), topic.as_str()))
+            .collect::<Vec<_>>(),
+        [(activity_chain(), "status"), (activity_chain(), "tokens")]
+    );
+    for (_, _, close) in &closes {
+        assert_eq!(close.result, Some(empty_close_result()));
+        assert!(close.failure.is_none());
+        assert_eq!(close.closed_by, format!("tool@{RUN}"));
+    }
+}
+
+#[tokio::test]
+async fn a_failed_owner_activity_closes_with_the_failure_the_workflow_saw() {
+    let store = Arc::new(RecordingStore::default());
+    let service = service_on(&store, &Owner::with(WorkflowExecutionStatus::Running));
+    activity_wrote(&store, &["tokens"]).await;
+    let failure = Failure {
+        message: "the tool broke".to_string(),
+        ..Default::default()
+    };
+    send(
+        &service,
+        resolving(
+            publish(3, 0, &[], &[]),
+            ResolvedActivityOutcome::Failed,
+            Some(failure.clone()),
+        ),
+    )
+    .await
+    .unwrap();
+    shutdown(&service, "worker-1").await;
+    let [(_, _, close)] = store.closes.lock().clone().try_into().unwrap();
+    assert_eq!(close.failure, Some(failure));
+    assert!(close.result.is_none());
+}
+
+#[tokio::test]
+async fn a_worker_shutdown_waits_for_the_activity_stream_closes() {
+    let store = Arc::new(RecordingStore {
+        close_delay: Some(Duration::from_millis(200)),
+        ..Default::default()
+    });
+    let service = service_on(&store, &Owner::with(WorkflowExecutionStatus::Running));
+    activity_wrote(&store, &["tokens"]).await;
+    send(
+        &service,
+        resolving(
+            publish(3, 0, &[], &[]),
+            ResolvedActivityOutcome::Completed,
+            None,
+        ),
+    )
+    .await
+    .unwrap();
+    shutdown(&service, "worker-1").await;
+    assert_eq!(
+        store.closes.lock().len(),
+        1,
+        "closed before the shutdown returned"
+    );
+}
+
+#[tokio::test]
+async fn a_store_that_refuses_the_close_still_answers_the_publish() {
+    let store = Arc::new(RecordingStore {
+        refuse_closes: true,
+        ..Default::default()
+    });
+    let service = service_on(&store, &Owner::with(WorkflowExecutionStatus::Running));
+    activity_wrote(&store, &["tokens"]).await;
+    send(
+        &service,
+        resolving(
+            publish(3, 0, &[], &["ab"]),
+            ResolvedActivityOutcome::Completed,
+            None,
+        ),
+    )
+    .await
+    .unwrap();
+    shutdown(&service, "worker-1").await;
+    assert!(store.calls().contains(&"close_topic_with"));
+}
+
+#[tokio::test]
+async fn a_publish_whose_append_fails_closes_nothing() {
+    let store = Arc::new(RecordingStore::refusing(StreamError::new(
+        StreamFailureKind::InvalidArgument,
+        "no",
+    )));
+    let service = service_on(&store, &Owner::with(WorkflowExecutionStatus::Running));
+    activity_wrote(&store, &["tokens"]).await;
+    send(
+        &service,
+        resolving(
+            publish(3, 0, &[], &["ab"]),
+            ResolvedActivityOutcome::Completed,
+            None,
+        ),
+    )
+    .await
+    .unwrap_err();
+    shutdown(&service, "worker-1").await;
+    assert!(store.closes.lock().is_empty());
 }

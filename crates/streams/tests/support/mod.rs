@@ -14,7 +14,7 @@ use temporalio_streams::{
     proto::{
         ChainId, DeleteOwnerRequest, DeleteOwnerResponse, OutputRecord, ReadRequest,
         StoreAppendRequest, StoreAppendResponse, StoreLatestRequest, StoreLatestResponse,
-        StoreReadRequest, StoreReadResponse, StreamRecordKind, read_record,
+        StoreReadRequest, StoreReadResponse, StoredClose, StreamRecordKind, read_record,
     },
     read_page, stream_hash,
 };
@@ -62,6 +62,12 @@ pub struct RecordingStore {
     pub refuse: Option<StreamError>,
     /// How long each append takes.
     pub append_delay: Option<Duration>,
+    /// Each stream close as `(chain, topic, close)`.
+    pub closes: Mutex<Vec<(ChainId, String, StoredClose)>>,
+    /// Refuses every topic close.
+    pub refuse_closes: bool,
+    /// How long each topic close takes.
+    pub close_delay: Option<Duration>,
     /// A retire waits for a permit here, when set.
     pub retire_gate: Option<Arc<tokio::sync::Semaphore>>,
 }
@@ -214,6 +220,70 @@ impl StreamStore for RecordingStore {
     async fn list_topics(&self, chain: &ChainId) -> StreamResult<Vec<String>> {
         self.calls.lock().push("list_topics");
         self.inner.list_topics(chain).await
+    }
+
+    async fn written_topics(&self, chain: &ChainId) -> StreamResult<Vec<String>> {
+        self.calls.lock().push("written_topics");
+        self.inner.written_topics(chain).await
+    }
+
+    async fn close_topic_with(
+        &self,
+        chain: &ChainId,
+        topic: &str,
+        close: StoredClose,
+    ) -> StreamResult<StoredClose> {
+        self.calls.lock().push("close_topic_with");
+        if self.refuse_closes {
+            return Err(StreamError::storage("the store is down"));
+        }
+        if let Some(delay) = self.close_delay {
+            tokio::time::sleep(delay).await;
+        }
+        self.closes
+            .lock()
+            .push((chain.clone(), topic.to_string(), close.clone()));
+        self.inner.close_topic_with(chain, topic, close).await
+    }
+
+    async fn newest_ever(&self, chain: &ChainId, topic: &str) -> StreamResult<String> {
+        self.inner.newest_ever(chain, topic).await
+    }
+
+    async fn dropped_after(
+        &self,
+        chain: &ChainId,
+        topic: &str,
+        mark: &str,
+    ) -> StreamResult<Option<String>> {
+        self.inner.dropped_after(chain, topic, mark).await
+    }
+
+    async fn hold_floor(
+        &self,
+        chain: &ChainId,
+        topic: &str,
+        holder: &str,
+        position: &str,
+    ) -> StreamResult<()> {
+        self.inner.hold_floor(chain, topic, holder, position).await
+    }
+
+    async fn release_floor(&self, chain: &ChainId, topic: &str, holder: &str) -> StreamResult<()> {
+        self.inner.release_floor(chain, topic, holder).await
+    }
+
+    async fn advance_archive(
+        &self,
+        chain: &ChainId,
+        topic: &str,
+        position: &str,
+    ) -> StreamResult<()> {
+        self.inner.advance_archive(chain, topic, position).await
+    }
+
+    async fn archived(&self, chain: &ChainId, topic: &str) -> StreamResult<Option<String>> {
+        self.inner.archived(chain, topic).await
     }
 
     async fn delete_owner(&self, request: DeleteOwnerRequest) -> StreamResult<DeleteOwnerResponse> {

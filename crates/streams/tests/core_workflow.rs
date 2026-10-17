@@ -50,8 +50,11 @@ use temporalio_sdk_core::{
     },
 };
 use temporalio_streams::{
-    StreamError, StreamService, StreamStore, StreamsOptions,
-    proto::{OutputRecord, PublishWorkflowTaskRequest, StreamRecordKind, WorkflowTerminalCommand},
+    STREAM_OWNER_HEADER, StreamError, StreamService, StreamStore, StreamsOptions,
+    proto::{
+        OutputRecord, PublishWorkflowTaskRequest, ResolvedActivityOutcome, ResolvedOwnerActivity,
+        StreamRecordKind, WorkflowTerminalCommand,
+    },
 };
 use tokio::sync::Notify;
 
@@ -71,6 +74,8 @@ struct Lang {
     worker: Worker,
     service: Arc<StreamService>,
     runs: Mutex<HashMap<String, RunFacts>>,
+    /// The Activities lang scheduled with [STREAM_OWNER_HEADER], by run and sequence number.
+    owner_activities: Mutex<HashMap<(String, u32), String>>,
 }
 
 impl Lang {
@@ -86,6 +91,7 @@ impl Lang {
             worker: mock_worker(mock),
             service: Arc::new(StreamService::new(store, owner, StreamsOptions::default())),
             runs: Default::default(),
+            owner_activities: Default::default(),
         }
     }
 
@@ -111,18 +117,30 @@ impl Lang {
         }
     }
 
-    /// Completes `activation` with `commands`. A live activation with records or a terminal
-    /// command publishes first, and a failed publish fails the activation instead.
+    /// Completes `activation` with `commands`. A live activation with records, a terminal
+    /// command or an owner Activity's resolution publishes first, and a failed publish fails the
+    /// activation instead.
     async fn complete(
         &self,
         activation: &WorkflowActivation,
         records: Vec<OutputRecord>,
         commands: Vec<workflow_command::Variant>,
     ) {
+        for command in &commands {
+            if let workflow_command::Variant::ScheduleActivity(schedule) = command
+                && schedule.headers.contains_key(STREAM_OWNER_HEADER)
+            {
+                self.owner_activities.lock().insert(
+                    (activation.run_id.clone(), schedule.seq),
+                    schedule.activity_id.clone(),
+                );
+            }
+        }
         let terminal = commands.iter().find_map(terminal_command);
-        let completion = if !activation.is_replaying && (!records.is_empty() || terminal.is_some())
-        {
-            match self.publish(activation, records, terminal).await {
+        let resolved = self.resolved_owners(activation);
+        let publishes = !records.is_empty() || terminal.is_some() || !resolved.is_empty();
+        let completion = if !activation.is_replaying && publishes {
+            match self.publish(activation, records, terminal, resolved).await {
                 Ok(()) => {
                     WorkflowActivationCompletion::from_cmds(activation.run_id.clone(), commands)
                 }
@@ -144,11 +162,48 @@ impl Lang {
             .unwrap();
     }
 
+    /// The owner Activities that `activation` resolves, as the server gave their outcomes.
+    fn resolved_owners(&self, activation: &WorkflowActivation) -> Vec<ResolvedOwnerActivity> {
+        let owners = self.owner_activities.lock();
+        activation
+            .jobs
+            .iter()
+            .filter_map(|job| match &job.variant {
+                Some(workflow_activation_job::Variant::ResolveActivity(resolve))
+                    if !resolve.is_local =>
+                {
+                    let activity_id = owners.get(&(activation.run_id.clone(), resolve.seq))?;
+                    let status = resolve.result.as_ref()?.status.as_ref()?;
+                    let (outcome, failure) = match status {
+                        activity_resolution::Status::Completed(_) => {
+                            (ResolvedActivityOutcome::Completed, None)
+                        }
+                        activity_resolution::Status::Failed(failed) => {
+                            (ResolvedActivityOutcome::Failed, failed.failure.clone())
+                        }
+                        activity_resolution::Status::Cancelled(cancelled) => (
+                            ResolvedActivityOutcome::Cancelled,
+                            cancelled.failure.clone(),
+                        ),
+                        activity_resolution::Status::Backoff(_) => return None,
+                    };
+                    Some(ResolvedOwnerActivity {
+                        activity_id: activity_id.clone(),
+                        outcome: outcome as i32,
+                        failure,
+                    })
+                }
+                _ => None,
+            })
+            .collect()
+    }
+
     async fn publish(
         &self,
         activation: &WorkflowActivation,
         records: Vec<OutputRecord>,
         terminal: Option<WorkflowTerminalCommand>,
+        resolved_owner_activities: Vec<ResolvedOwnerActivity>,
     ) -> Result<(), String> {
         let facts = self
             .runs
@@ -172,6 +227,7 @@ impl Lang {
             completed_started_event_ids: task.completed_started_event_ids,
             records,
             terminal_command: terminal.map(|t| t as i32).unwrap_or_default(),
+            resolved_owner_activities,
         };
         self.service
             .call("PublishWorkflowTask", &request.encode_to_vec())
