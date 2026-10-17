@@ -1,23 +1,30 @@
 //! Streams for lang: one process-wide stream service over the configured store, asking the
-//! client's server about streams' owners.
+//! client's server about streams' owners and sending it the stream notifications.
 
 use crate::{
-    OwnerClient, OwnerDescription, OwnerError, OwnerId, OwnerStatus, RunClose, StreamResult,
-    StreamService, proto,
+    CloseOutcome, NotifierClient, NotifierPoll, NotifyError, OwnerClient, OwnerDescription,
+    OwnerError, OwnerId, OwnerStatus, RunClose, StreamNotification, StreamResult, StreamService,
+    WorkflowAttachment,
+    proto::{self, ChainId},
 };
 use prost::Message;
-use std::sync::Arc;
+use std::{collections::BTreeMap, sync::Arc};
 use temporalio_client::Connection;
 use temporalio_common::{
     protos::{
         google::rpc::Status as RpcStatus,
         temporal::api::{
             common::v1::WorkflowExecution,
-            enums::v1::{EventType, WorkflowExecutionStatus},
+            enums::v1::{EventType, StreamOwnerKind, WorkflowExecutionStatus},
             history::v1::{HistoryEvent, history_event},
+            stream::v1::{self, StreamReference, WorkflowWakeTarget},
             workflowservice::v1::{
-                DescribeWorkflowExecutionRequest, DescribeWorkflowExecutionResponse,
-                GetWorkflowExecutionHistoryReverseRequest,
+                AttachStreamCallbackRequest, DescribeActivityExecutionRequest,
+                DescribeActivityExecutionResponse, DescribeWorkflowExecutionRequest,
+                DescribeWorkflowExecutionResponse, DetachStreamCallbackRequest,
+                GetWorkflowExecutionHistoryReverseRequest, NotifyStreamRequest,
+                NotifyStreamsRequest, PollStreamNotifierRequest, PollStreamNotifierResponse,
+                WaitStreamCallbackRequest,
             },
         },
     },
@@ -26,18 +33,300 @@ use temporalio_common::{
 use tonic::IntoRequest;
 
 /// Connects to the store `config` names. The service asks `connection`'s server about streams'
-/// owners, and counts on `meter` when lang gives its runtime's meter.
+/// owners, sends the stream notifications the config turns on to it, attaches Workflow readers
+/// there, and counts on `meter` when lang gives its runtime's meter.
 pub async fn connect_stream_service(
     config: proto::StreamStoreConfig,
     connection: Connection,
     meter: Option<TemporalMeter>,
 ) -> StreamResult<Arc<StreamService>> {
-    let owner = Arc::new(ConnectionOwnerClient { connection });
-    let mut service = StreamService::connect(config, owner).await?;
+    let owner = Arc::new(ConnectionOwnerClient {
+        connection: connection.clone(),
+    });
+    let notifier = Arc::new(ConnectionNotifierClient { connection });
+    let mut service = StreamService::connect_with_notifier(config, owner, Some(notifier)).await?;
     if let Some(meter) = meter {
         service = service.with_meter(meter);
     }
     Ok(Arc::new(service))
+}
+
+/// Sends stream notifications to a Temporal server's stream notifier through a client
+/// connection.
+struct ConnectionNotifierClient {
+    connection: Connection,
+}
+
+#[async_trait::async_trait]
+impl NotifierClient for ConnectionNotifierClient {
+    async fn notify(&self, notification: StreamNotification) -> Result<(), NotifyError> {
+        self.connection
+            .workflow_service()
+            .notify_stream(notify_request(notification).into_request())
+            .await
+            .map(|_| ())
+            .map_err(notify_error)
+    }
+
+    async fn notify_streams(
+        &self,
+        notifications: Vec<StreamNotification>,
+    ) -> Result<(), NotifyError> {
+        self.notify_streams_each(notifications)
+            .await?
+            .into_iter()
+            .collect()
+    }
+
+    async fn notify_streams_each(
+        &self,
+        notifications: Vec<StreamNotification>,
+    ) -> Result<Vec<Result<(), NotifyError>>, NotifyError> {
+        let namespaces: Vec<_> = notifications
+            .iter()
+            .map(|n| n.chain.namespace.clone())
+            .collect();
+        let mut results: Vec<_> = namespaces.iter().map(|_| Ok(())).collect();
+        for request in notify_streams_requests(notifications, self.connection.identity()) {
+            // A request keeps the order of its namespace's notifications.
+            let indexes: Vec<_> = (0..namespaces.len())
+                .filter(|&index| namespaces[index] == request.namespace)
+                .collect();
+            let response = self
+                .connection
+                .workflow_service()
+                .notify_streams(request.into_request())
+                .await
+                .map_err(notify_error)?
+                .into_inner();
+            // A server that answers no results applied every entry.
+            for (index, result) in indexes.into_iter().zip(response.results) {
+                if result.code != tonic::Code::Ok as i32 {
+                    let code = tonic::Code::from(result.code);
+                    results[index] = Err(notify_error(tonic::Status::new(code, result.message)));
+                }
+            }
+        }
+        Ok(results)
+    }
+
+    async fn attach_workflow(&self, attachment: WorkflowAttachment) -> Result<(), NotifyError> {
+        self.connection
+            .workflow_service()
+            .attach_stream_callback(attach_request(attachment).into_request())
+            .await
+            .map(|_| ())
+            .map_err(notify_error)
+    }
+
+    async fn wait_callback(
+        &self,
+        chain: ChainId,
+        topic: String,
+        request_id: String,
+        after_counter: i64,
+    ) -> Result<(), NotifyError> {
+        self.connection
+            .workflow_service()
+            .wait_stream_callback(
+                WaitStreamCallbackRequest {
+                    namespace: chain.namespace.clone(),
+                    stream_ref: Some(chain_reference(&chain, topic)),
+                    request_id,
+                    after_counter,
+                    identity: self.connection.identity().to_string(),
+                }
+                .into_request(),
+            )
+            .await
+            .map(|_| ())
+            .map_err(notify_error)
+    }
+
+    async fn detach(
+        &self,
+        chain: ChainId,
+        topic: String,
+        request_id: String,
+    ) -> Result<(), NotifyError> {
+        self.connection
+            .workflow_service()
+            .detach_stream_callback(
+                DetachStreamCallbackRequest {
+                    namespace: chain.namespace.clone(),
+                    stream_ref: Some(chain_reference(&chain, topic)),
+                    request_id,
+                    ..Default::default()
+                }
+                .into_request(),
+            )
+            .await
+            .map(|_| ())
+            .map_err(notify_error)
+    }
+
+    async fn poll(
+        &self,
+        chain: ChainId,
+        topic: String,
+        after_counter: i64,
+    ) -> Result<Option<NotifierPoll>, NotifyError> {
+        let answer = self
+            .connection
+            .workflow_service()
+            .poll_stream_notifier(
+                PollStreamNotifierRequest {
+                    namespace: chain.namespace.clone(),
+                    stream_ref: Some(chain_reference(&chain, topic)),
+                    after_counter,
+                    identity: self.connection.identity().to_string(),
+                }
+                .into_request(),
+            )
+            .await;
+        match answer {
+            Ok(response) => Ok(Some(poll_answer(response.into_inner()))),
+            // The server answers at its own wait limit, before the client's deadline. A deadline
+            // that passes anyway asks for the same re-read.
+            Err(status) if status.code() == tonic::Code::DeadlineExceeded => Ok(None),
+            Err(status) => Err(notify_error(status)),
+        }
+    }
+}
+
+fn poll_answer(response: PollStreamNotifierResponse) -> NotifierPoll {
+    NotifierPoll {
+        counter: response.counter,
+        position: response.position,
+        closed: response.closed,
+        close_result: response.close_result,
+        close_failure: response.close_failure,
+    }
+}
+
+/// The notifier of `chain`'s stream on `topic`. The run chain's first run keys the notifier, so one
+/// notifier serves the stream across Continue-as-New and a new chain on the same Workflow id gets
+/// its own. An Activity run is its own chain, so its notifier is keyed by the run. A Workflow
+/// Activity's notifier is keyed by its Workflow, its scheduling run and its Activity id.
+fn chain_reference(chain: &ChainId, topic: String) -> StreamReference {
+    if chain.owner_kind == proto::StreamOwnerKind::WorkflowActivity as i32 {
+        return StreamReference {
+            owner_kind: StreamOwnerKind::WorkflowActivity as i32,
+            workflow_id: chain.workflow_id.clone(),
+            run_id: chain.first_run_id.clone(),
+            topic,
+            activity_id: chain.activity_id.clone(),
+        };
+    }
+    if chain.owner_kind == proto::StreamOwnerKind::Activity as i32 {
+        return StreamReference {
+            owner_kind: StreamOwnerKind::Activity as i32,
+            activity_id: chain.activity_id.clone(),
+            run_id: chain.first_run_id.clone(),
+            topic,
+            ..Default::default()
+        };
+    }
+    StreamReference {
+        owner_kind: StreamOwnerKind::Workflow as i32,
+        workflow_id: chain.workflow_id.clone(),
+        run_id: chain.first_run_id.clone(),
+        topic,
+        ..Default::default()
+    }
+}
+
+fn attach_request(attachment: WorkflowAttachment) -> AttachStreamCallbackRequest {
+    AttachStreamCallbackRequest {
+        namespace: attachment.chain.namespace.clone(),
+        stream_ref: Some(chain_reference(&attachment.chain, attachment.topic)),
+        request_id: attachment.request_id,
+        workflow_target: Some(WorkflowWakeTarget {
+            workflow_id: attachment.workflow_id,
+            run_id: attachment.run_id,
+            subscription_id: attachment.subscription_id,
+        }),
+        idle: attachment.idle,
+        ..Default::default()
+    }
+}
+
+/// One `NotifyStreams` request per namespace, since a call names one.
+fn notify_streams_requests(
+    notifications: Vec<StreamNotification>,
+    identity: &str,
+) -> Vec<NotifyStreamsRequest> {
+    let mut by_namespace: BTreeMap<String, Vec<v1::StreamNotification>> = BTreeMap::new();
+    for notification in notifications {
+        by_namespace
+            .entry(notification.chain.namespace.clone())
+            .or_default()
+            .push(v1::StreamNotification {
+                stream_ref: Some(chain_reference(&notification.chain, notification.topic)),
+                position: notification.position,
+                counter: notification.counter,
+                ..Default::default()
+            });
+    }
+    by_namespace
+        .into_iter()
+        .map(|(namespace, notifications)| NotifyStreamsRequest {
+            namespace,
+            notifications,
+            identity: identity.to_string(),
+        })
+        .collect()
+}
+
+fn notify_request(notification: StreamNotification) -> NotifyStreamRequest {
+    NotifyStreamRequest {
+        stream_ref: Some(chain_reference(&notification.chain, notification.topic)),
+        namespace: notification.chain.namespace,
+        position: notification.position,
+        counter: notification.counter,
+        close: notification.close.is_some(),
+        close_result: notification.close.as_ref().and_then(CloseOutcome::result),
+        close_failure: match notification.close {
+            Some(CloseOutcome::Failure(failure)) => Some(failure),
+            _ => None,
+        },
+        ..Default::default()
+    }
+}
+
+/// Answers that mean the server will never take the notification, so a retry can't help.
+fn notify_error(status: tonic::Status) -> NotifyError {
+    use tonic::Code;
+    match status.code() {
+        Code::Unimplemented => NotifyError::Unsupported(status.to_string()),
+        Code::FailedPrecondition if namespace_in_transition(&status) => {
+            NotifyError::Failed(status.to_string())
+        }
+        Code::InvalidArgument
+        | Code::NotFound
+        | Code::PermissionDenied
+        | Code::Unauthenticated
+        | Code::FailedPrecondition => NotifyError::Refused(status.to_string()),
+        _ => NotifyError::Failed(status.to_string()),
+    }
+}
+
+/// A namespace that's failing over answers `FailedPrecondition` too, but only until the
+/// redirection sees the active cluster, so a close mustn't stop on it.
+fn namespace_in_transition(status: &tonic::Status) -> bool {
+    use temporalio_common::protos::{
+        google::rpc::Status as RpcStatus,
+        temporal::api::errordetails::v1::{
+            NamespaceInvalidStateFailure, NamespaceNotActiveFailure,
+        },
+    };
+    let Ok(details) = <RpcStatus as prost::Message>::decode(status.details()) else {
+        return false;
+    };
+    details.details.iter().any(|detail| {
+        detail.to_msg::<NamespaceNotActiveFailure>().is_ok()
+            || detail.to_msg::<NamespaceInvalidStateFailure>().is_ok()
+    })
 }
 
 /// Asks a Temporal server about owners through a client connection.
@@ -53,27 +342,64 @@ impl OwnerClient for ConnectionOwnerClient {
         owner: OwnerId<'_>,
         run_id: &str,
     ) -> Result<OwnerDescription, OwnerError> {
-        let OwnerId::Workflow(workflow_id) = owner else {
-            return Err(OwnerError::Failed(format!(
-                "this owner client describes Workflows only, not {owner:?}"
-            )));
-        };
-        let response = self
-            .connection
-            .workflow_service()
-            .describe_workflow_execution(
-                DescribeWorkflowExecutionRequest {
-                    namespace: namespace.to_string(),
-                    execution: Some(WorkflowExecution {
-                        workflow_id: workflow_id.to_string(),
-                        run_id: run_id.to_string(),
-                    }),
-                }
-                .into_request(),
-            )
-            .await
-            .map_err(owner_error)?;
-        owner_description(response.into_inner())
+        match owner {
+            OwnerId::Workflow(workflow_id) => {
+                let response = self
+                    .connection
+                    .workflow_service()
+                    .describe_workflow_execution(
+                        DescribeWorkflowExecutionRequest {
+                            namespace: namespace.to_string(),
+                            execution: Some(WorkflowExecution {
+                                workflow_id: workflow_id.to_string(),
+                                run_id: run_id.to_string(),
+                            }),
+                        }
+                        .into_request(),
+                    )
+                    .await
+                    .map_err(owner_error)?;
+                owner_description(response.into_inner())
+            }
+            OwnerId::Activity(activity_id) => {
+                let response = self
+                    .connection
+                    .workflow_service()
+                    .describe_activity_execution(
+                        DescribeActivityExecutionRequest {
+                            namespace: namespace.to_string(),
+                            activity_id: activity_id.to_string(),
+                            run_id: run_id.to_string(),
+                            ..Default::default()
+                        }
+                        .into_request(),
+                    )
+                    .await
+                    .map_err(owner_error)?;
+                activity_owner_description(response.into_inner())
+            }
+            OwnerId::WorkflowActivity {
+                workflow_id,
+                activity_id,
+            } => {
+                let response = self
+                    .connection
+                    .workflow_service()
+                    .describe_workflow_execution(
+                        DescribeWorkflowExecutionRequest {
+                            namespace: namespace.to_string(),
+                            execution: Some(WorkflowExecution {
+                                workflow_id: workflow_id.to_string(),
+                                run_id: run_id.to_string(),
+                            }),
+                        }
+                        .into_request(),
+                    )
+                    .await
+                    .map_err(owner_error)?;
+                workflow_activity_owner_description(response.into_inner(), activity_id)
+            }
+        }
     }
 
     async fn run_close(
@@ -215,11 +541,54 @@ fn owner_description(
     })
 }
 
+/// A Workflow Activity is pending while its scheduling run lists it, through retries and backoff.
+fn workflow_activity_owner_description(
+    response: DescribeWorkflowExecutionResponse,
+    activity_id: &str,
+) -> Result<OwnerDescription, OwnerError> {
+    let pending = response
+        .pending_activities
+        .iter()
+        .any(|activity| activity.activity_id == activity_id);
+    let status = response
+        .workflow_execution_info
+        .as_ref()
+        .map(|info| info.status())
+        .unwrap_or_default();
+    Ok(OwnerDescription {
+        status: OwnerStatus::of_workflow_activity(status, pending),
+        ..owner_description(response)?
+    })
+}
+
+/// A standalone Activity run is a chain of one run, so it is its own first run.
+fn activity_owner_description(
+    response: DescribeActivityExecutionResponse,
+) -> Result<OwnerDescription, OwnerError> {
+    let info = response
+        .info
+        .ok_or_else(|| OwnerError::Failed("the server described no Activity".to_string()))?;
+    let run_id = if response.run_id.is_empty() {
+        info.run_id.clone()
+    } else {
+        response.run_id
+    };
+    if run_id.is_empty() {
+        return Err(OwnerError::Failed(
+            "the server described an Activity with no run id".to_string(),
+        ));
+    }
+    Ok(OwnerDescription {
+        status: OwnerStatus::of_activity(info.status()),
+        first_run_id: run_id.clone(),
+        run_id,
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use temporalio_common::protos::temporal::api::{
-        enums::v1::WorkflowExecutionStatus,
         history::v1::{
             WorkflowExecutionCompletedEventAttributes, WorkflowTaskCompletedEventAttributes,
         },
@@ -251,6 +620,80 @@ mod tests {
                 status: OwnerStatus::ContinuedAsNew,
             }
         );
+    }
+
+    #[test]
+    fn an_activity_run_is_its_own_chain_and_any_terminal_status_ends_it() {
+        use temporalio_common::protos::temporal::api::{
+            activity::v1::ActivityExecutionInfo, enums::v1::ActivityExecutionStatus,
+        };
+        let described = |status: ActivityExecutionStatus| DescribeActivityExecutionResponse {
+            run_id: "act-run".to_string(),
+            info: Some(ActivityExecutionInfo {
+                activity_id: "gen".to_string(),
+                run_id: "act-run".to_string(),
+                status: status as i32,
+                ..Default::default()
+            }),
+            ..Default::default()
+        };
+        assert_eq!(
+            activity_owner_description(described(ActivityExecutionStatus::Paused)).unwrap(),
+            OwnerDescription {
+                run_id: "act-run".to_string(),
+                first_run_id: "act-run".to_string(),
+                status: OwnerStatus::Running,
+            }
+        );
+        for status in [
+            ActivityExecutionStatus::Completed,
+            ActivityExecutionStatus::Failed,
+            ActivityExecutionStatus::Canceled,
+            ActivityExecutionStatus::Terminated,
+            ActivityExecutionStatus::TimedOut,
+        ] {
+            assert!(
+                activity_owner_description(described(status))
+                    .unwrap()
+                    .chain_ended(),
+                "{status:?}"
+            );
+        }
+        assert!(matches!(
+            activity_owner_description(DescribeActivityExecutionResponse::default()),
+            Err(OwnerError::Failed(_))
+        ));
+    }
+
+    #[test]
+    fn a_workflow_activity_runs_while_its_running_run_lists_it_as_pending() {
+        use temporalio_common::protos::temporal::api::workflow::v1::PendingActivityInfo;
+        let described = |status: WorkflowExecutionStatus, pending: &[&str]| {
+            let mut response = described("run-1", "run-1");
+            if let Some(info) = &mut response.workflow_execution_info {
+                info.status = status as i32;
+            }
+            response.pending_activities = pending
+                .iter()
+                .map(|id| PendingActivityInfo {
+                    activity_id: id.to_string(),
+                    ..Default::default()
+                })
+                .collect();
+            response
+        };
+        let status = |status, pending: &[&str]| {
+            workflow_activity_owner_description(described(status, pending), "tool")
+                .unwrap()
+                .status
+        };
+        use WorkflowExecutionStatus::*;
+        assert_eq!(status(Running, &["other", "tool"]), OwnerStatus::Running);
+        assert_eq!(status(Paused, &["tool"]), OwnerStatus::Running);
+        assert_eq!(status(Running, &["other"]), OwnerStatus::ActivityGone);
+        for closed in [Completed, Failed, ContinuedAsNew, Terminated, TimedOut] {
+            assert_eq!(status(closed, &["tool"]), OwnerStatus::Ended, "{closed:?}");
+        }
     }
 
     #[test]
@@ -297,6 +740,797 @@ mod tests {
             owner_description(DescribeWorkflowExecutionResponse::default()),
             Err(OwnerError::Failed(_))
         ));
+    }
+
+    #[test]
+    fn a_notification_names_the_stream_by_its_chains_first_run() {
+        let request = notify_request(StreamNotification {
+            chain: proto::ChainId {
+                namespace: "ns".to_string(),
+                workflow_id: "wf".to_string(),
+                first_run_id: "run-1".to_string(),
+                ..Default::default()
+            },
+            topic: "tokens".to_string(),
+            position: "cursor".to_string(),
+            counter: 7,
+            close: None,
+        });
+        assert_eq!(request.namespace, "ns");
+        assert_eq!(
+            request.stream_ref,
+            Some(StreamReference {
+                owner_kind: StreamOwnerKind::Workflow as i32,
+                workflow_id: "wf".to_string(),
+                run_id: "run-1".to_string(),
+                topic: "tokens".to_string(),
+                ..Default::default()
+            })
+        );
+        assert_eq!((request.position.as_str(), request.counter), ("cursor", 7));
+        assert!(!request.close);
+        assert!(request.close_result.is_none());
+    }
+
+    #[test]
+    fn a_notification_of_a_workflow_activity_stream_names_its_scheduling_run() {
+        let request = notify_request(StreamNotification {
+            chain: proto::ChainId {
+                namespace: "ns".to_string(),
+                workflow_id: "agent".to_string(),
+                first_run_id: "run-2".to_string(),
+                owner_kind: proto::StreamOwnerKind::WorkflowActivity as i32,
+                activity_id: "tool-42".to_string(),
+            },
+            topic: "tokens".to_string(),
+            position: "cursor".to_string(),
+            counter: 3,
+            close: None,
+        });
+        assert_eq!(
+            request.stream_ref,
+            Some(StreamReference {
+                owner_kind: StreamOwnerKind::WorkflowActivity as i32,
+                workflow_id: "agent".to_string(),
+                run_id: "run-2".to_string(),
+                topic: "tokens".to_string(),
+                activity_id: "tool-42".to_string(),
+            })
+        );
+    }
+
+    #[test]
+    fn a_notification_of_an_activity_stream_names_the_activity_run() {
+        let request = notify_request(StreamNotification {
+            chain: proto::ChainId {
+                namespace: "ns".to_string(),
+                first_run_id: "act-run".to_string(),
+                owner_kind: proto::StreamOwnerKind::Activity as i32,
+                activity_id: "gen".to_string(),
+                ..Default::default()
+            },
+            topic: "tokens".to_string(),
+            position: "cursor".to_string(),
+            counter: 7,
+            close: Some(CloseOutcome::Failure(Default::default())),
+        });
+        assert_eq!(
+            request.stream_ref,
+            Some(StreamReference {
+                owner_kind: StreamOwnerKind::Activity as i32,
+                workflow_id: String::new(),
+                run_id: "act-run".to_string(),
+                topic: "tokens".to_string(),
+                activity_id: "gen".to_string(),
+            })
+        );
+        assert!(request.close && request.close_failure.is_some());
+    }
+
+    #[test]
+    fn a_batch_of_notifications_goes_out_once_per_namespace() {
+        let notification = |namespace: &str, workflow_id: &str, counter: i64| StreamNotification {
+            chain: proto::ChainId {
+                namespace: namespace.to_string(),
+                workflow_id: workflow_id.to_string(),
+                first_run_id: "run-1".to_string(),
+                ..Default::default()
+            },
+            topic: "tokens".to_string(),
+            position: format!("cursor-{counter}"),
+            counter,
+            close: None,
+        };
+        let requests = notify_streams_requests(
+            vec![
+                notification("b", "wf-1", 1),
+                notification("a", "wf-2", 2),
+                notification("b", "wf-3", 3),
+            ],
+            "driver",
+        );
+        let shape: Vec<_> = requests
+            .iter()
+            .map(|r| {
+                (
+                    r.namespace.as_str(),
+                    r.identity.as_str(),
+                    r.notifications
+                        .iter()
+                        .map(|n| n.counter)
+                        .collect::<Vec<_>>(),
+                )
+            })
+            .collect();
+        assert_eq!(
+            shape,
+            [("a", "driver", vec![2]), ("b", "driver", vec![1, 3])]
+        );
+        let first = &requests[1].notifications[0];
+        assert_eq!(first.position, "cursor-1");
+        assert_eq!(first.stream_ref.as_ref().unwrap().workflow_id, "wf-1");
+        assert_eq!(first.stream_ref.as_ref().unwrap().run_id, "run-1");
+    }
+
+    #[test]
+    fn an_attach_names_the_chains_notifier_and_wakes_the_reader() {
+        let request = attach_request(WorkflowAttachment {
+            chain: proto::ChainId {
+                namespace: "ns".to_string(),
+                workflow_id: "owner".to_string(),
+                first_run_id: "chain-1".to_string(),
+                ..Default::default()
+            },
+            topic: "tokens".to_string(),
+            request_id: "jetty/reader-run/1".to_string(),
+            workflow_id: "reader".to_string(),
+            run_id: "reader-run".to_string(),
+            subscription_id: "1".to_string(),
+            idle: true,
+        });
+        assert_eq!(request.namespace, "ns");
+        assert_eq!(
+            request.stream_ref,
+            Some(StreamReference {
+                owner_kind: StreamOwnerKind::Workflow as i32,
+                workflow_id: "owner".to_string(),
+                run_id: "chain-1".to_string(),
+                topic: "tokens".to_string(),
+                ..Default::default()
+            })
+        );
+        assert_eq!(request.request_id, "jetty/reader-run/1");
+        assert_eq!(
+            request.workflow_target,
+            Some(WorkflowWakeTarget {
+                workflow_id: "reader".to_string(),
+                run_id: "reader-run".to_string(),
+                subscription_id: "1".to_string(),
+            })
+        );
+        assert!(request.callback.is_none(), "exactly one target");
+        assert!(
+            request.idle,
+            "the reader asks for each wake once it is caught up"
+        );
+    }
+
+    #[test]
+    fn only_answers_a_retry_cant_change_refuse_a_notification() {
+        assert!(matches!(
+            notify_error(tonic::Status::new(tonic::Code::Unimplemented, "")),
+            NotifyError::Unsupported(_)
+        ));
+        for code in [
+            tonic::Code::InvalidArgument,
+            tonic::Code::NotFound,
+            tonic::Code::PermissionDenied,
+            tonic::Code::Unauthenticated,
+            tonic::Code::FailedPrecondition,
+        ] {
+            assert!(
+                matches!(
+                    notify_error(tonic::Status::new(code, "")),
+                    NotifyError::Refused(_)
+                ),
+                "{code:?}"
+            );
+        }
+        for code in [
+            tonic::Code::Unavailable,
+            tonic::Code::DeadlineExceeded,
+            tonic::Code::ResourceExhausted,
+            tonic::Code::Internal,
+        ] {
+            assert!(
+                matches!(
+                    notify_error(tonic::Status::new(code, "")),
+                    NotifyError::Failed(_)
+                ),
+                "{code:?}"
+            );
+        }
+    }
+
+    fn failed_precondition_with<T: prost::Message + prost::Name>(detail: &T) -> tonic::Status {
+        let status = temporalio_common::protos::google::rpc::Status {
+            code: tonic::Code::FailedPrecondition as i32,
+            message: "namespace".to_string(),
+            details: vec![prost_types::Any::from_msg(detail).unwrap()],
+        };
+        tonic::Status::with_details(
+            tonic::Code::FailedPrecondition,
+            "namespace",
+            prost::Message::encode_to_vec(&status).into(),
+        )
+    }
+
+    #[test]
+    fn a_namespace_in_failover_fails_a_notification_for_now() {
+        use temporalio_common::protos::temporal::api::errordetails::v1::{
+            NamespaceInvalidStateFailure, NamespaceNotActiveFailure,
+        };
+        for status in [
+            failed_precondition_with(&NamespaceNotActiveFailure::default()),
+            failed_precondition_with(&NamespaceInvalidStateFailure::default()),
+        ] {
+            assert!(matches!(notify_error(status), NotifyError::Failed(_)));
+        }
+    }
+
+    /// One HTTP request the test listener got: its `Nexus-Operation-State` and its body.
+    type Delivery = (String, String);
+
+    /// Answers every request on `127.0.0.1:7899` with `200` and hands each one on, so a test sees
+    /// what the server's callbacks deliver. One listener serves every live test, since the
+    /// address can't be bound twice.
+    fn deliveries() -> &'static std::sync::Mutex<std::sync::mpsc::Receiver<Delivery>> {
+        static DELIVERIES: std::sync::OnceLock<
+            std::sync::Mutex<std::sync::mpsc::Receiver<Delivery>>,
+        > = std::sync::OnceLock::new();
+        DELIVERIES.get_or_init(|| std::sync::Mutex::new(listen("127.0.0.1:7899")))
+    }
+
+    fn listen(address: &str) -> std::sync::mpsc::Receiver<Delivery> {
+        use std::io::{BufRead, BufReader, Read, Write};
+        let listener = std::net::TcpListener::bind(address).unwrap();
+        let (sender, deliveries) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            for stream in listener.incoming() {
+                let Ok(mut stream) = stream else { return };
+                let mut reader = BufReader::new(stream.try_clone().unwrap());
+                let (mut state, mut length, mut chunked) = (String::new(), 0usize, false);
+                loop {
+                    let mut line = String::new();
+                    if reader.read_line(&mut line).unwrap_or(0) == 0 || line == "\r\n" {
+                        break;
+                    }
+                    let lower = line.to_ascii_lowercase();
+                    if let Some(value) = lower.strip_prefix("nexus-operation-state:") {
+                        state = value.trim().to_string();
+                    }
+                    if let Some(value) = lower.strip_prefix("content-length:") {
+                        length = value.trim().parse().unwrap_or(0);
+                    }
+                    if lower.starts_with("transfer-encoding:") && lower.contains("chunked") {
+                        chunked = true;
+                    }
+                }
+                let mut body = vec![];
+                if chunked {
+                    // A failed completion streams its failure in chunks.
+                    loop {
+                        let mut size = String::new();
+                        if reader.read_line(&mut size).unwrap_or(0) == 0 {
+                            break;
+                        }
+                        let size = usize::from_str_radix(size.trim(), 16).unwrap_or(0);
+                        let mut chunk = vec![0; size + 2];
+                        let _ = reader.read_exact(&mut chunk);
+                        if size == 0 {
+                            break;
+                        }
+                        body.extend_from_slice(&chunk[..size]);
+                    }
+                } else {
+                    body.resize(length, 0);
+                    let _ = reader.read_exact(&mut body);
+                }
+                let _ = stream.write_all(b"HTTP/1.1 200 OK\r\ncontent-length: 0\r\n\r\n");
+                if sender
+                    .send((state, String::from_utf8_lossy(&body).to_string()))
+                    .is_err()
+                {
+                    return;
+                }
+            }
+        });
+        deliveries
+    }
+
+    fn next_delivery() -> Delivery {
+        deliveries()
+            .lock()
+            .unwrap()
+            .recv_timeout(std::time::Duration::from_secs(30))
+            .expect("the server delivered nothing")
+    }
+
+    /// A running owner Workflow that no Worker polls, a caller attached to its stream on
+    /// `tokens`, and a stream service that notifies through the live server.
+    struct Live {
+        connection: Connection,
+        service: Arc<StreamService>,
+        stream: proto::StreamAddress,
+        workflow_id: String,
+        run_id: String,
+        // The live tests share the callback listener's address.
+        _turn: tokio::sync::MutexGuard<'static, ()>,
+    }
+
+    static LIVE_TURN: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+
+    /// Needs a server with the stream notifier and progress on, at `STREAMS_NOTIFIER_SERVER`
+    /// (such as `http://127.0.0.1:7861`), whose `callback.allowedAddresses` takes
+    /// `127.0.0.1:7899`. Answers `None` without one. Also answers `None` without
+    /// `STREAMS_NOTIFIER_NEXUS_PROGRESS`, since a Jetty server sends progress only to Workflow
+    /// wake targets.
+    async fn live() -> Option<Live> {
+        use temporalio_common::protos::temporal::api::{
+            common::v1::WorkflowType,
+            taskqueue::v1::TaskQueue,
+            workflowservice::v1::{AttachStreamCallbackRequest, StartWorkflowExecutionRequest},
+        };
+        let Ok(server) = std::env::var("STREAMS_NOTIFIER_SERVER") else {
+            eprintln!("set STREAMS_NOTIFIER_SERVER to run the live notifier test");
+            return None;
+        };
+        if std::env::var("STREAMS_NOTIFIER_NEXUS_PROGRESS").is_err() {
+            eprintln!("set STREAMS_NOTIFIER_NEXUS_PROGRESS for a server with Nexus progress");
+            return None;
+        }
+        let turn = LIVE_TURN.lock().await;
+        let connection = Connection::connect(
+            temporalio_client::ConnectionOptions::new(url::Url::parse(&server).unwrap()).build(),
+        )
+        .await
+        .unwrap();
+        let workflow_id = format!("cn-notifier-{}", uuid::Uuid::new_v4());
+        // No Worker polls the owner, so the stream stays open.
+        let started = connection
+            .workflow_service()
+            .start_workflow_execution(
+                StartWorkflowExecutionRequest {
+                    namespace: "default".to_string(),
+                    workflow_id: workflow_id.clone(),
+                    workflow_type: Some(WorkflowType {
+                        name: "owner".to_string(),
+                    }),
+                    task_queue: Some(TaskQueue {
+                        name: "cn-notifier-nobody".to_string(),
+                        ..Default::default()
+                    }),
+                    request_id: uuid::Uuid::new_v4().to_string(),
+                    ..Default::default()
+                }
+                .into_request(),
+            )
+            .await
+            .unwrap()
+            .into_inner();
+        // An earlier live test may have left deliveries behind.
+        while deliveries().lock().unwrap().try_recv().is_ok() {}
+        connection
+            .workflow_service()
+            .attach_stream_callback(
+                AttachStreamCallbackRequest {
+                    namespace: "default".to_string(),
+                    stream_ref: Some(StreamReference {
+                        owner_kind: StreamOwnerKind::Workflow as i32,
+                        workflow_id: workflow_id.clone(),
+                        run_id: started.run_id.clone(),
+                        topic: "tokens".to_string(),
+                        ..Default::default()
+                    }),
+                    request_id: "caller".to_string(),
+                    callback: Some(
+                        temporalio_common::protos::temporal::api::common::v1::callback::Nexus {
+                            url: "http://127.0.0.1:7899/callback".to_string(),
+                            ..Default::default()
+                        },
+                    ),
+                    ..Default::default()
+                }
+                .into_request(),
+            )
+            .await
+            .unwrap();
+        let service = connect_stream_service(
+            proto::StreamStoreConfig {
+                store: Some(proto::stream_store_config::Store::Memory(
+                    proto::MemoryStoreConfig::default(),
+                )),
+                notify_on_append: true,
+                ..Default::default()
+            },
+            connection.clone(),
+            None,
+        )
+        .await
+        .unwrap();
+        let stream = proto::StreamAddress {
+            namespace: "default".to_string(),
+            owner_kind: proto::StreamOwnerKind::Workflow as i32,
+            workflow_id: workflow_id.clone(),
+            run_id: String::new(),
+            topic: "tokens".to_string(),
+            ..Default::default()
+        };
+        Some(Live {
+            connection,
+            service,
+            stream,
+            workflow_id,
+            run_id: started.run_id,
+            _turn: turn,
+        })
+    }
+
+    impl Live {
+        async fn append_one(&self) {
+            use prost::Message;
+            let append = proto::AppendRequest {
+                stream: Some(self.stream.clone()),
+                producer: Some(proto::append_request::Producer::Named(
+                    proto::NamedProducer {
+                        producer_id: "producer".to_string(),
+                        attempt: 1,
+                    },
+                )),
+                sequence: 1,
+                records: vec![proto::AppendRecord {
+                    kind: proto::StreamRecordKind::Data as i32,
+                    body: Some(
+                        temporalio_common::protos::temporal::api::common::v1::Payload {
+                            data: b"token".to_vec(),
+                            ..Default::default()
+                        },
+                    ),
+                    content_hash: vec![7; 32],
+                    ..Default::default()
+                }],
+                // Any value names the batch, since this producer writes it once.
+                digest: vec![9; 32],
+            };
+            self.service
+                .call("Append", &append.encode_to_vec())
+                .await
+                .unwrap();
+            let (state, body) = next_delivery();
+            assert_eq!(state, "running", "{body}");
+            assert!(body.contains(r#""counter":"1""#), "{body}");
+        }
+
+        async fn close(&self, close: proto::CloseRequest) -> Delivery {
+            use prost::Message;
+            self.service
+                .call("Close", &close.encode_to_vec())
+                .await
+                .unwrap();
+            loop {
+                // A progress retry may still arrive before the completion.
+                let delivery = next_delivery();
+                if delivery.0 != "running" {
+                    return delivery;
+                }
+            }
+        }
+
+        async fn end(self) {
+            use temporalio_common::protos::temporal::api::workflowservice::v1 as service;
+            self.connection
+                .workflow_service()
+                .terminate_workflow_execution(
+                    service::TerminateWorkflowExecutionRequest {
+                        namespace: "default".to_string(),
+                        workflow_execution: Some(WorkflowExecution {
+                            workflow_id: self.workflow_id,
+                            run_id: self.run_id,
+                        }),
+                        ..Default::default()
+                    }
+                    .into_request(),
+                )
+                .await
+                .unwrap();
+        }
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_live_notifier_hears_appends_as_progress_and_the_close_as_the_result() {
+        use temporalio_common::protos::temporal::api::common::v1::Payload;
+        let Some(live) = live().await else { return };
+        live.append_one().await;
+        let (state, body) = live
+            .close(proto::CloseRequest {
+                stream: Some(live.stream.clone()),
+                result: Some(Payload {
+                    metadata: [("encoding".to_string(), b"json/plain".to_vec())].into(),
+                    data: br#""summary""#.to_vec(),
+                    ..Default::default()
+                }),
+                failure: None,
+                closed_by: String::new(),
+            })
+            .await;
+        assert_eq!(state, "succeeded", "{body}");
+        assert!(body.contains("summary"), "{body}");
+        live.end().await;
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_live_close_with_a_failure_fails_the_callers() {
+        use temporalio_common::protos::temporal::api::{
+            failure::v1::{ApplicationFailureInfo, Failure, failure::FailureInfo},
+            workflowservice::v1::DescribeStreamNotifierRequest,
+        };
+        let Some(live) = live().await else { return };
+        live.append_one().await;
+        let (state, body) = live
+            .close(proto::CloseRequest {
+                stream: Some(live.stream.clone()),
+                result: None,
+                failure: Some(Failure {
+                    message: "the agent gave up".to_string(),
+                    failure_info: Some(FailureInfo::ApplicationFailureInfo(
+                        ApplicationFailureInfo {
+                            r#type: "AgentGaveUp".to_string(),
+                            non_retryable: true,
+                            ..Default::default()
+                        },
+                    )),
+                    ..Default::default()
+                }),
+                closed_by: String::new(),
+            })
+            .await;
+        assert_eq!(state, "failed", "{body}");
+        assert!(body.contains("the agent gave up"), "{body}");
+        let described = live
+            .connection
+            .workflow_service()
+            .describe_stream_notifier(
+                DescribeStreamNotifierRequest {
+                    namespace: "default".to_string(),
+                    stream_ref: Some(StreamReference {
+                        owner_kind: StreamOwnerKind::Workflow as i32,
+                        workflow_id: live.workflow_id.clone(),
+                        run_id: live.run_id.clone(),
+                        topic: "tokens".to_string(),
+                        ..Default::default()
+                    }),
+                }
+                .into_request(),
+            )
+            .await
+            .unwrap()
+            .into_inner();
+        assert!(described.closed);
+        assert_eq!(
+            described.close_failure.map(|failure| failure.message),
+            Some("the agent gave up".to_string())
+        );
+        live.end().await;
+    }
+
+    /// One record from one producer, as its batch at `sequence`.
+    fn record_append(stream: &proto::StreamAddress, sequence: i64) -> proto::AppendRequest {
+        proto::AppendRequest {
+            stream: Some(stream.clone()),
+            producer: Some(proto::append_request::Producer::Named(
+                proto::NamedProducer {
+                    producer_id: "producer".to_string(),
+                    attempt: 1,
+                },
+            )),
+            sequence,
+            records: vec![proto::AppendRecord {
+                kind: proto::StreamRecordKind::Data as i32,
+                body: Some(
+                    temporalio_common::protos::temporal::api::common::v1::Payload {
+                        data: b"token".to_vec(),
+                        ..Default::default()
+                    },
+                ),
+                content_hash: vec![7; 32],
+                ..Default::default()
+            }],
+            digest: vec![sequence as u8; 32],
+        }
+    }
+
+    /// Needs a server with idle Workflow targets at `STREAMS_NOTIFIER_SERVER`, and a recheck
+    /// interval longer than the test, since a recheck wakes the reader too.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_live_workflow_reader_gets_one_wake_per_idle_stretch() {
+        use prost::Message;
+        use std::time::Duration;
+        use temporalio_common::protos::temporal::api::{
+            common::v1::WorkflowType,
+            taskqueue::v1::TaskQueue,
+            workflowservice::v1::{
+                DescribeStreamNotifierRequest, StartWorkflowExecutionRequest,
+                TerminateWorkflowExecutionRequest,
+            },
+        };
+        let Ok(server) = std::env::var("STREAMS_NOTIFIER_SERVER") else {
+            eprintln!("set STREAMS_NOTIFIER_SERVER to run the live notifier test");
+            return;
+        };
+        let connection = Connection::connect(
+            temporalio_client::ConnectionOptions::new(url::Url::parse(&server).unwrap()).build(),
+        )
+        .await
+        .unwrap();
+        // No Worker polls either Workflow, so the owner's stream stays open and the reader's
+        // wakes stay pending.
+        let mut runs = vec![];
+        for role in ["owner", "reader"] {
+            let workflow_id = format!("cn-idle-{role}-{}", uuid::Uuid::new_v4());
+            let started = connection
+                .workflow_service()
+                .start_workflow_execution(
+                    StartWorkflowExecutionRequest {
+                        namespace: "default".to_string(),
+                        workflow_id: workflow_id.clone(),
+                        workflow_type: Some(WorkflowType {
+                            name: role.to_string(),
+                        }),
+                        task_queue: Some(TaskQueue {
+                            name: "cn-notifier-nobody".to_string(),
+                            ..Default::default()
+                        }),
+                        request_id: uuid::Uuid::new_v4().to_string(),
+                        ..Default::default()
+                    }
+                    .into_request(),
+                )
+                .await
+                .unwrap()
+                .into_inner();
+            runs.push(WorkflowExecution {
+                workflow_id,
+                run_id: started.run_id,
+            });
+        }
+        let (owner, reader) = (runs[0].clone(), runs[1].clone());
+        let service = connect_stream_service(
+            proto::StreamStoreConfig {
+                store: Some(proto::stream_store_config::Store::Memory(
+                    proto::MemoryStoreConfig::default(),
+                )),
+                notify_on_append: true,
+                ..Default::default()
+            },
+            connection.clone(),
+            None,
+        )
+        .await
+        .unwrap();
+        let stream = proto::StreamAddress {
+            namespace: "default".to_string(),
+            owner_kind: proto::StreamOwnerKind::Workflow as i32,
+            workflow_id: owner.workflow_id.clone(),
+            topic: "tokens".to_string(),
+            ..Default::default()
+        };
+        let read = |after: String| {
+            let request = proto::ReadRequest {
+                stream: Some(stream.clone()),
+                after,
+                subscriber: Some(proto::ReadSubscriber {
+                    workflow_id: reader.workflow_id.clone(),
+                    run_id: reader.run_id.clone(),
+                    subscription_id: "1".to_string(),
+                    generation: 0,
+                }),
+                ..Default::default()
+            };
+            let service = service.clone();
+            async move {
+                proto::ReadResponse::decode(
+                    service
+                        .call("Read", &request.encode_to_vec())
+                        .await
+                        .unwrap()
+                        .as_slice(),
+                )
+                .unwrap()
+            }
+        };
+        let append = |sequence: i64| {
+            let request = record_append(&stream, sequence);
+            let service = service.clone();
+            async move {
+                service
+                    .call("Append", &request.encode_to_vec())
+                    .await
+                    .unwrap();
+            }
+        };
+        let delivered = || async {
+            let described = connection
+                .workflow_service()
+                .describe_stream_notifier(
+                    DescribeStreamNotifierRequest {
+                        namespace: "default".to_string(),
+                        stream_ref: Some(StreamReference {
+                            owner_kind: StreamOwnerKind::Workflow as i32,
+                            workflow_id: owner.workflow_id.clone(),
+                            run_id: owner.run_id.clone(),
+                            topic: "tokens".to_string(),
+                            ..Default::default()
+                        }),
+                    }
+                    .into_request(),
+                )
+                .await
+                .unwrap()
+                .into_inner();
+            let [callback] = described.callbacks.as_slice() else {
+                panic!("one callback, not {:?}", described.callbacks);
+            };
+            assert_eq!(
+                callback.workflow_target.as_ref().unwrap().workflow_id,
+                reader.workflow_id
+            );
+            callback.delivered_counter
+        };
+        let delivered_reaches = |counter: i64| async move {
+            for _ in 0..100 {
+                if delivered().await >= counter {
+                    return;
+                }
+                tokio::time::sleep(Duration::from_millis(100)).await;
+            }
+            panic!("no wake after counter {counter}");
+        };
+        // A debounce window is one second, so a wake that is not sent by then is held.
+        let settle = || tokio::time::sleep(Duration::from_secs(3));
+
+        let empty = read(String::new()).await;
+        assert!(empty.records.is_empty() && !empty.done);
+        assert_eq!(delivered().await, 0, "an idle attach wakes nothing");
+        append(1).await;
+        delivered_reaches(1).await;
+        append(2).await;
+        settle().await;
+        assert_eq!(delivered().await, 1, "the wait was used up");
+
+        let busy = read(empty.cursor).await;
+        assert_eq!(busy.records.len(), 2);
+        let idle = read(busy.cursor).await;
+        assert!(idle.records.is_empty());
+        assert_eq!(idle.wake_after, 2);
+        settle().await;
+        assert_eq!(delivered().await, 1, "a wait at the counter wakes nothing");
+        append(3).await;
+        delivered_reaches(3).await;
+
+        for run in [owner, reader] {
+            connection
+                .workflow_service()
+                .terminate_workflow_execution(
+                    TerminateWorkflowExecutionRequest {
+                        namespace: "default".to_string(),
+                        workflow_execution: Some(run),
+                        ..Default::default()
+                    }
+                    .into_request(),
+                )
+                .await
+                .unwrap();
+        }
     }
 
     fn event(event_id: i64, attributes: history_event::Attributes) -> HistoryEvent {

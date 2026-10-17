@@ -95,6 +95,8 @@ tokio = { version = "1.47", features = [
     "test-util",
     "time",
 ] }
+url = "2.5"
+uuid = { version = "1.18", default-features = false, features = ["v4"] }
 
 [lints]
 workspace = true
