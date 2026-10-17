@@ -752,7 +752,7 @@ fn producer_key(owner: OwnerKey, producer_id: &str, attempt: i64) -> ProducerKey
 }
 
 fn check_topic(topic: &str) -> StreamResult<()> {
-    temporalio_common::streams::check_topic(topic).map_err(StreamError::invalid_argument)
+    crate::check_topic(topic).map_err(StreamError::invalid_argument)
 }
 
 fn unix_ms() -> u64 {
@@ -1097,11 +1097,7 @@ mod tests {
         for (request, expected) in cases {
             assert_eq!(kind(setup.streams.append(request).await), expected);
         }
-        for topic in [
-            "",
-            "a\u{1f}b",
-            &"t".repeat(temporalio_common::streams::MAX_TOPIC_BYTES + 1),
-        ] {
+        for topic in ["", "a\u{1f}b", &"t".repeat(crate::MAX_TOPIC_BYTES + 1)] {
             let request = AppendRequest {
                 stream: Some(stream(topic)),
                 ..append("p", 1, "1")

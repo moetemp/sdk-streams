@@ -1,13 +1,11 @@
 //! Building the records a store keeps, and naming who wrote them.
 
 use crate::{
-    Capabilities, StreamError, StreamResult,
+    CONTENT_HASH_KEY, Capabilities, METADATA_ENCODING, StreamError, StreamResult,
+    content_hash_text,
     proto::{ActivityProducer, AppendRecord, StreamRecord, StreamRecordKind},
 };
-use temporalio_common::{
-    protos::temporal::api::common::v1::Payload,
-    streams::{CONTENT_HASH_KEY, METADATA_ENCODING, content_hash_text},
-};
+use temporalio_common::protos::temporal::api::common::v1::Payload;
 
 /// The owner kind a Workflow's streams hash under in their cursors.
 pub const WORKFLOW_OWNER_KIND: &str = "workflow";

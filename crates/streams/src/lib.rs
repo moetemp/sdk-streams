@@ -5,15 +5,17 @@
 //! A stream is a topic of a Workflow, kept in a store outside Temporal and keyed by the
 //! Workflow's run chain. This crate holds what every store and every SDK share: the
 //! [StreamStore] trait a store implements, the cursor format, the record helpers that stamp
-//! records, and the error every call fails with. Lang reaches a store through Core's
-//! `StreamService`, and Core's Worker appends a Workflow's own output through the same trait.
+//! records, and the error every call fails with. Lang reaches a store through the crate's
+//! [StreamService].
 
 mod close;
+mod conventions;
 mod cursor;
 mod error;
 mod handle;
 mod memory;
 mod owner;
+pub mod protos;
 mod reader;
 mod record;
 #[cfg(feature = "redis")]
@@ -24,6 +26,9 @@ mod store;
 #[cfg(feature = "redis")]
 pub use self::redis::{RedisStore, RedisStoreOptions};
 pub use close::{CHAIN_LOG, append_batch, close_chain, close_topic};
+pub use conventions::{
+    CONTENT_HASH_KEY, MAX_TOPIC_BYTES, METADATA_ENCODING, check_topic, content_hash_text,
+};
 pub use cursor::{BEGINNING, END, cursor_position, mint_cursor, stream_hash};
 pub use error::{StreamError, StreamResult};
 pub use handle::{OWNER_RECHECK, OWNER_START_GRACE, Streams, StreamsOptions};
@@ -42,7 +47,7 @@ pub use store::{Capabilities, ConditionForms, MAX_BATCH_BYTES, MAX_RECORD_BYTES,
 
 /// The protos stores and lang exchange.
 pub mod proto {
-    pub use temporalio_common::protos::{
+    pub use crate::protos::{
         coresdk::streams::*,
         temporal::sdk::streams::v1::{StreamRecord, StreamRecordKind},
     };

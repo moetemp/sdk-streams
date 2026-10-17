@@ -236,6 +236,7 @@ fn options() -> StreamsOptions {
 /// memory with only the log, and Redis in plain mode when `STREAMS_REDIS_URL` is set.
 async fn stores() -> Vec<(&'static str, Arc<dyn StreamStore>)> {
     let full = MemoryStore::new().capabilities();
+    #[cfg_attr(not(feature = "redis"), allow(unused_mut))]
     let mut stores: Vec<(&'static str, Arc<dyn StreamStore>)> = vec![
         ("memory", Arc::new(MemoryStore::new())),
         (

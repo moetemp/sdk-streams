@@ -5,14 +5,20 @@ edition = "2024"
 rust-version = "1.88.0"
 authors = ["Temporal Technologies Inc. <sdk@temporal.io>"]
 license-file = { workspace = true }
-description = "Stream stores for Temporal Workflows: the store trait, cursors and record helpers"
+description = "The stream runtime for Temporal SDKs: the store trait, stores and record helpers"
 homepage = "https://temporal.io/"
-repository = "https://github.com/temporalio/sdk-rust"
+repository = "https://github.com/moetemp/sdk-streams"
 keywords = ["temporal", "workflow", "streams"]
 categories = ["development-tools"]
 
 [features]
-default = []
+default = ["envconfig", "tls-ring"]
+# The TLS providers and the config loader of the sdk-rust crates. A FIPS build takes
+# `tls-aws-lc` with no default features, so no crate in the build pulls `ring`.
+tls-ring = ["temporalio-common/tls-ring"]
+tls-aws-lc = ["temporalio-common/tls-aws-lc"]
+envconfig = ["temporalio-common/envconfig"]
+serde_serialize = ["dep:serde", "temporalio-common/serde_serialize"]
 # The Redis store. Off by default, so a build that needs only the trait takes no Redis client.
 # TLS uses the rustls provider the process installs, the same one Core uses.
 redis = ["dep:redis", "dep:crc16"]
@@ -21,6 +27,7 @@ redis = ["dep:redis", "dep:crc16"]
 async-trait = "0.1"
 crc16 = { version = "0.4", optional = true }
 prost = { workspace = true }
+prost-types = { workspace = true }
 redis = { version = "1.7", optional = true, default-features = false, features = [
     "cluster-async",
     "connection-manager",
@@ -28,15 +35,15 @@ redis = { version = "1.7", optional = true, default-features = false, features =
     "streams",
     "tokio-rustls-comp",
 ] }
+serde = { workspace = true, optional = true }
 sha2 = "0.10"
+temporalio-common = { workspace = true }
 thiserror = { workspace = true }
 tokio = { version = "1.47", default-features = false, features = ["sync", "time"] }
 tracing = "0.1"
 
-[dependencies.temporalio-common]
-path = "../common"
-version = "~1.1.0"
-default-features = false
+[build-dependencies]
+tonic-prost-build = { workspace = true }
 
 [dev-dependencies]
 serde_json = { workspace = true }

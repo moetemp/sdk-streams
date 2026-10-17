@@ -1,0 +1,371 @@
+syntax = "proto3";
+
+package coresdk.streams;
+option ruby_package = "Temporalio::Internal::Bridge::Api::Streams";
+
+import "google/protobuf/duration.proto";
+import "temporal/api/common/v1/message.proto";
+import "temporal/sdk/streams/v1/message.proto";
+
+// The stream calls lang makes, served in process by Core against the configured store.
+//
+// Lang converts each value, hashes it and runs the payload codec before an append, and decodes
+// each body after a read, so Core only ever moves encoded bodies. Every failure crosses as a
+// `StreamFailure`.
+service StreamService {
+  // Appends one batch for one producer attempt. The batch lands whole and in order.
+  rpc Append(AppendRequest) returns (AppendResponse);
+  // Reads the records after a cursor, waiting up to `wait` for one when none is there.
+  rpc Read(ReadRequest) returns (ReadResponse);
+  // The cursor of the newest record of a stream.
+  rpc Latest(LatestRequest) returns (LatestResponse);
+  // Closes one stream. Later appends from producers are refused, and reads end once they have
+  // delivered what the stream holds.
+  rpc Close(CloseRequest) returns (CloseResponse);
+  // Deletes every stream of one owner.
+  rpc DeleteOwner(DeleteOwnerRequest) returns (DeleteOwnerResponse);
+  // Drops the dedupe state of one producer attempt on one stream. Safe only once the attempt's
+  // last append returned, since a retry of that append would then land twice.
+  rpc RetireProducer(RetireProducerRequest) returns (RetireProducerResponse);
+  // What the store can do beyond the log every store gives, and its limits.
+  rpc DescribeStore(DescribeStoreRequest) returns (DescribeStoreResponse);
+}
+
+// Which store holds a process's streams, and how to reach it. Lang builds one store from it and
+// sends its stream calls there.
+message StreamStoreConfig {
+  oneof store {
+    RedisStoreConfig redis = 1;
+    MemoryStoreConfig memory = 2;
+  }
+  // How long a read waits for a Workflow that Temporal doesn't know yet, counted from the read's
+  // first owner check. Until then the read answers empty, so a reader can start before its
+  // owner does. After it the read fails as NOT_FOUND. Unset waits 60 seconds, and zero fails at
+  // once.
+  google.protobuf.Duration owner_start_grace = 6;
+}
+
+// Streams in a Redis or Redis Cluster that Core connects to itself.
+message RedisStoreConfig {
+  // One `redis://` or `rediss://` URL, or the seed nodes of a cluster. Credentials and TLS come
+  // from the URL.
+  repeated string urls = 1;
+  bool cluster = 2;
+  // Prepended to every key, so streams can share a Redis with other data and an ACL can scope
+  // them. Empty uses `temporal-streams`.
+  string key_prefix = 3;
+  // How long a stream keeps a record. Unset keeps seven days.
+  google.protobuf.Duration retention = 4;
+  // How many reads may wait on one node at once, each on a connection of its own. Zero uses the
+  // default.
+  uint32 blocking_reads_per_node = 5;
+  // How long a short call waits for its reply. Unset uses the default.
+  google.protobuf.Duration response_timeout = 6;
+  // Runs with no Lua, so the store keeps no producer state and no last position, and Core takes
+  // their fallbacks. For tests of the fallbacks on a real store.
+  bool plain = 10;
+}
+
+// Streams in this process's memory, for tests and local development. Nothing survives the
+// process, and each connect makes a store of its own that shares no streams with another.
+message MemoryStoreConfig {
+  // A mask. Only the capabilities it sets stay, and its nonzero limits replace the store's.
+  // Unset keeps every capability, so tests and users can try the weaker guarantees.
+  StoreCapabilities capabilities = 1;
+}
+
+// What owns a stream. The owner decides when the stream closes.
+enum StreamOwnerKind {
+  STREAM_OWNER_KIND_UNSPECIFIED = 0;
+  STREAM_OWNER_KIND_WORKFLOW = 1;
+}
+
+// One stream, a topic of an owner in a namespace.
+message StreamAddress {
+  string namespace = 1;
+  StreamOwnerKind owner_kind = 2;
+  string workflow_id = 3;
+  // Pins the stream to the run chain that holds this run. Empty follows the chain that holds the
+  // Workflow id when the call starts.
+  string run_id = 4;
+  string topic = 5;
+}
+
+// A Workflow's run chain. Its streams are keyed by its first run, so they follow
+// Continue-as-New, and a new chain on the same Workflow id gets streams of its own.
+message ChainId {
+  string namespace = 1;
+  string workflow_id = 2;
+  string first_run_id = 3;
+}
+
+// A producer that names itself.
+message NamedProducer {
+  string producer_id = 1;
+  // A process that restarts its work raises the attempt, which starts a new sequence and tells
+  // readers that the earlier attempt's records are superseded. From one.
+  int64 attempt = 2;
+}
+
+// An Activity attempt that writes. Core derives the producer id from it, so every SDK writes the
+// same one, and the attempt is the Activity's.
+message ActivityProducer {
+  string workflow_id = 1;
+  string run_id = 2;
+  string activity_id = 3;
+  int32 attempt = 4;
+}
+
+// One record lang appends.
+message AppendRecord {
+  temporal.sdk.streams.v1.StreamRecordKind kind = 1;
+  // Set on DATA only, after lang's payload codec and external storage.
+  temporal.api.common.v1.Payload body = 2;
+  // The SHA-256 of the body as the payload converter made it, before the codec. A codec that
+  // encrypts with a fresh nonce makes a retry's bytes differ, so a retry is recognized by this.
+  // Empty when there is no body.
+  bytes content_hash = 3;
+}
+
+message AppendRequest {
+  StreamAddress stream = 1;
+  oneof producer {
+    NamedProducer named = 2;
+    ActivityProducer activity = 3;
+  }
+  // The first record's position within the producer attempt, from one.
+  int64 sequence = 4;
+  repeated AppendRecord records = 5;
+  // The batch's identity, which the store compares when the producer repeats its newest batch.
+  // Lang takes it before the codec, as the SHA-256 over each converted record as its length in 8
+  // bytes big-endian, then its deterministic serialization. Deterministic serialization is stable
+  // within one protobuf library only, so only the SDK that made a digest can repeat the batch and
+  // dedupe. Another SDK's retry of the same batch fails as PRODUCER_DIVERGENT. Required.
+  bytes digest = 6;
+}
+
+message AppendResponse {
+  // The cursors of the batch's first and last records. A retry of the attempt's newest batch
+  // answers with the cursors the batch got the first time.
+  string first_cursor = 1;
+  string last_cursor = 2;
+}
+
+message ReadRequest {
+  StreamAddress stream = 1;
+  // Read strictly after this cursor. Empty starts at the oldest record the stream retains, and
+  // `$end` at whatever is appended after the read starts.
+  string after = 2;
+  // How long to wait for a record when none is there. Zero answers at once. Core waits at most
+  // 60 seconds, the stream service contract's long-poll maximum.
+  google.protobuf.Duration wait = 3;
+  // How many stored records one answer holds at most. A synthesized supersession comes on top.
+  // Zero lets Core choose. Core answers with at most 1,000 records.
+  uint32 max_records = 4;
+  // The `state` of the previous answer of the same read. Empty on its first call.
+  bytes state = 5;
+}
+
+// A later attempt of a producer started writing. Readers synthesize it, and no store holds it.
+message Supersession {
+  string topic = 1;
+  string producer_id = 2;
+  int64 previous_attempt = 3;
+  int64 attempt = 4;
+}
+
+message ReadRecord {
+  // Hand this back as `after` to resume strictly past this record. A supersession carries the
+  // cursor before the record that started the new attempt.
+  string cursor = 1;
+  oneof record {
+    // As stored. Its body is still encoded.
+    temporal.sdk.streams.v1.StreamRecord stored = 2;
+    Supersession superseded = 3;
+  }
+  // An older attempt wrote it after this read delivered a newer attempt of the same producer.
+  bool stale = 4;
+}
+
+message ReadResponse {
+  repeated ReadRecord records = 1;
+  // Where the next call resumes. Past the last record of this answer, or the request's cursor
+  // when the answer is empty, with `$end` resolved.
+  string cursor = 2;
+  // Opaque to lang. Pass it to the next call of the same read, so attempts it has seen, the trim
+  // watermark and the owner check carry over.
+  bytes state = 3;
+  // The owner's chain ended and the read delivered every record the stream retains. No later
+  // call returns a record.
+  bool done = 4;
+}
+
+message LatestRequest {
+  StreamAddress stream = 1;
+}
+
+message LatestResponse {
+  // Empty when the stream holds no record.
+  string cursor = 1;
+}
+
+message CloseRequest {
+  StreamAddress stream = 1;
+}
+
+message CloseResponse {}
+
+message DeleteOwnerRequest {
+  string namespace = 1;
+  StreamOwnerKind owner_kind = 2;
+  string workflow_id = 3;
+}
+
+message DeleteOwnerResponse {
+  // How much the delete removed, counted the store's own way, such as Redis keys. Only zero
+  // means the same on every store: nothing was left to delete.
+  uint64 deleted = 1;
+}
+
+message RetireProducerRequest {
+  StreamAddress stream = 1;
+  // The producer attempt whose dedupe state goes. Nothing it wrote is touched.
+  oneof producer {
+    NamedProducer named = 2;
+    ActivityProducer activity = 3;
+  }
+}
+
+// A producer attempt with no dedupe state left, or a stream that holds nothing, answers the same.
+message RetireProducerResponse {}
+
+message DescribeStoreRequest {}
+
+message DescribeStoreResponse {
+  // The short name the store mints into its cursors, such as `redis` or `memory`.
+  string name = 1;
+  StoreCapabilities capabilities = 2;
+}
+
+// What a store can do beyond the log every store gives. Core takes a fallback for each
+// capability the store lacks, with the weaker guarantee the fallback names.
+message StoreCapabilities {
+  // The append checks the producer attempt's dedupe entry and the close flags in the same step.
+  bool producer_state = 1;
+  // The append can fail unless the log's next position is the expected one.
+  bool conditional_tail = 2;
+  // The append can fail unless the stream's fence token is the expected one.
+  bool conditional_fence = 3;
+  // The store knows a topic's newest position after retention dropped every record.
+  bool kept_last = 4;
+  // A holder can keep records from retention.
+  bool holds = 5;
+  // One consumer can read every append in order.
+  bool change_feed = 6;
+  // A log per topic of each chain costs nothing much.
+  bool cheap_logs = 7;
+  // The store deletes every stream of one owner.
+  bool delete_owner = 8;
+  // The store lists the topics of one chain.
+  bool topic_listing = 9;
+  // A read can wait for the next record.
+  bool long_poll = 10;
+  // The next record's position is always the last one plus one.
+  bool dense_positions = 11;
+  // How long the store keeps records with no hold, when a positions-only reader can count on it.
+  google.protobuf.Duration replay_horizon = 12;
+  // The largest record the store takes, with its envelope.
+  uint64 max_record_bytes = 13;
+  // The most record bytes one append takes.
+  uint64 max_batch_bytes = 14;
+}
+
+// One class per way a stream call can fail, so every lang maps the same failure to the same
+// error.
+enum StreamFailureKind {
+  STREAM_FAILURE_KIND_UNSPECIFIED = 0;
+  // The sequence was already written with different content.
+  STREAM_FAILURE_KIND_PRODUCER_DIVERGENT = 1;
+  // The sequence is below the next one the store expects for this producer attempt.
+  STREAM_FAILURE_KIND_PRODUCER_STALE = 2;
+  // The append may or may not have landed. Retrying the same batch is safe.
+  STREAM_FAILURE_KIND_OUTCOME_UNKNOWN = 3;
+  // The store refused the write, so nothing was written.
+  STREAM_FAILURE_KIND_REFUSED = 4;
+  // The stream is closed and refuses appends.
+  STREAM_FAILURE_KIND_CLOSED = 5;
+  // The cursor is not valid for this stream.
+  STREAM_FAILURE_KIND_CURSOR = 6;
+  // The cursor names a record the store no longer retains.
+  STREAM_FAILURE_KIND_EXPIRED = 7;
+  // The owner does not exist, or nothing is known about the stream.
+  STREAM_FAILURE_KIND_NOT_FOUND = 8;
+  // A stored record could not be read.
+  STREAM_FAILURE_KIND_RECORD = 9;
+  // The store failed or could not be reached.
+  STREAM_FAILURE_KIND_STORAGE = 10;
+  // This release or this store does not offer the capability.
+  STREAM_FAILURE_KIND_UNSUPPORTED = 11;
+  // The call's input breaks the contract, such as a missing member or a value out of range, so
+  // the same call fails the same way. A lang built before this kind maps it, as any kind it
+  // doesn't know, to a storage failure.
+  STREAM_FAILURE_KIND_INVALID_ARGUMENT = 12;
+}
+
+message StreamFailure {
+  StreamFailureKind kind = 1;
+  string message = 2;
+  // The cursor of the record that failed, for RECORD.
+  string cursor = 3;
+}
+
+// The calls below are what Core asks of a store, below owner checks, cursors and supersession.
+// They name chains and store positions, not addresses and cursors.
+
+message StoreAppendRequest {
+  ChainId chain = 1;
+  string topic = 2;
+  string producer_id = 3;
+  int64 attempt = 4;
+  int64 sequence = 5;
+  // The batch's fingerprint, compared on a retry of the attempt's newest batch.
+  bytes digest = 6;
+  // Serialized `temporal.sdk.streams.v1.StreamRecord`s, ready to store.
+  repeated bytes records = 7;
+}
+
+message StoreAppendResponse {
+  string first_position = 1;
+  string last_position = 2;
+}
+
+message StoreReadRequest {
+  ChainId chain = 1;
+  string topic = 2;
+  // Read strictly after this position. Empty starts at the oldest retained record.
+  string after_position = 3;
+  google.protobuf.Duration wait = 4;
+  uint32 max_records = 5;
+}
+
+message StoredRecord {
+  string position = 1;
+  // A serialized `temporal.sdk.streams.v1.StreamRecord`.
+  bytes record = 2;
+}
+
+message StoreReadResponse {
+  repeated StoredRecord records = 1;
+  // The chain or this topic is marked closed.
+  bool closed = 2;
+}
+
+message StoreLatestRequest {
+  ChainId chain = 1;
+  string topic = 2;
+}
+
+message StoreLatestResponse {
+  // Empty when the topic holds no record.
+  string position = 1;
+}
