@@ -17,6 +17,9 @@ use crate::{
         SubscribeResponse, UnsubscribeRequest, UnsubscribeResponse, WaitForNotificationRequest,
         WaitForNotificationResponse,
     },
+    protos::temporal::api::workflowservice::v1::{
+        DescribeStreamNotifierRequest, DescribeStreamNotifierResponse,
+    },
 };
 use std::{
     sync::{
@@ -106,6 +109,24 @@ fn check_subscription(run_id: &str, subscription_id: &str) -> StreamResult<()> {
         )));
     }
     Ok(())
+}
+
+impl Subscriptions {
+    /// Describes a stream's notifier through the notifier client.
+    pub(crate) async fn describe_notifier(
+        &self,
+        request: DescribeStreamNotifierRequest,
+    ) -> StreamResult<DescribeStreamNotifierResponse> {
+        let Some(client) = &self.client else {
+            return Err(StreamError::unsupported(
+                "this stream service has no notifier client to describe a notifier with",
+            ));
+        };
+        client
+            .describe_notifier(request)
+            .await
+            .map_err(subscribe_error)
+    }
 }
 
 fn subscribe_error(error: NotifyError) -> StreamError {

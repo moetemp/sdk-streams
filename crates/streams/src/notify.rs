@@ -3,6 +3,9 @@
 //! The notifier holds the callbacks of the readers that wait on the stream. A notification is a
 //! hint that there is something new to read. The records stay on the read path.
 
+use crate::protos::temporal::api::workflowservice::v1::{
+    DescribeStreamNotifierRequest, DescribeStreamNotifierResponse,
+};
 use crate::{
     CloseOutcome, StreamResult, StreamStore, chain_owner, mint_cursor,
     proto::{
@@ -181,6 +184,17 @@ pub trait NotifierClient: Send + Sync {
         let _ = (chain, topic, request_id);
         Err(NotifyError::Unsupported(
             "this client can't detach readers".to_string(),
+        ))
+    }
+
+    /// Describes a stream's notifier, as the server's `DescribeStreamNotifier` answers.
+    async fn describe_notifier(
+        &self,
+        request: DescribeStreamNotifierRequest,
+    ) -> Result<DescribeStreamNotifierResponse, NotifyError> {
+        let _ = request;
+        Err(NotifyError::Unsupported(
+            "this client can't describe a notifier".to_string(),
         ))
     }
 

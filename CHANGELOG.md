@@ -36,3 +36,6 @@
   `moetemp/api` `c1a8d975`, since sdk-rust no longer vendors it. It builds on sdk-rust kj5.
 - The notifier client calls the stream notifier RPCs by method path through
   `Connection::raw_unary`, with the namespace header, since sdk-rust lists none of them.
+- The stream API copy is a plain copy of `moetemp/api` `9d888ec4`, where the notifier RPC
+  messages have their own `stream_request_response.proto`.
+- `StreamService` serves `DescribeStreamNotifier` through the notifier client.

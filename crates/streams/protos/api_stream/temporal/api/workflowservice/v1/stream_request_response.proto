@@ -1,10 +1,16 @@
-// The request and response messages of the stream notifier RPCs, cut from
-// temporal/api/workflowservice/v1/request_response.proto by scripts/sync-stream-api.sh.
 syntax = "proto3";
 
 package temporal.api.workflowservice.v1;
 
+option go_package = "go.temporal.io/api/workflowservice/v1;workflowservice";
+option java_package = "io.temporal.api.workflowservice.v1";
+option java_multiple_files = true;
+option java_outer_classname = "StreamRequestResponseProto";
+option ruby_package = "Temporalio::Api::WorkflowService::V1";
+option csharp_namespace = "Temporalio.Api.WorkflowService.V1";
+
 import "google/protobuf/timestamp.proto";
+
 import "temporal/api/common/v1/message.proto";
 import "temporal/api/failure/v1/message.proto";
 import "temporal/api/stream/v1/message.proto";
