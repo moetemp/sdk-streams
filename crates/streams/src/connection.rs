@@ -17,6 +17,9 @@ use crate::{
             PollStreamNotifierRequest, PollStreamNotifierResponse, WaitStreamCallbackRequest,
             WaitStreamCallbackResponse,
         },
+        workflowservice::v1::{
+            ExecuteSyncNexusOperationRequest, ExecuteSyncNexusOperationResponse,
+        },
     },
 };
 use prost::Message;
@@ -40,8 +43,8 @@ use temporalio_common::{
 };
 use tonic::IntoRequest;
 
-/// The method paths of the stream notifier RPCs. sdk-rust lists none of them, so the crate calls
-/// each one by its path.
+/// The method paths of the stream notifier RPCs and the sync Nexus call. sdk-rust lists none of
+/// them, so the crate calls each one by its path.
 mod method {
     macro_rules! path {
         ($name:ident, $rpc:literal) => {
@@ -56,14 +59,14 @@ mod method {
     path!(NOTIFY_MANY, "NotifyStreams");
     path!(POLL, "PollStreamNotifier");
     path!(DESCRIBE, "DescribeStreamNotifier");
+    path!(EXECUTE_SYNC_NEXUS, "ExecuteSyncNexusOperation");
 }
 
 /// How long a notifier poll may wait, as the client gives its own long polls. The server answers
 /// at its own wait limit before that.
 const POLL_TIMEOUT: Duration = Duration::from_secs(70);
 
-/// Calls the stream notifier RPC at `method` through `connection`, with its TLS, API key, headers
-/// and retries. The namespace header routes the call, as the client's own RPCs do.
+/// Calls the RPC at `method` through `connection`, with its TLS, API key, headers and retries. The namespace header routes the call, as the client's own RPCs do.
 async fn notifier_call<Resp: Message + Default>(
     connection: &Connection,
     method: &'static str,
@@ -86,6 +89,25 @@ async fn notifier_call<Resp: Message + Default>(
             "The server's answer to {method} did not decode: {error}"
         ))
     })
+}
+
+/// Runs one synchronous Nexus operation through `connection`'s server and answers with its result
+/// or its failure. sdk-rust lists no stub for the RPC, so the call goes by its method path, with
+/// the namespace header. The server persists nothing and does not retry, so neither does this
+/// call past the connection's own retry of a call that never reached the server.
+pub async fn execute_sync_nexus_operation(
+    connection: &Connection,
+    request: ExecuteSyncNexusOperationRequest,
+) -> Result<ExecuteSyncNexusOperationResponse, tonic::Status> {
+    let namespace = request.namespace.clone();
+    notifier_call(
+        connection,
+        method::EXECUTE_SYNC_NEXUS,
+        &namespace,
+        request,
+        None,
+    )
+    .await
 }
 
 /// Connects to the store `config` names. The service asks `connection`'s server about streams'
@@ -1260,6 +1282,61 @@ mod tests {
             matches!(refused, NotifyError::Refused(_)),
             "a refusal is final: {refused:?}"
         );
+    }
+
+    #[tokio::test]
+    async fn a_sync_nexus_call_goes_by_its_path_and_answers_the_outcome() {
+        use crate::protos::temporal::api::workflowservice::v1::{
+            execute_sync_nexus_operation_response::Outcome,
+        };
+        use temporalio_common::protos::temporal::api::common::v1::Payload;
+        let (client, seen) = served(|request| match request.rpc.as_str() {
+            "ExecuteSyncNexusOperation" if request.headers["temporal-namespace"] == "ns" => {
+                Ok(ExecuteSyncNexusOperationResponse {
+                    outcome: Some(Outcome::Result(Payload {
+                        data: b"done".to_vec(),
+                        ..Default::default()
+                    })),
+                }
+                .encode_to_vec())
+            }
+            _ => Err(tonic::Status::permission_denied("not this namespace")),
+        })
+        .await;
+        let call = |namespace: &str| ExecuteSyncNexusOperationRequest {
+            namespace: namespace.to_string(),
+            request_id: "call-1".to_string(),
+            endpoint: "streams".to_string(),
+            service: "temporal.streams.v1.StreamService".to_string(),
+            operation: "read".to_string(),
+            ..Default::default()
+        };
+        let answer = execute_sync_nexus_operation(&client.connection, call("ns"))
+            .await
+            .unwrap();
+        let Some(Outcome::Result(result)) = answer.outcome else {
+            panic!("a result, not {answer:?}");
+        };
+        assert_eq!(result.data, b"done");
+        {
+            let seen = seen.lock().unwrap();
+            let [sent] = seen.as_slice() else {
+                panic!("one call, not {seen:?}");
+            };
+            assert_eq!(
+                (sent.service.as_str(), sent.rpc.as_str()),
+                (
+                    "temporal.api.workflowservice.v1.WorkflowService",
+                    "ExecuteSyncNexusOperation"
+                )
+            );
+            let request = ExecuteSyncNexusOperationRequest::decode(sent.proto.clone()).unwrap();
+            assert_eq!(request, call("ns"));
+        }
+        let refused = execute_sync_nexus_operation(&client.connection, call("other"))
+            .await
+            .unwrap_err();
+        assert_eq!(refused.code(), tonic::Code::PermissionDenied);
     }
 
     #[tokio::test]

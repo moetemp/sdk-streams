@@ -48,3 +48,8 @@
   stream API copy moves to the same commit, with no file change.
 - CI checks that the crate's API copies share no file path and no full name with the API that
   the pinned sdk-rust vendors.
+- The notifier client attaches stream operation callers through `AttachStreamCallback` by method
+  path.
+- Added `execute_sync_nexus_operation`, which calls `ExecuteSyncNexusOperation` by method path
+  with the namespace header. The client-side payload size check of the typed client does not
+  run on this path. The server still checks sizes.

@@ -46,7 +46,7 @@ pub use self::redis::{DEFAULT_NOTIFY_DOORBELLS, RedisStore, RedisStoreOptions};
 pub use archive::ObjectStoreArchive;
 pub use archive::{ArchiveProgress, LocalFileArchive, SegmentLimits, StreamArchive, archive_topic};
 pub use close::{CHAIN_LOG, append_batch, close_chain, close_topic};
-pub use connection::connect_stream_service;
+pub use connection::{connect_stream_service, execute_sync_nexus_operation};
 pub use conventions::{
     CONTENT_HASH_KEY, MAX_LINK_NAME_BYTES, MAX_TOPIC_BYTES, METADATA_ENCODING, check_link,
     check_topic, content_hash_text,
