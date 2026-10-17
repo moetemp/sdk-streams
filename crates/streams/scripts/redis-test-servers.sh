@@ -8,7 +8,8 @@
 set -euo pipefail
 
 STANDALONE=${STREAMS_STANDALONE_PORT:-6384}
-CLUSTER=(7101 7102 7103)
+# Three ports for the cluster primaries, so lanes on one host can each run their own.
+read -r -a CLUSTER <<<"${STREAMS_CLUSTER_PORTS:-7101 7102 7103}"
 DATA=${STREAMS_REDIS_DATA:-${TMPDIR:-/tmp}/streams-redis}
 mkdir -p "$DATA"
 
