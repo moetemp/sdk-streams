@@ -15,6 +15,7 @@ the crate.
 | Stage | sdk-streams branch | sdk-rust commit |
 |---|---|---|
 | Brook | `moe/brook/ss1-import-store` and up | `moe/brook/k1-workflow-task-info` `4ebdacab` |
+| Jetty | `moe/jetty/sj1-import-jetty` and up | `moe/jetty/kj3-early-task-heartbeat` `969a0883` |
 
 ## Linking from a lang bridge
 
@@ -28,7 +29,7 @@ two copies of each type.
 git = "https://github.com/moetemp/sdk-streams"
 rev = "<sha>"
 default-features = false
-features = ["redis"]
+features = ["redis", "postgres", "archive"]
 
 [patch."https://github.com/moetemp/sdk-rust"]
 temporalio-common = { path = "./sdk-core/crates/common" }
@@ -51,14 +52,19 @@ when the copy differs.
 - Memory store and Core mock tests: `cargo test --workspace --all-features`. The Core mock tests
   in `tests/core_workflow.rs` drive Core's mock Worker from the pinned sdk-rust, with the test in
   lang's place.
-- FIPS: `cargo tree -e normal,build --no-default-features --features fips,redis -i ring` prints
-  nothing.
+- FIPS: `cargo tree -e normal,build --no-default-features --features fips,redis,postgres,archive
+  -i ring` prints nothing.
 - Redis: run `crates/streams/scripts/redis-test-servers.sh`, then the test command with the two
   URLs it prints.
 
-The Redis script starts one standalone server and a cluster of three primaries. Set
-`STREAMS_STANDALONE_PORT` and `STREAMS_CLUSTER_PORTS` to use other ports. The `cross_impl` tests
-need sdk-python, so they run in the sdk-python lane.
+- PostgreSQL: `eval "$(crates/streams/scripts/postgres-test-server.sh)"` starts 14, 17 and
+  PgBouncer in Docker, then run the test command.
+- S3 archive: point `STREAMS_S3_URL` and the `AWS_*` variables at a bucket, such as one on MinIO.
+
+The Redis script starts one standalone server, a cluster of three primaries and three replicas,
+and Kvrocks when a binary or its image is there. Set `STREAMS_STANDALONE_PORT`,
+`STREAMS_CLUSTER_BASE` and `STREAMS_KVROCKS_PORT` to use other ports. The `cross_impl` tests need
+sdk-python, so they run in the sdk-python lane.
 
 ## License
 

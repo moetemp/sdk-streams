@@ -16,3 +16,7 @@
 - Read the run's History tail for the chain close, not its description. The close event must match
   the terminal command, and the task before it must be the completed one.
 - Added the Core mock tests of the Workflow publish, including the four chain-close contract cases.
+- Imported Jetty's stream runtime: links and follow reads, the PostgreSQL store, the S3 and
+  local-file archive with the stream driver, the stream notifier clients' traits, subscriptions,
+  Workflow Activity and standalone Activity owners, and the store capabilities.
+- Moved the link checks into the crate, and grew `OutputRecord` with `link` for LINK records.
