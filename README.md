@@ -36,7 +36,8 @@ temporalio-client = { path = "./sdk-core/crates/client" }
 ```
 
 The crate features `tls-ring`, `tls-aws-lc` and `envconfig` forward to the sdk-rust crates. A FIPS
-build takes `tls-aws-lc` with no default features.
+build takes `fips` with no default features. It turns on `tls-aws-lc` and the FIPS build of
+`aws-lc-rs`, which needs CMake and Go.
 
 ## Building and testing
 
@@ -48,7 +49,7 @@ when the copy differs.
 - Format and lint: `cargo fmt --all -- --check`, then
   `cargo clippy --workspace --all-features --tests -- -D warnings`.
 - Memory store: `cargo test --workspace --all-features`.
-- FIPS: `cargo tree -e normal --no-default-features --features tls-aws-lc,redis -i ring` prints
+- FIPS: `cargo tree -e normal,build --no-default-features --features fips,redis -i ring` prints
   nothing.
 - Redis: run `crates/streams/scripts/redis-test-servers.sh`, then the test command with the two
   URLs it prints.

@@ -8,3 +8,4 @@
   pinned sdk-rust.
 - Added `connect_stream_service`, which builds the process-wide service over a client
   `Connection` and takes lang's runtime meter.
+- Added the `fips` feature, which builds TLS on `aws-lc-rs` in FIPS mode with no `ring`.
