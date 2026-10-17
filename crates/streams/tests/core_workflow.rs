@@ -22,8 +22,8 @@ use temporalio_common::{
             },
             workflow_commands::{
                 ActivityCancellationType, CompleteWorkflowExecution,
-                ContinueAsNewWorkflowExecution, FailWorkflowExecution, RequestCancelLocalActivity,
-                workflow_command,
+                ContinueAsNewWorkflowExecution, FailWorkflowExecution, RequestCancelActivity,
+                RequestCancelLocalActivity, ScheduleActivity, workflow_command,
             },
             workflow_completion::WorkflowActivationCompletion,
         },
@@ -43,7 +43,7 @@ use temporalio_common::{
 };
 use temporalio_sdk_core::{
     PollError, Worker, advance_fut,
-    replay::{TestHistoryBuilder, default_wes_attribs},
+    replay::{TestHistoryBuilder, canned_histories, default_act_sched, default_wes_attribs},
     test_help::{
         MockPollCfg, MocksHolder, NAMESPACE, ResponseType, build_mock_pollers, hist_to_poll_resp,
         mock_worker, query_ok, schedule_local_activity_cmd, start_timer_cmd,
@@ -52,8 +52,9 @@ use temporalio_sdk_core::{
 use temporalio_streams::{
     STREAM_OWNER_HEADER, StreamError, StreamService, StreamStore, StreamsOptions,
     proto::{
-        OutputRecord, PublishWorkflowTaskRequest, ResolvedActivityOutcome, ResolvedOwnerActivity,
-        StreamRecordKind, WorkflowTerminalCommand,
+        ChainId, OutputRecord, PublishWorkflowTaskRequest, ResolvedActivityOutcome,
+        ResolvedOwnerActivity, StoreAppendRequest, StoreReadRequest, StoredClose, StreamOwnerKind,
+        StreamRecord, StreamRecordKind, WorkflowTerminalCommand,
     },
 };
 use tokio::sync::Notify;
@@ -1568,4 +1569,375 @@ async fn an_accepted_terminal_completion_closes_the_chain() {
     lang.shutdown().await;
     assert_eq!(store.calls(), ["append", "close_chain"]);
     assert_eq!(owner.asked.lock().len(), 1);
+}
+
+/// What a Workflow Activity's stream holds once [WORKFLOW_ID] scheduled it in `run_id`.
+fn activity_chain(run_id: &str, activity_id: &str) -> ChainId {
+    ChainId {
+        namespace: NAMESPACE.to_string(),
+        workflow_id: WORKFLOW_ID.to_string(),
+        first_run_id: run_id.to_string(),
+        owner_kind: StreamOwnerKind::WorkflowActivity as i32,
+        activity_id: activity_id.to_string(),
+    }
+}
+
+/// A `ScheduleActivity` that marks Activity `activity_id` as the owner of its streams, or not.
+fn schedule_activity(activity_id: &str, marked: bool) -> workflow_command::Variant {
+    let mut schedule = ScheduleActivity {
+        seq: 1,
+        activity_id: activity_id.to_string(),
+        cancellation_type: ActivityCancellationType::TryCancel as i32,
+        ..default_act_sched()
+    };
+    if marked {
+        schedule
+            .headers
+            .insert(STREAM_OWNER_HEADER.to_string(), Payload::default());
+    }
+    schedule.into()
+}
+
+/// Appends one record to each of `topics` of the Activity's stream, as its producer would.
+async fn activity_wrote(store: &RecordingStore, run_id: &str, activity_id: &str, topics: &[&str]) {
+    for topic in topics {
+        store
+            .inner
+            .append(StoreAppendRequest {
+                chain: Some(activity_chain(run_id, activity_id)),
+                topic: topic.to_string(),
+                producer_id: format!("{activity_id}@{run_id}"),
+                attempt: 1,
+                sequence: 1,
+                digest: vec![1; 32],
+                records: vec![b"record".to_vec()],
+            })
+            .await
+            .unwrap();
+    }
+}
+
+/// The stream closes, which the Worker shutdown waited for.
+fn activity_closes(store: &RecordingStore) -> Vec<(String, StoredClose)> {
+    store
+        .closes
+        .lock()
+        .iter()
+        .map(|(chain, topic, close)| {
+            assert_eq!(chain.owner_kind, StreamOwnerKind::WorkflowActivity as i32);
+            (topic.clone(), close.clone())
+        })
+        .collect()
+}
+
+/// Lang over `history`, in which the run's last task started at event 9.
+fn lang_for_activity(
+    history: TestHistoryBuilder,
+    batches: Vec<ResponseType>,
+    store: &Arc<RecordingStore>,
+    completions: Arc<Mutex<Vec<usize>>>,
+) -> Lang {
+    let mock = mock_appending_to(history, batches, store.clone(), completions);
+    Lang::new(
+        mock,
+        store.clone(),
+        Owner::closed_by(WorkflowExecutionStatus::Completed, Some(9)),
+    )
+}
+
+/// Runs a Workflow that schedules Activity `tool`, which writes `topics`, and completes once the
+/// Activity resolves. Returns the run id.
+async fn run_activity_owner(
+    history: TestHistoryBuilder,
+    store: &Arc<RecordingStore>,
+    marked: bool,
+    topics: &[&str],
+) -> String {
+    let lang = lang_for_activity(history, vec![1.into(), 2.into()], store, Default::default());
+    let start = lang.poll().await;
+    let run_id = start.run_id.clone();
+    activity_wrote(store, &run_id, "tool", topics).await;
+    lang.complete(&start, vec![], vec![schedule_activity("tool", marked)])
+        .await;
+    let resolved = lang.poll().await;
+    assert!(!resolved.is_replaying);
+    assert!(resolved.jobs.iter().any(|job| matches!(
+        job.variant,
+        Some(workflow_activation_job::Variant::ResolveActivity(_))
+    )));
+    lang.complete(&resolved, vec![], vec![complete_workflow()])
+        .await;
+    lang.shutdown().await;
+    run_id
+}
+
+#[tokio::test]
+async fn a_marked_activity_that_completes_closes_each_topic_it_wrote_with_an_empty_result() {
+    let store = Arc::new(RecordingStore::default());
+    let run_id = run_activity_owner(
+        canned_histories::single_activity("tool"),
+        &store,
+        true,
+        &["status", "tokens"],
+    )
+    .await;
+    let closes = activity_closes(&store);
+    assert_eq!(
+        closes
+            .iter()
+            .map(|(topic, _)| topic.as_str())
+            .collect::<Vec<_>>(),
+        ["status", "tokens"]
+    );
+    for (_, close) in &closes {
+        assert_eq!(close.result, Some(temporalio_streams::empty_close_result()));
+        assert!(close.failure.is_none());
+        assert_eq!(close.closed_by, format!("tool@{run_id}"));
+    }
+    let chain = store.closes.lock()[0].0.clone();
+    assert_eq!(chain, activity_chain(&run_id, "tool"));
+    // A reader of the stream finds the close.
+    let read = store
+        .inner
+        .read(StoreReadRequest {
+            chain: Some(chain),
+            topic: "tokens".to_string(),
+            ..Default::default()
+        })
+        .await
+        .unwrap();
+    assert!(read.closed);
+}
+
+#[tokio::test]
+async fn a_worker_shutdown_waits_for_the_activity_stream_closes() {
+    let store = Arc::new(RecordingStore {
+        close_delay: Some(Duration::from_millis(200)),
+        ..Default::default()
+    });
+    run_activity_owner(
+        canned_histories::single_activity("tool"),
+        &store,
+        true,
+        &["tokens"],
+    )
+    .await;
+    assert_eq!(
+        store.closes.lock().len(),
+        1,
+        "closed before the shutdown returned"
+    );
+}
+
+#[tokio::test]
+async fn a_marked_activity_that_fails_closes_with_the_failure_the_workflow_saw() {
+    let store = Arc::new(RecordingStore::default());
+    run_activity_owner(
+        canned_histories::single_failed_activity("tool"),
+        &store,
+        true,
+        &["tokens"],
+    )
+    .await;
+    let closes = activity_closes(&store);
+    let failure = closes[0].1.failure.clone().unwrap();
+    assert!(closes[0].1.result.is_none());
+    assert!(
+        matches!(
+            failure.failure_info,
+            Some(temporalio_common::protos::temporal::api::failure::v1::failure::FailureInfo::ActivityFailureInfo(_))
+        ),
+        "{failure:?}"
+    );
+}
+
+#[tokio::test]
+async fn a_marked_activity_that_times_out_closes_with_its_timeout() {
+    let store = Arc::new(RecordingStore::default());
+    run_activity_owner(
+        canned_histories::started_activity_timeout("tool"),
+        &store,
+        true,
+        &["tokens"],
+    )
+    .await;
+    let closes = activity_closes(&store);
+    let failure = closes[0].1.failure.clone().unwrap();
+    assert_eq!(failure.message, "Activity task timed out", "{failure:?}");
+}
+
+#[tokio::test]
+async fn an_unmarked_activity_costs_no_store_call() {
+    let store = Arc::new(RecordingStore::default());
+    run_activity_owner(
+        canned_histories::single_activity("tool"),
+        &store,
+        false,
+        &[],
+    )
+    .await;
+    // Completing the run closes its own chain, and nothing else reaches the store.
+    assert_eq!(store.calls(), ["close_chain"]);
+}
+
+#[tokio::test]
+async fn a_store_that_refuses_the_close_leaves_the_task_completed() {
+    let store = Arc::new(RecordingStore {
+        refuse_closes: true,
+        ..Default::default()
+    });
+    let completions: Arc<Mutex<Vec<usize>>> = Default::default();
+    let lang = lang_for_activity(
+        canned_histories::single_activity("tool"),
+        vec![1.into(), 2.into()],
+        &store,
+        completions.clone(),
+    );
+    let start = lang.poll().await;
+    activity_wrote(&store, &start.run_id, "tool", &["tokens"]).await;
+    lang.complete(&start, vec![], vec![schedule_activity("tool", true)])
+        .await;
+    let resolved = lang.poll().await;
+    lang.complete(&resolved, vec![], vec![complete_workflow()])
+        .await;
+    lang.shutdown().await;
+    assert!(
+        store.calls().contains(&"close_topic_with"),
+        "{:?}",
+        store.calls()
+    );
+    assert_eq!(completions.lock().len(), 2, "both tasks completed");
+}
+
+#[tokio::test]
+async fn replay_of_a_resolution_makes_no_close() {
+    let mut history = canned_histories::single_activity("tool");
+    // Another task after the resolution, so the resolution replays.
+    history.add_workflow_task_completed();
+    let timer_started = history.add_by_type(EventType::TimerStarted);
+    history.add_timer_fired(timer_started, "1".to_string());
+    history.add_workflow_task_scheduled_and_started();
+    let store = Arc::new(RecordingStore::default());
+    let lang = Lang::new(
+        mock_appending_to(history, vec![3.into()], store.clone(), Default::default()),
+        store.clone(),
+        Owner::with(WorkflowExecutionStatus::Running),
+    );
+    let start = lang.poll().await;
+    assert!(start.is_replaying);
+    lang.complete(&start, vec![], vec![schedule_activity("tool", true)])
+        .await;
+    let resolved = lang.poll().await;
+    assert!(resolved.is_replaying);
+    lang.complete(
+        &resolved,
+        vec![],
+        vec![start_timer_cmd(1, Duration::from_secs(1))],
+    )
+    .await;
+    let fired = lang.poll().await;
+    lang.complete(&fired, vec![], vec![complete_workflow()])
+        .await;
+    lang.shutdown().await;
+    assert!(
+        store.closes.lock().is_empty(),
+        "a replayed resolution closes nothing: {:?}",
+        store.calls()
+    );
+}
+
+#[tokio::test]
+async fn a_try_cancel_closes_the_streams_with_the_canceled_failure() {
+    let store = Arc::new(RecordingStore::default());
+    let lang = lang_for_activity(
+        canned_histories::cancel_scheduled_activity("tool", "signal"),
+        vec![1.into(), 2.into()],
+        &store,
+        Default::default(),
+    );
+    let start = lang.poll().await;
+    activity_wrote(&store, &start.run_id, "tool", &["tokens"]).await;
+    lang.complete(&start, vec![], vec![schedule_activity("tool", true)])
+        .await;
+    let signaled = lang.poll().await;
+    lang.complete(
+        &signaled,
+        vec![],
+        vec![RequestCancelActivity { seq: 1 }.into()],
+    )
+    .await;
+    // A try-cancel resolves the Activity at once, and lang publishes that resolution.
+    let resolved = lang.poll().await;
+    lang.complete(&resolved, vec![], vec![complete_workflow()])
+        .await;
+    lang.shutdown().await;
+    let closes = activity_closes(&store);
+    let failure = closes[0].1.failure.clone().unwrap();
+    assert!(
+        matches!(
+            failure.cause.as_deref().and_then(|cause| cause.failure_info.as_ref()),
+            Some(temporalio_common::protos::temporal::api::failure::v1::failure::FailureInfo::CanceledFailureInfo(_))
+        ),
+        "{failure:?}"
+    );
+}
+
+#[tokio::test]
+async fn a_publish_with_a_link_lands_before_the_completion() {
+    use temporalio_common::protos::temporal::api::{
+        enums::v1::StreamOwnerKind as Kind, stream::v1::StreamReference,
+    };
+    use temporalio_streams::proto::{StreamLink, stream_link};
+    let store = Arc::new(RecordingStore::default());
+    let appended_at_completion: Arc<Mutex<Vec<usize>>> = Default::default();
+    let lang = lang_appending_to(
+        timer_history(),
+        vec![1.into(), 2.into()],
+        &store,
+        appended_at_completion.clone(),
+    );
+    let link = StreamLink {
+        event: stream_link::Event::Open as i32,
+        stream: Some(StreamReference {
+            owner_kind: Kind::WorkflowActivity as i32,
+            workflow_id: WORKFLOW_ID.to_string(),
+            run_id: "run".to_string(),
+            topic: "tokens".to_string(),
+            activity_id: "tool-42".to_string(),
+        }),
+        name: "tool-42".to_string(),
+        ..Default::default()
+    };
+    let mut committed = records(&["a"]);
+    committed.push(OutputRecord {
+        topic: TOPIC.to_string(),
+        kind: StreamRecordKind::Link as i32,
+        link: Some(link.clone()),
+        ..Default::default()
+    });
+    let activation = lang.poll().await;
+    lang.complete(
+        &activation,
+        committed.clone(),
+        vec![start_timer_cmd(1, Duration::from_secs(10))],
+    )
+    .await;
+    let fired = lang.poll().await;
+    lang.complete(&fired, vec![], vec![complete_workflow()])
+        .await;
+    lang.shutdown().await;
+    assert_eq!(appended_at_completion.lock()[0], 1);
+    let [append] = store.appends().try_into().unwrap();
+    assert_eq!(
+        append.digest,
+        temporalio_streams::workflow_batch_digest(
+            TOPIC,
+            committed
+                .iter()
+                .map(|r| (r.kind, r.content_hash.as_slice(), r.link.as_ref()))
+        )
+    );
+    let stored = StreamRecord::decode(append.records[1].as_slice()).unwrap();
+    assert_eq!(stored.kind, StreamRecordKind::Link as i32);
+    assert_eq!(stored.link, Some(link));
 }
