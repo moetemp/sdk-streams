@@ -22,3 +22,5 @@
 - Moved the link checks into the crate, and grew `OutputRecord` with `link` for LINK records.
 - The crate generates the stream API from its own copy in `protos/api_stream`, taken from
   `moetemp/api` `c1a8d975`, since sdk-rust no longer vendors it. It builds on sdk-rust kj5.
+- The stream API copy is a plain copy of `moetemp/api` `9d888ec4`, where the notifier RPC
+  messages have their own `stream_request_response.proto`.
