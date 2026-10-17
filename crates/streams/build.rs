@@ -63,7 +63,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         &[
             "protos/api_stream/temporal/api/stream/v1/message.proto",
             "protos/api_stream/temporal/api/enums/v1/stream.proto",
-            "protos/api_stream/temporal/api/workflowservice/v1/stream_notifier.proto",
+            "protos/api_stream/temporal/api/workflowservice/v1/stream_request_response.proto",
         ],
         includes,
     )?;
