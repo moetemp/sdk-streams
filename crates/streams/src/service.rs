@@ -291,6 +291,11 @@ impl StreamService {
                 .unsubscribe(&self.streams, decode::<UnsubscribeRequest>(rpc, request)?)
                 .await
                 .map(|r| r.encode_to_vec()),
+            "DescribeStreamNotifier" => self
+                .subscriptions
+                .describe_notifier(decode(rpc, request)?)
+                .await
+                .map(|r| r.encode_to_vec()),
             "WaitForNotification" => self
                 .subscriptions
                 .wait(
@@ -594,6 +599,9 @@ fn duration(seconds: i64, nanos: i32, name: &str) -> StreamResult<Duration> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::protos::temporal::api::workflowservice::v1::{
+        DescribeStreamNotifierRequest, DescribeStreamNotifierResponse,
+    };
     use crate::{
         OwnerDescription, OwnerError, OwnerId, OwnerStatus,
         proto::{
@@ -1724,5 +1732,63 @@ mod tests {
             crate::FLUSH_LIMIT,
             "a stopping process mustn't hang on a close retrying against a server that's down"
         );
+    }
+
+    /// Describes every notifier as closed with one callback.
+    struct Describes;
+
+    #[async_trait::async_trait]
+    impl NotifierClient for Describes {
+        async fn notify(&self, _: crate::StreamNotification) -> Result<(), crate::NotifyError> {
+            Ok(())
+        }
+
+        async fn describe_notifier(
+            &self,
+            request: DescribeStreamNotifierRequest,
+        ) -> Result<DescribeStreamNotifierResponse, crate::NotifyError> {
+            if request.namespace != "ns" {
+                return Err(crate::NotifyError::Refused("no such namespace".to_string()));
+            }
+            Ok(DescribeStreamNotifierResponse {
+                closed: true,
+                callbacks: vec![Default::default()],
+                ..Default::default()
+            })
+        }
+    }
+
+    #[tokio::test]
+    async fn describe_stream_notifier_goes_through_the_notifier_client() {
+        let service = service().await.with_subscriptions(Arc::new(Describes));
+        let describe = |namespace: &str| DescribeStreamNotifierRequest {
+            namespace: namespace.to_string(),
+            ..Default::default()
+        };
+        let answer = service
+            .call("DescribeStreamNotifier", &describe("ns").encode_to_vec())
+            .await
+            .unwrap();
+        let answer = DescribeStreamNotifierResponse::decode(answer.as_slice()).unwrap();
+        assert!(answer.closed);
+        assert_eq!(answer.callbacks.len(), 1);
+        let refused = service
+            .call("DescribeStreamNotifier", &describe("other").encode_to_vec())
+            .await
+            .unwrap_err();
+        assert_eq!(refused.kind, StreamFailureKind::Refused as i32);
+    }
+
+    #[tokio::test]
+    async fn describe_stream_notifier_without_a_notifier_client_is_unsupported() {
+        let failure = service()
+            .await
+            .call(
+                "DescribeStreamNotifier",
+                &DescribeStreamNotifierRequest::default().encode_to_vec(),
+            )
+            .await
+            .unwrap_err();
+        assert_eq!(failure.kind, StreamFailureKind::Unsupported as i32);
     }
 }
