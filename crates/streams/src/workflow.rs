@@ -3,11 +3,12 @@
 //! gives, as the activation's `WorkflowTaskHistoryInfo` names it.
 
 use crate::{
-    OwnerClient, RunClose, StreamError, StreamResult, StreamStore, append_batch, check_link,
-    check_record_limit, check_topic, close_chain,
+    MAX_CLOSE_BYTES, OwnerClient, RunClose, StreamError, StreamResult, StreamStore, append_batch,
+    check_link, check_record_limit, check_topic, close_chain, empty_close_result,
     proto::{
         AppendRecord, ChainId, OutputRecord, PublishWorkflowTaskRequest,
-        PublishWorkflowTaskResponse, StoreAppendRequest, StreamFailureKind, StreamRecordKind,
+        PublishWorkflowTaskResponse, ResolvedActivityOutcome, ResolvedOwnerActivity,
+        StoreAppendRequest, StoredClose, StreamFailureKind, StreamOwnerKind, StreamRecordKind,
         WorkflowTerminalCommand,
     },
     stored_append_record, workflow_batch_digest, workflow_producer_id,
@@ -20,11 +21,17 @@ use std::{
     time::Duration,
 };
 use temporalio_common::{
-    protos::temporal::api::enums::v1::WorkflowExecutionStatus,
+    protos::temporal::api::{enums::v1::WorkflowExecutionStatus, failure::v1::Failure},
     telemetry::metrics::{Counter, MetricKeyValue, MetricParameters, NewAttributes, TemporalMeter},
 };
 use tokio_util::task::TaskTracker;
 use tracing::{debug, warn};
+
+/// The `ScheduleActivity` header that marks an Activity as the owner of its own streams. Lang sets
+/// it, and passes the Activity's resolution to [StreamService](crate::StreamService)'s publish so
+/// the service closes the Activity's streams. The command holds it, so replay rebuilds the mark
+/// with no History read, and the Activity's Worker sees it too.
+pub const STREAM_OWNER_HEADER: &str = "__temporal_stream_owner";
 
 /// The bits of a Workflow producer's attempt that hold the reruns since the last completed task.
 pub const STREAM_RETRY_BITS: u32 = 16;
@@ -254,6 +261,124 @@ impl RunState {
     }
 }
 
+/// The streams of one Workflow Activity to close, with the outcome its scheduling Workflow saw.
+#[derive(Debug, Clone, PartialEq)]
+struct ActivityStreamClose {
+    /// The Activity's chain, keyed by the run that scheduled it.
+    chain: ChainId,
+    /// `None` for a completed Activity, which closes with an empty result.
+    failure: Option<Failure>,
+}
+
+impl ActivityStreamClose {
+    /// The close for `resolved`, an Activity that run `run_id` of `workflow` scheduled, or `None`
+    /// for an outcome that does not end the Activity.
+    fn of(workflow: &ChainId, run_id: &str, resolved: ResolvedOwnerActivity) -> Option<Self> {
+        let outcome = resolved.outcome();
+        let given = resolved
+            .failure
+            .filter(|failure| *failure != Failure::default());
+        let failure = match outcome {
+            ResolvedActivityOutcome::Completed => None,
+            // A resolution with no failure still ends the Activity, so its streams close with a
+            // failure of their own.
+            ResolvedActivityOutcome::Failed => Some(given.unwrap_or_else(|| no_failure("failed"))),
+            ResolvedActivityOutcome::Cancelled => {
+                Some(given.unwrap_or_else(|| no_failure("was cancelled")))
+            }
+            ResolvedActivityOutcome::Unspecified => return None,
+        };
+        Some(Self {
+            chain: ChainId {
+                namespace: workflow.namespace.clone(),
+                workflow_id: workflow.workflow_id.clone(),
+                first_run_id: run_id.to_string(),
+                owner_kind: StreamOwnerKind::WorkflowActivity as i32,
+                activity_id: resolved.activity_id,
+            },
+            failure,
+        })
+    }
+
+    /// Closes every topic that producers wrote on the Activity's chain. A failure is logged.
+    async fn run(self, store: &dyn StreamStore) {
+        let chain = self.chain;
+        let closed_by = format!("{}@{}", chain.activity_id, chain.first_run_id);
+        let (result, failure) = match self.failure {
+            None => (Some(empty_close_result()), None),
+            Some(failure) => (None, Some(fit_failure(failure, closed_by.len()))),
+        };
+        let topics = match store.written_topics(&chain).await {
+            Ok(topics) => topics,
+            Err(error) => {
+                warn!(
+                    workflow_id = %chain.workflow_id,
+                    activity_id = %chain.activity_id,
+                    %error,
+                    "Could not list the topics of an Activity's streams to close them"
+                );
+                return;
+            }
+        };
+        for topic in topics {
+            let stored = StoredClose {
+                result: result.clone(),
+                failure: failure.clone(),
+                closed_by: closed_by.clone(),
+            };
+            if let Err(error) = store.close_stream(&chain, &topic, stored).await {
+                warn!(
+                    workflow_id = %chain.workflow_id,
+                    activity_id = %chain.activity_id,
+                    %topic,
+                    %error,
+                    "Could not close an Activity's stream when its Workflow resolved it"
+                );
+            }
+        }
+    }
+}
+
+fn no_failure(what: &str) -> Failure {
+    Failure {
+        message: format!("The Activity {what} with no failure"),
+        ..Default::default()
+    }
+}
+
+/// `failure` cut to what a stored close holds. The causes and the stack trace go first, then the
+/// details, and a failure still too large keeps only the start of its message.
+fn fit_failure(failure: Failure, closed_by_bytes: usize) -> Failure {
+    // Room for the close's other fields and their tags.
+    let limit = MAX_CLOSE_BYTES - closed_by_bytes - 64;
+    if failure.encoded_len() <= limit {
+        return failure;
+    }
+    let mut cut = Failure {
+        cause: None,
+        stack_trace: String::new(),
+        ..failure
+    };
+    if cut.encoded_len() <= limit {
+        return cut;
+    }
+    cut.encoded_attributes = None;
+    cut.failure_info = None;
+    if cut.encoded_len() <= limit {
+        return cut;
+    }
+    let mut end = limit / 2;
+    while !cut.message.is_char_boundary(end) {
+        end -= 1;
+    }
+    cut.message.truncate(end);
+    Failure {
+        message: cut.message,
+        source: cut.source,
+        ..Default::default()
+    }
+}
+
 /// A Worker id and a run id.
 type RunKey = (String, String);
 
@@ -390,6 +515,12 @@ impl WorkflowOutput {
                 dropped_topics.push(topic.topic.clone());
             }
         }
+        let closes: Vec<_> = request
+            .resolved_owner_activities
+            .into_iter()
+            .filter_map(|resolved| ActivityStreamClose::of(&run.chain, &run.run_id, resolved))
+            .collect();
+        self.close_activity_streams(&request.worker_id, closes);
         Ok(PublishWorkflowTaskResponse { dropped_topics })
     }
 
@@ -496,6 +627,24 @@ impl WorkflowOutput {
                         debug!(%topic, attempt, %error, "Could not retire a stream output session");
                     }
                 }
+            }
+        });
+    }
+
+    /// Closes every topic each Workflow Activity in `closes` wrote, in the background. A close
+    /// that fails is logged and dropped, since it must not fail the Workflow Task. The owner
+    /// checks then close the streams with a generic failure. A rerun of a task that the server
+    /// refused resolves the Activity again and closes again, and the store answers that with the
+    /// first close.
+    fn close_activity_streams(&self, worker_id: &str, closes: Vec<ActivityStreamClose>) {
+        if closes.is_empty() {
+            return;
+        }
+        let store = self.store.clone();
+        // Replay never sends the close again, so a Worker shutdown waits for it.
+        self.spawn(worker_id, async move {
+            for close in closes {
+                close.run(store.as_ref()).await;
             }
         });
     }
@@ -791,5 +940,84 @@ mod tests {
         .unwrap();
         assert_eq!(topics.len(), 1);
         assert_eq!(topics[0].records[1].link, Some(join("tool-1")));
+    }
+
+    fn resolved(
+        outcome: ResolvedActivityOutcome,
+        failure: Option<Failure>,
+    ) -> ResolvedOwnerActivity {
+        ResolvedOwnerActivity {
+            activity_id: "tool".to_string(),
+            outcome: outcome as i32,
+            failure,
+        }
+    }
+
+    fn workflow_chain() -> ChainId {
+        ChainId {
+            namespace: "ns".to_string(),
+            workflow_id: "wf".to_string(),
+            first_run_id: "run-1".to_string(),
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn an_activity_close_names_the_activity_chain_of_the_scheduling_run() {
+        let close = ActivityStreamClose::of(
+            &workflow_chain(),
+            "run-2",
+            resolved(ResolvedActivityOutcome::Completed, None),
+        )
+        .unwrap();
+        assert_eq!(
+            close,
+            ActivityStreamClose {
+                chain: ChainId {
+                    namespace: "ns".to_string(),
+                    workflow_id: "wf".to_string(),
+                    first_run_id: "run-2".to_string(),
+                    owner_kind: StreamOwnerKind::WorkflowActivity as i32,
+                    activity_id: "tool".to_string(),
+                },
+                failure: None,
+            }
+        );
+    }
+
+    #[test]
+    fn a_failed_or_cancelled_resolution_with_no_failure_still_closes() {
+        for outcome in [
+            ResolvedActivityOutcome::Failed,
+            ResolvedActivityOutcome::Cancelled,
+        ] {
+            for failure in [None, Some(Failure::default())] {
+                let close =
+                    ActivityStreamClose::of(&workflow_chain(), "run-1", resolved(outcome, failure))
+                        .unwrap();
+                assert!(close.failure.unwrap().message.contains("with no failure"));
+            }
+        }
+        assert!(
+            ActivityStreamClose::of(
+                &workflow_chain(),
+                "run-1",
+                resolved(ResolvedActivityOutcome::Unspecified, None)
+            )
+            .is_none()
+        );
+    }
+
+    #[test]
+    fn a_failure_too_large_for_a_close_is_cut() {
+        let failure = Failure {
+            message: "m".repeat(MAX_CLOSE_BYTES),
+            stack_trace: "s".repeat(1024),
+            ..Default::default()
+        };
+        let cut = fit_failure(failure, 16);
+        assert!(cut.encoded_len() <= MAX_CLOSE_BYTES);
+        assert!(cut.stack_trace.is_empty());
+        assert!(cut.message.starts_with('m'));
     }
 }

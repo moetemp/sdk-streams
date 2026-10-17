@@ -78,7 +78,10 @@ pub use store::{
 };
 pub use tiered::TieredStore;
 pub use wake::{STREAM_WAKE_TYPE_URL, fold_stream_wake, fold_stream_wakes};
-pub use workflow::{MAX_APPEND_BYTES, STREAM_COMPLETED_TASKS, STREAM_RETRY_BITS, stream_attempt};
+pub use workflow::{
+    MAX_APPEND_BYTES, STREAM_COMPLETED_TASKS, STREAM_OWNER_HEADER, STREAM_RETRY_BITS,
+    stream_attempt,
+};
 
 /// The protos stores and lang exchange.
 pub mod proto {

@@ -27,3 +27,6 @@
 - Added `fold_stream_wake`, `fold_stream_wakes` and `STREAM_WAKE_TYPE_URL`, the reference fold of
   the stream wakes on a Workflow Task's attachments, with the shared vectors
   `testdata/wake_folds.json` and the codec notes in `docs/wakes.md`.
+- `PublishWorkflowTask` takes `resolved_owner_activities`, the owner Activities an activation
+  resolves. The service closes each one's streams after the records land, and `ShutdownWorker`
+  waits for the closes. `STREAM_OWNER_HEADER` names the header lang marks an owner with.

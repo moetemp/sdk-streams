@@ -886,6 +886,31 @@ message PublishWorkflowTaskRequest {
   repeated OutputRecord records = 13;
   // The first terminal command of the completion, which is the one Core keeps.
   WorkflowTerminalCommand terminal_command = 14;
+  // The Activities of this activation's `ResolveActivity` jobs that own their streams, in job
+  // order. Lang marks an owner Activity with the `__temporal_stream_owner` header when it
+  // schedules it. The service closes each one's streams after the records land, in the
+  // background.
+  repeated ResolvedOwnerActivity resolved_owner_activities = 15;
+}
+
+// An Activity that owns its streams, as its scheduling Workflow saw it end.
+message ResolvedOwnerActivity {
+  // The Activity's id in the run that scheduled it.
+  string activity_id = 1;
+  ResolvedActivityOutcome outcome = 2;
+  // On FAILED and CANCELLED, the failure as the server gave it, before lang decodes it. The
+  // store keeps it as the close's outcome, and readers decode it with their own codec. Unset
+  // closes with a failure that says the Activity gave none.
+  temporal.api.failure.v1.Failure failure = 3;
+}
+
+// How an owner Activity ended. A Local Activity owns no streams, so a backoff never comes here.
+enum ResolvedActivityOutcome {
+  RESOLVED_ACTIVITY_OUTCOME_UNSPECIFIED = 0;
+  // The streams close with an empty result.
+  RESOLVED_ACTIVITY_OUTCOME_COMPLETED = 1;
+  RESOLVED_ACTIVITY_OUTCOME_FAILED = 2;
+  RESOLVED_ACTIVITY_OUTCOME_CANCELLED = 3;
 }
 
 // One record a Workflow published.
