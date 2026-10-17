@@ -10,10 +10,12 @@ use crate::{
         enums::v1::StreamOwnerKind,
         stream::v1::{self, StreamReference, WorkflowWakeTarget},
         workflowservice::v1::{
-            AttachStreamCallbackRequest, AttachStreamCallbackResponse, DetachStreamCallbackRequest,
-            DetachStreamCallbackResponse, NotifyStreamRequest, NotifyStreamResponse,
-            NotifyStreamsRequest, NotifyStreamsResponse, PollStreamNotifierRequest,
-            PollStreamNotifierResponse, WaitStreamCallbackRequest, WaitStreamCallbackResponse,
+            AttachStreamCallbackRequest, AttachStreamCallbackResponse,
+            DescribeStreamNotifierRequest, DescribeStreamNotifierResponse,
+            DetachStreamCallbackRequest, DetachStreamCallbackResponse, NotifyStreamRequest,
+            NotifyStreamResponse, NotifyStreamsRequest, NotifyStreamsResponse,
+            PollStreamNotifierRequest, PollStreamNotifierResponse, WaitStreamCallbackRequest,
+            WaitStreamCallbackResponse,
         },
     },
 };
@@ -53,7 +55,6 @@ mod method {
     path!(NOTIFY, "NotifyStream");
     path!(NOTIFY_MANY, "NotifyStreams");
     path!(POLL, "PollStreamNotifier");
-    #[cfg(test)]
     path!(DESCRIBE, "DescribeStreamNotifier");
 }
 
@@ -236,6 +237,22 @@ impl NotifierClient for ConnectionNotifierClient {
         )
         .await
         .map(drop)
+        .map_err(notify_error)
+    }
+
+    async fn describe_notifier(
+        &self,
+        request: DescribeStreamNotifierRequest,
+    ) -> Result<DescribeStreamNotifierResponse, NotifyError> {
+        let namespace = request.namespace.clone();
+        notifier_call(
+            &self.connection,
+            method::DESCRIBE,
+            &namespace,
+            request,
+            None,
+        )
+        .await
         .map_err(notify_error)
     }
 
@@ -1162,8 +1179,26 @@ mod tests {
             .await
             .unwrap_err();
         assert!(matches!(refused, NotifyError::Refused(_)), "{refused:?}");
+        let described = client
+            .describe_notifier(DescribeStreamNotifierRequest {
+                namespace: "ns".to_string(),
+                ..Default::default()
+            })
+            .await
+            .unwrap_err();
+        assert!(
+            matches!(described, NotifyError::Refused(_)),
+            "{described:?}"
+        );
         let rpcs: Vec<_> = seen.lock().unwrap().iter().map(|c| c.rpc.clone()).collect();
-        assert_eq!(rpcs, ["PollStreamNotifier", "AttachStreamCallback"]);
+        assert_eq!(
+            rpcs,
+            [
+                "PollStreamNotifier",
+                "AttachStreamCallback",
+                "DescribeStreamNotifier"
+            ]
+        );
     }
 
     /// One HTTP request the test listener got: its `Nexus-Operation-State` and its body.
@@ -1461,9 +1496,6 @@ mod tests {
 
     #[tokio::test(flavor = "multi_thread")]
     async fn a_live_close_with_a_failure_fails_the_callers() {
-        use crate::protos::temporal::api::workflowservice::v1::{
-            DescribeStreamNotifierRequest, DescribeStreamNotifierResponse,
-        };
         use temporalio_common::protos::temporal::api::failure::v1::{
             ApplicationFailureInfo, Failure, failure::FailureInfo,
         };
@@ -1545,9 +1577,6 @@ mod tests {
     /// interval longer than the test, since a recheck wakes the reader too.
     #[tokio::test(flavor = "multi_thread")]
     async fn a_live_workflow_reader_gets_one_wake_per_idle_stretch() {
-        use crate::protos::temporal::api::workflowservice::v1::{
-            DescribeStreamNotifierRequest, DescribeStreamNotifierResponse,
-        };
         use prost::Message;
         use std::time::Duration;
         use temporalio_common::protos::temporal::api::{

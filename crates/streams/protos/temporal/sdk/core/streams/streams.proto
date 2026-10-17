@@ -8,6 +8,7 @@ import "google/protobuf/timestamp.proto";
 import "temporal/api/common/v1/message.proto";
 import "temporal/api/failure/v1/message.proto";
 import "temporal/sdk/streams/v1/message.proto";
+import "temporal/api/workflowservice/v1/stream_request_response.proto";
 
 // The stream calls lang makes, served in process by the stream service against the configured
 // store.
@@ -49,6 +50,10 @@ service StreamService {
   // again. After the wait limit, that read finds records whose notification was lost, or comes back
   // empty again.
   rpc WaitForNotification(WaitForNotificationRequest) returns (WaitForNotificationResponse);
+  // Describes a stream's notifier on the server, through the process's notifier client. Fails as
+  // unsupported when the config turns no notifier client on.
+  rpc DescribeStreamNotifier(temporal.api.workflowservice.v1.DescribeStreamNotifierRequest)
+      returns (temporal.api.workflowservice.v1.DescribeStreamNotifierResponse);
   // Runs a stream driver over the store's notification log until the caller cancels the call.
   // It answers only when the server takes no stream notifications, or when the store keeps no
   // log. Each driver of one store needs its own consumer name.
