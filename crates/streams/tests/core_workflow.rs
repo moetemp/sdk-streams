@@ -1782,8 +1782,8 @@ async fn an_unmarked_activity_costs_no_store_call() {
         &[],
     )
     .await;
-    // Completing the run closes its own chain, and nothing else reaches the store.
-    assert_eq!(store.calls(), ["close_chain"]);
+    // The run wrote no stream, so its chain close only lists the topics and finds none.
+    assert_eq!(store.calls(), ["list_topics"]);
 }
 
 #[tokio::test]
