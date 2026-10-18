@@ -809,6 +809,7 @@ async fn a_new_producer_marks_an_ended_chain_closed_until_it_expires() {
         producer: Some(Producer::Named(NamedProducer {
             producer_id: producer.to_string(),
             attempt: 1,
+            ..Default::default()
         })),
         sequence: 1,
         records: vec![AppendRecord {

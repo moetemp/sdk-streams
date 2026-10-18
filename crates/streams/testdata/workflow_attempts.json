@@ -205,5 +205,264 @@
       },
       "superseded": false
     }
+  ],
+  "local_attempt_bits": 14,
+  "local_attempts": [
+    {
+      "task_attempt": 1,
+      "attempt": 1,
+      "local_attempt": 16385
+    },
+    {
+      "task_attempt": 196609,
+      "attempt": 1,
+      "local_attempt": 3221241857
+    },
+    {
+      "task_attempt": 196610,
+      "attempt": 3,
+      "local_attempt": 3221258243
+    },
+    {
+      "task_attempt": 196609,
+      "attempt": 16383,
+      "local_attempt": 3221258239
+    },
+    {
+      "task_attempt": 196609,
+      "attempt": 20000,
+      "local_attempt": 3221258239
+    }
+  ],
+  "local_supersession": [
+    {
+      "label": "a call in a failed task the rerun skipped, then the next task wrote",
+      "previous": {
+        "producer": "__temporal_local_1@run",
+        "attempt": 3221241857,
+        "task_started_event_id": 5,
+        "completed_tasks": [
+          3,
+          0
+        ]
+      },
+      "next": {
+        "producer": "@run",
+        "attempt": 524289,
+        "task_started_event_id": 10,
+        "completed_tasks": [
+          8,
+          3,
+          0
+        ]
+      },
+      "superseded": true
+    },
+    {
+      "label": "a call in a failed task, then its rerun wrote",
+      "previous": {
+        "producer": "__temporal_local_1@run",
+        "attempt": 3221241857,
+        "task_started_event_id": 5,
+        "completed_tasks": [
+          3,
+          0
+        ]
+      },
+      "next": {
+        "producer": "@run",
+        "attempt": 196610,
+        "task_started_event_id": 8,
+        "completed_tasks": [
+          3,
+          0
+        ]
+      },
+      "superseded": true
+    },
+    {
+      "label": "a call in a failed task, then another call of its rerun wrote",
+      "previous": {
+        "producer": "__temporal_local_1@run",
+        "attempt": 3221241857,
+        "task_started_event_id": 5,
+        "completed_tasks": [
+          3,
+          0
+        ]
+      },
+      "next": {
+        "producer": "__temporal_local_2@run",
+        "attempt": 3221258241,
+        "task_started_event_id": 8,
+        "completed_tasks": [
+          3,
+          0
+        ]
+      },
+      "superseded": true
+    },
+    {
+      "label": "a call rerun in the retried task",
+      "previous": {
+        "producer": "__temporal_local_1@run",
+        "attempt": 3221241857,
+        "task_started_event_id": 5,
+        "completed_tasks": [
+          3,
+          0
+        ]
+      },
+      "next": {
+        "producer": "__temporal_local_1@run",
+        "attempt": 3221258241,
+        "task_started_event_id": 8,
+        "completed_tasks": [
+          3,
+          0
+        ]
+      },
+      "superseded": true
+    },
+    {
+      "label": "a call retried in the same task attempt",
+      "previous": {
+        "producer": "__temporal_local_1@run",
+        "attempt": 3221241857,
+        "task_started_event_id": 5,
+        "completed_tasks": [
+          3,
+          0
+        ]
+      },
+      "next": {
+        "producer": "__temporal_local_1@run",
+        "attempt": 3221241858,
+        "task_started_event_id": 5,
+        "completed_tasks": [
+          3,
+          0
+        ]
+      },
+      "superseded": true
+    },
+    {
+      "label": "a call in a completed task, then the next task wrote",
+      "previous": {
+        "producer": "__temporal_local_1@run",
+        "attempt": 3221241857,
+        "task_started_event_id": 5,
+        "completed_tasks": [
+          3,
+          0
+        ]
+      },
+      "next": {
+        "producer": "@run",
+        "attempt": 327681,
+        "task_started_event_id": 7,
+        "completed_tasks": [
+          5,
+          3,
+          0
+        ]
+      },
+      "superseded": false
+    },
+    {
+      "label": "a call in a completed task, then a call of the next task wrote",
+      "previous": {
+        "producer": "__temporal_local_1@run",
+        "attempt": 3221241857,
+        "task_started_event_id": 5,
+        "completed_tasks": [
+          3,
+          0
+        ]
+      },
+      "next": {
+        "producer": "__temporal_local_2@run",
+        "attempt": 5368725505,
+        "task_started_event_id": 7,
+        "completed_tasks": [
+          5,
+          3,
+          0
+        ]
+      },
+      "superseded": false
+    },
+    {
+      "label": "a call in the same task attempt as the next record",
+      "previous": {
+        "producer": "__temporal_local_1@run",
+        "attempt": 3221241857,
+        "task_started_event_id": 5,
+        "completed_tasks": [
+          3,
+          0
+        ]
+      },
+      "next": {
+        "producer": "@run",
+        "attempt": 196609,
+        "task_started_event_id": 5,
+        "completed_tasks": [
+          3,
+          0
+        ]
+      },
+      "superseded": false
+    },
+    {
+      "label": "a call of another run",
+      "previous": {
+        "producer": "__temporal_local_1@other",
+        "attempt": 3221241857,
+        "task_started_event_id": 5,
+        "completed_tasks": [
+          3,
+          0
+        ]
+      },
+      "next": {
+        "producer": "@run",
+        "attempt": 196610,
+        "task_started_event_id": 8,
+        "completed_tasks": [
+          3,
+          0
+        ]
+      },
+      "superseded": false
+    },
+    {
+      "label": "the call's task is older than the list",
+      "previous": {
+        "producer": "__temporal_local_1@run",
+        "attempt": 3221241857,
+        "task_started_event_id": 5,
+        "completed_tasks": [
+          3,
+          0
+        ]
+      },
+      "next": {
+        "producer": "@run",
+        "attempt": 2752513,
+        "task_started_event_id": 44,
+        "completed_tasks": [
+          42,
+          40,
+          38,
+          36,
+          34,
+          32,
+          30,
+          28
+        ]
+      },
+      "superseded": false
+    }
   ]
 }
