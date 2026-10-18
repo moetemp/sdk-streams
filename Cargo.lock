@@ -2576,7 +2576,7 @@ dependencies = [
 [[package]]
 name = "temporalio-client"
 version = "1.1.0"
-source = "git+https://github.com/moetemp/sdk-rust?rev=4c05def9bf7de5ac301d63dd60f681a7f35bbe27#4c05def9bf7de5ac301d63dd60f681a7f35bbe27"
+source = "git+https://github.com/moetemp/sdk-rust?rev=869a190ad857754d9f338736007be4932c84e052#869a190ad857754d9f338736007be4932c84e052"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -2609,7 +2609,7 @@ dependencies = [
 [[package]]
 name = "temporalio-common"
 version = "1.1.0"
-source = "git+https://github.com/moetemp/sdk-rust?rev=4c05def9bf7de5ac301d63dd60f681a7f35bbe27#4c05def9bf7de5ac301d63dd60f681a7f35bbe27"
+source = "git+https://github.com/moetemp/sdk-rust?rev=869a190ad857754d9f338736007be4932c84e052#869a190ad857754d9f338736007be4932c84e052"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -2644,7 +2644,7 @@ dependencies = [
 [[package]]
 name = "temporalio-common-wasm"
 version = "1.1.0"
-source = "git+https://github.com/moetemp/sdk-rust?rev=4c05def9bf7de5ac301d63dd60f681a7f35bbe27#4c05def9bf7de5ac301d63dd60f681a7f35bbe27"
+source = "git+https://github.com/moetemp/sdk-rust?rev=869a190ad857754d9f338736007be4932c84e052#869a190ad857754d9f338736007be4932c84e052"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -2670,7 +2670,7 @@ dependencies = [
 [[package]]
 name = "temporalio-macros"
 version = "1.1.0"
-source = "git+https://github.com/moetemp/sdk-rust?rev=4c05def9bf7de5ac301d63dd60f681a7f35bbe27#4c05def9bf7de5ac301d63dd60f681a7f35bbe27"
+source = "git+https://github.com/moetemp/sdk-rust?rev=869a190ad857754d9f338736007be4932c84e052#869a190ad857754d9f338736007be4932c84e052"
 dependencies = [
  "proc-macro2",
  "quote",
@@ -2680,7 +2680,7 @@ dependencies = [
 [[package]]
 name = "temporalio-protos"
 version = "0.10.0"
-source = "git+https://github.com/moetemp/sdk-rust?rev=4c05def9bf7de5ac301d63dd60f681a7f35bbe27#4c05def9bf7de5ac301d63dd60f681a7f35bbe27"
+source = "git+https://github.com/moetemp/sdk-rust?rev=869a190ad857754d9f338736007be4932c84e052#869a190ad857754d9f338736007be4932c84e052"
 dependencies = [
  "anyhow",
  "base64 0.23.1",
@@ -2701,7 +2701,7 @@ dependencies = [
 [[package]]
 name = "temporalio-sdk-core"
 version = "0.10.0"
-source = "git+https://github.com/moetemp/sdk-rust?rev=4c05def9bf7de5ac301d63dd60f681a7f35bbe27#4c05def9bf7de5ac301d63dd60f681a7f35bbe27"
+source = "git+https://github.com/moetemp/sdk-rust?rev=869a190ad857754d9f338736007be4932c84e052#869a190ad857754d9f338736007be4932c84e052"
 dependencies = [
  "anyhow",
  "assert_matches",
