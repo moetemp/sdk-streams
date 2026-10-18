@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Starts the Redis servers the stream store tests run against: one standalone server, and a
-# cluster of three primaries with one replica each, so the driver tests can fail a primary over.
+# cluster of three primaries with one replica each.
 # Uses a local redis-server when there is one, and docker on a Linux host otherwise, since a
 # cluster's nodes must reach each other on the addresses they announce. STREAMS_CLUSTER_BASE moves
 # the six cluster ports.

@@ -40,23 +40,18 @@ MemoryDB is the AWS production target for the Redis store.
 MemoryDB takes users through its API, not `ACL SETUSER`. An access string has no password, no
 `reset` rules and no `config` rule
 (https://docs.aws.amazon.com/memorydb/latest/devguide/clusters.acls.html). This is the access
-string for one namespace's applications, with the notification log on and owner deletes. The
+string for one namespace's applications, with owner deletes. The
 conformance suite runs as a user with exactly these rules on local Redis.
 
 ```text
-on ~temporal-streams:{my-ns:* ~temporal-streams:{*}:n ~temporal-streams:{*}:bell -@all +evalsha +eval +script|load +multi +exec +xadd +xread +xrevrange +xrange +xtrim +xlen +hget +hset +hgetall +hlen +hincrby +hdel +hscan +sadd +smembers +rpush +lrange +exists +del +unlink +scan +pexpire +pttl +time +info +ping +hello +client|setinfo +cluster|slots
+on ~temporal-streams:{my-ns:* -@all +evalsha +eval +script|load +multi +exec +xadd +xread +xrevrange +xrange +xtrim +xlen +hget +hset +hgetall +hlen +hincrby +hdel +hscan +sadd +smembers +rpush +lrange +exists +del +unlink +scan +pexpire +pttl +time +info +ping +hello +client|setinfo +cluster|slots
 ```
 
-It differs from the `ACL SETUSER` rules in [redis.md](redis.md) in four ways.
+It differs from the `ACL SETUSER` rules in [redis.md](redis.md) in three ways.
 
 - It has no `>secret`. The password goes in the user's authentication mode.
 - It has no `resetkeys` and no `resetchannels`. A new user has no keys and no channels.
 - It has no `+config|get`. The store goes on without the eviction check.
-- The doorbell keys use `~`, not `%W~`. We do not know if MemoryDB takes key selectors with
-  permissions. `~` gives read access too, which the application does not need.
-
-Without the notification log, drop the two `{*}` key patterns. A driver also needs
-`+xreadgroup +xautoclaim +xack +xdel +xgroup|create` on the `{*}` keys.
 
 Create the user and its ACL with the AWS CLI. Then give the ACL to the cluster.
 
@@ -77,8 +72,8 @@ aws memorydb create-acl --acl-name streams --user-names streams-app
 - **Serverless.** It supports `EVAL`, `EVALSHA`, `SCRIPT LOAD`, the stream and consumer group
   commands the store uses, `HSCAN`, `SCAN`, `UNLINK` and `TIME`. `CLUSTER SLOTS` answers one
   shard with every slot
-  (https://docs.aws.amazon.com/AmazonElastiCache/latest/dg/SupportedCommands.html). The driver
-  then sweeps every slot on one node. We did not run the suite on it.
+  (https://docs.aws.amazon.com/AmazonElastiCache/latest/dg/SupportedCommands.html). We did not
+  run the suite on it.
 - **Access.** `CONFIG` and `ACL SETUSER` are restricted. ElastiCache users take an access string
   through the API, so use the MemoryDB access string above.
 

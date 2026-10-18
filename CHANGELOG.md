@@ -28,8 +28,8 @@
   the stream wakes on a Workflow Task's attachments, with the shared vectors
   `testdata/wake_folds.json` and the codec notes in `docs/wakes.md`.
 - `PublishWorkflowTask` takes `resolved_owner_activities`, the owner Activities an activation
-  resolves. The service closes each one's streams after the records land, and `ShutdownWorker`
-  waits for the closes. `STREAM_OWNER_HEADER` names the header lang marks an owner with.
+  resolves. The service closes each one's streams after the records land, before the publish
+  answers. `STREAM_OWNER_HEADER` names the header lang marks an owner with.
 - Ported Jetty's Core tests onto Core's mock Worker with the test as lang: owner Activity closes,
   LINK records in the publish, and the stream wakes on a task's attachments.
 - The crate generates the stream API from its own copy in `protos/api_stream`, taken from
@@ -48,3 +48,6 @@
   stream API copy moves to the same commit, with no file change.
 - CI checks that the crate's API copies share no file path and no full name with the API that
   the pinned sdk-rust vendors.
+- Took the notification log, the stream driver, the archive tier and the PostgreSQL store out of
+  the main chain. Producers notify per append through `NotifyingStore`. The parts come back as an
+  optional layer.

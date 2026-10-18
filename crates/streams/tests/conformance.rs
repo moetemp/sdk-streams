@@ -15,11 +15,10 @@ use std::{
 };
 use temporalio_common::protos::temporal::api::common::v1::Payload;
 use temporalio_streams::{
-    BEGINNING, CHAIN_LOG, Capabilities, END, LocalFileArchive, MemoryStore, NotificationEntry,
-    NotificationLog, Notifier, NotifierClient, NotifyError, NotifyingStore, ReadTarget,
-    SegmentLimits, StreamArchive, StreamNotification, StreamResult, StreamStore, TieredStore,
-    append_batch, archive_topic, chain_owner, close_chain, close_topic, mint_cursor, proto::*,
-    read_page, stored_append_record, stream_hash,
+    BEGINNING, CHAIN_LOG, Capabilities, END, MemoryStore, Notifier, NotifierClient, NotifyError,
+    NotifyingStore, ReadTarget, StreamNotification, StreamResult, StreamStore, append_batch,
+    chain_owner, close_chain, close_topic, mint_cursor, proto::*, read_page, stored_append_record,
+    stream_hash,
 };
 
 #[async_trait::async_trait]
@@ -77,10 +76,6 @@ async fn memory() -> Option<Memory> {
     Some(Memory(Arc::new(MemoryStore::new())))
 }
 
-async fn memory_with_log() -> Option<Memory> {
-    Some(Memory(Arc::new(MemoryStore::with_notification_log())))
-}
-
 /// Takes every notification and sends nothing.
 struct Quiet;
 
@@ -126,178 +121,6 @@ impl<C: Case> Case for Notifying<C> {
     async fn expire_log(&self, chain: &ChainId, topic: &str) {
         self.inner.expire_log(chain, topic).await;
     }
-}
-
-/// A hot store that can forget a topic whole, as when its last key expired, meta included.
-#[async_trait::async_trait]
-trait Forgets: Case {
-    async fn forget(&self, chain: &ChainId, topic: &str);
-
-    /// Ends the archive's hold on a topic at once, as a lapsed lease does.
-    async fn lapse_archive_hold(&self, chain: &ChainId, topic: &str) {
-        self.store()
-            .release_floor(chain, topic, temporalio_streams::ARCHIVE_HOLDER)
-            .await
-            .unwrap();
-    }
-}
-
-#[async_trait::async_trait]
-impl Forgets for Memory {
-    async fn forget(&self, chain: &ChainId, topic: &str) {
-        self.0.forget(chain, topic);
-    }
-}
-
-/// Another case's store as the hot store of a [TieredStore], with an archive in a directory of
-/// its own. With a hot store that keeps no archive hold, nothing is archived, so the contract
-/// holds as it does on the hot store alone.
-struct Tiered<C> {
-    inner: C,
-    store: Arc<TieredStore>,
-    /// The directory of a local archive, which the case deletes at its end.
-    root: Option<std::path::PathBuf>,
-}
-
-async fn tiered<C: Case>(inner: impl std::future::Future<Output = Option<C>>) -> Option<Tiered<C>> {
-    let inner = inner.await?;
-    let root = std::env::temp_dir().join(unique("streams-archive"));
-    let store = Arc::new(TieredStore::new(
-        inner.store(),
-        Arc::new(LocalFileArchive::new(&root)),
-    ));
-    Some(Tiered {
-        inner,
-        store,
-        root: Some(root),
-    })
-}
-
-/// [tiered] with the archive under a prefix of its own at `STREAMS_S3_URL`.
-#[cfg(feature = "archive")]
-async fn tiered_on_s3<C: Case>(
-    inner: impl std::future::Future<Output = Option<C>>,
-) -> Option<Tiered<C>> {
-    let Ok(url) = std::env::var("STREAMS_S3_URL") else {
-        eprintln!("set STREAMS_S3_URL to run the S3 archive cases");
-        return None;
-    };
-    let inner = inner.await?;
-    let url = format!("{}/{}", url.trim_end_matches('/'), unique("conformance"));
-    let archive = temporalio_streams::ObjectStoreArchive::from_s3_url(&url).unwrap();
-    let store = Arc::new(TieredStore::new(inner.store(), Arc::new(archive)));
-    Some(Tiered {
-        inner,
-        store,
-        root: None,
-    })
-}
-
-impl<C> Drop for Tiered<C> {
-    fn drop(&mut self) {
-        if let Some(root) = &self.root {
-            let _ = std::fs::remove_dir_all(root);
-        }
-    }
-}
-
-#[async_trait::async_trait]
-impl<C: Case> Case for Tiered<C> {
-    fn store(&self) -> Arc<dyn StreamStore> {
-        self.store.clone()
-    }
-
-    fn chain(&self) -> ChainId {
-        self.inner.chain()
-    }
-
-    async fn drop_oldest(&self, chain: &ChainId, topic: &str, keep: usize) {
-        self.inner.drop_oldest(chain, topic, keep).await;
-    }
-
-    async fn expire_log(&self, chain: &ChainId, topic: &str) {
-        self.inner.expire_log(chain, topic).await;
-    }
-}
-
-/// A tiered store whose hot store keeps an archive hold, for the archive cases.
-#[async_trait::async_trait]
-trait ArchiveCase: Case {
-    fn hot(&self) -> Arc<dyn StreamStore>;
-
-    fn archive(&self) -> Arc<dyn StreamArchive>;
-
-    /// Forgets a topic in the hot store, so only the archive holds it.
-    async fn forget(&self, chain: &ChainId, topic: &str);
-
-    /// Deletes one archive object, as a bucket lifecycle rule does.
-    async fn lose(&self, name: &str);
-
-    /// Ends the archive's hold on a topic at once, as a lapsed lease does.
-    async fn lapse_archive_hold(&self, chain: &ChainId, topic: &str);
-
-    /// Archives what the hot store holds of a topic, in segments of at most `records` records.
-    async fn archive_now(&self, chain: &ChainId, topic: &str, records: u32) {
-        let limits = SegmentLimits {
-            records,
-            ..Default::default()
-        };
-        archive_topic(&*self.hot(), &*self.archive(), chain, topic, limits, true)
-            .await
-            .unwrap();
-    }
-}
-
-#[async_trait::async_trait]
-impl<C: Forgets> ArchiveCase for Tiered<C> {
-    fn hot(&self) -> Arc<dyn StreamStore> {
-        self.inner.store()
-    }
-
-    fn archive(&self) -> Arc<dyn StreamArchive> {
-        self.store.archive().clone()
-    }
-
-    async fn forget(&self, chain: &ChainId, topic: &str) {
-        self.inner.forget(chain, topic).await;
-    }
-
-    async fn lapse_archive_hold(&self, chain: &ChainId, topic: &str) {
-        self.inner.lapse_archive_hold(chain, topic).await;
-    }
-
-    async fn lose(&self, name: &str) {
-        match &self.root {
-            Some(root) => std::fs::remove_file(root.join(name)).unwrap(),
-            None => assert_eq!(self.archive().delete_prefix(name).await.unwrap(), 1),
-        }
-    }
-}
-
-#[async_trait::async_trait]
-impl<C: Forgets> Forgets for Activity<C> {
-    async fn forget(&self, chain: &ChainId, topic: &str) {
-        self.0.forget(chain, topic).await;
-    }
-
-    async fn lapse_archive_hold(&self, chain: &ChainId, topic: &str) {
-        self.0.lapse_archive_hold(chain, topic).await;
-    }
-}
-
-#[async_trait::async_trait]
-impl<C: Forgets> Forgets for WorkflowActivity<C> {
-    async fn forget(&self, chain: &ChainId, topic: &str) {
-        self.0.forget(chain, topic).await;
-    }
-
-    async fn lapse_archive_hold(&self, chain: &ChainId, topic: &str) {
-        self.0.lapse_archive_hold(chain, topic).await;
-    }
-}
-
-async fn memory_holding_for_archive() -> Option<Memory> {
-    Some(Memory(Arc::new(MemoryStore::new().holding_for_archive())))
 }
 
 /// Another case whose chains are standalone Activity runs, so every case runs on the Activity
@@ -644,42 +467,15 @@ mod on_redis {
         cluster: bool,
         extra: &[&str],
     ) -> Option<Redis> {
-        redis_as_documented_user_with(variable, cluster, extra, false).await
-    }
-
-    /// [redis_as_documented_user] with the notification log on, and the documented rules for
-    /// its keys.
-    pub(crate) async fn redis_as_documented_user_with_log(
-        variable: &str,
-        cluster: bool,
-    ) -> Option<Redis> {
-        redis_as_documented_user_with(variable, cluster, &[], true).await
-    }
-
-    async fn redis_as_documented_user_with(
-        variable: &str,
-        cluster: bool,
-        extra: &[&str],
-        notification_log: bool,
-    ) -> Option<Redis> {
         let Ok(url) = std::env::var(variable) else {
             eprintln!("set {variable} to run the Redis store cases");
             return None;
         };
         let prefix = unique("conformance-acl");
-        let log_rules = [
-            format!("~{}:{{*}}:n", part(&prefix)),
-            format!("%W~{}:{{*}}:bell", part(&prefix)),
-        ];
-        let mut rules: Vec<&str> = extra.to_vec();
-        if notification_log {
-            rules.extend(log_rules.iter().map(String::as_str));
-        }
-        let user = DocumentedUser::create(&url, &prefix, "default", &rules).await;
+        let user = DocumentedUser::create(&url, &prefix, "default", extra).await;
         let mut options = RedisStoreOptions::new(user.url.clone());
         options.key_prefix = prefix.clone();
         options.cluster = cluster;
-        options.notification_log = notification_log;
         Some(Redis {
             store: Arc::new(RedisStore::connect(options).await.unwrap()),
             raw: Raw::connect(&url, cluster).await,
@@ -688,51 +484,7 @@ mod on_redis {
         })
     }
 
-    /// A store with the notification log and an archive, as a user with the documented rules,
-    /// the log's and the archive's. A driver reads the archive marks under the same user.
-    pub(crate) async fn redis_as_documented_user_with_archive(
-        variable: &str,
-        cluster: bool,
-    ) -> Option<Redis> {
-        let Ok(url) = std::env::var(variable) else {
-            eprintln!("set {variable} to run the Redis store cases");
-            return None;
-        };
-        let page = include_str!("../docs/redis.md");
-        for rules in [
-            "`~temporal-streams:{*}:a +zadd +hexists`",
-            "`+zrange +zrem`",
-        ] {
-            assert!(page.contains(rules), "the Redis page names {rules}");
-        }
-        let prefix = unique("conformance-acl-archive");
-        let rules = [
-            format!("~{}:{{*}}:n", part(&prefix)),
-            format!("%W~{}:{{*}}:bell", part(&prefix)),
-            format!("~{}:{{*}}:a", part(&prefix)),
-            "+zadd".to_string(),
-            "+hexists".to_string(),
-            "+zrange".to_string(),
-            "+zrem".to_string(),
-            // The page names it as the one rule an owner delete needs beyond the others.
-            "+scan".to_string(),
-        ];
-        let rules: Vec<&str> = rules.iter().map(String::as_str).collect();
-        let user = DocumentedUser::create(&url, &prefix, "default", &rules).await;
-        let mut options = RedisStoreOptions::new(user.url.clone());
-        options.key_prefix = prefix.clone();
-        options.cluster = cluster;
-        options.notification_log = true;
-        options.archive_lease = Some(Duration::from_secs(7 * 24 * 60 * 60));
-        Some(Redis {
-            store: Arc::new(RedisStore::connect(options).await.unwrap()),
-            raw: Raw::connect(&url, cluster).await,
-            prefix,
-            _user: Some(user),
-        })
-    }
-
-    /// A store with the notification log on, as a user with exactly the MemoryDB access string.
+    /// A store as a user with exactly the MemoryDB access string.
     pub(crate) async fn redis_as_memorydb_user(variable: &str, cluster: bool) -> Option<Redis> {
         let Ok(url) = std::env::var(variable) else {
             eprintln!("set {variable} to run the Redis store cases");
@@ -743,7 +495,6 @@ mod on_redis {
         let mut options = RedisStoreOptions::new(user.url.clone());
         options.key_prefix = prefix.clone();
         options.cluster = cluster;
-        options.notification_log = true;
         Some(Redis {
             store: Arc::new(RedisStore::connect(options).await.unwrap()),
             raw: Raw::connect(&url, cluster).await,
@@ -753,79 +504,24 @@ mod on_redis {
     }
 
     pub(crate) async fn redis(variable: &str, cluster: bool) -> Option<Redis> {
-        redis_with(variable, cluster, false, false).await
-    }
-
-    /// [redis] with a notification log.
-    pub(crate) async fn redis_with_log(variable: &str, cluster: bool) -> Option<Redis> {
-        redis_with(variable, cluster, true, false).await
-    }
-
-    /// [redis_with_log] with an archive hold, for a tiered store.
-    pub(crate) async fn redis_with_archive(variable: &str, cluster: bool) -> Option<Redis> {
-        let Ok(url) = std::env::var(variable) else {
-            eprintln!("set {variable} to run the Redis store cases");
-            return None;
-        };
-        let prefix = unique("conformance-archive");
-        let mut options = RedisStoreOptions::new(url.clone());
-        options.cluster = cluster;
-        options.key_prefix = prefix.clone();
-        options.notification_log = true;
-        options.archive_lease = Some(Duration::from_secs(7 * 24 * 60 * 60));
-        Some(Redis {
-            store: Arc::new(RedisStore::connect(options).await.unwrap()),
-            raw: Raw::connect(&url, cluster).await,
-            prefix,
-            _user: None,
-        })
-    }
-
-    #[async_trait::async_trait]
-    impl Forgets for Redis {
-        async fn forget(&self, chain: &ChainId, topic: &str) {
-            let mut raw = self.raw.clone();
-            let log = log_key(&self.prefix, chain, topic);
-            for key in [format!("{log}:meta"), format!("{log}:floors"), log] {
-                let _: i64 = raw.query(redis::cmd("DEL").arg(key)).await;
-            }
-        }
-
-        async fn lapse_archive_hold(&self, chain: &ChainId, topic: &str) {
-            let floors = format!("{}:floors", log_key(&self.prefix, chain, topic));
-            let _: i64 = self
-                .raw
-                .clone()
-                .query(
-                    redis::cmd("HDEL")
-                        .arg(floors)
-                        .arg(temporalio_streams::ARCHIVE_HOLDER),
-                )
-                .await;
-        }
+        redis_with(variable, cluster, false).await
     }
 
     /// Redis with no Lua, so the store keeps no producer state and no last position.
     pub(crate) async fn plain_redis(variable: &str, cluster: bool) -> Option<Redis> {
-        redis_with(variable, cluster, false, true).await
+        redis_with(variable, cluster, true).await
     }
 
-    async fn redis_with(
-        variable: &str,
-        cluster: bool,
-        notification_log: bool,
-        plain: bool,
-    ) -> Option<Redis> {
+    async fn redis_with(variable: &str, cluster: bool, plain: bool) -> Option<Redis> {
         let Ok(url) = std::env::var(variable) else {
             eprintln!("set {variable} to run the Redis store cases");
             return None;
         };
-        // A prefix per case keeps cases apart in one Redis, its notification streams too.
+        // A prefix per case keeps cases apart in one Redis.
         let prefix = unique("conformance");
         let mut options = RedisStoreOptions::new(url.clone());
         options.cluster = cluster;
         options.key_prefix = prefix.clone();
-        options.notification_log = notification_log;
         options.plain = plain;
         Some(Redis {
             store: Arc::new(RedisStore::connect(options).await.unwrap()),
@@ -894,300 +590,6 @@ mod on_redis {
             let _: i64 = raw
                 .query(redis::cmd("DEL").arg(log_key(&self.prefix, chain, topic)))
                 .await;
-        }
-    }
-}
-
-#[cfg(feature = "postgres")]
-mod on_postgres {
-    use super::*;
-    use temporalio_streams::{PostgresStore, PostgresStoreOptions};
-
-    /// A schema name no other case uses.
-    pub(crate) fn schema() -> String {
-        unique("conformance").replace('-', "_")
-    }
-
-    /// A connection of the test's own, to do to the rows what retention does.
-    pub(crate) async fn raw(url: &str) -> tokio_postgres::Client {
-        let (client, connection) = tokio_postgres::connect(url, tokio_postgres::NoTls)
-            .await
-            .unwrap();
-        tokio::spawn(connection);
-        client
-    }
-
-    pub(crate) fn options(url: &str, schema: &str) -> PostgresStoreOptions {
-        let mut options = PostgresStoreOptions::new(url);
-        options.schema = schema.to_string();
-        options.max_connections = 4;
-        options
-    }
-
-    pub(crate) struct Postgres {
-        pub(crate) store: Arc<PostgresStore>,
-        pub(crate) raw: Arc<tokio_postgres::Client>,
-        pub(crate) schema: String,
-    }
-
-    pub(crate) async fn postgres(variable: &str) -> Option<Postgres> {
-        postgres_with(variable, |_| {}).await
-    }
-
-    /// [postgres] with a notification log.
-    pub(crate) async fn postgres_with_log(variable: &str) -> Option<Postgres> {
-        postgres_with(variable, |options| {
-            options.notification_log = true;
-            options.notify_doorbells = 4;
-        })
-        .await
-    }
-
-    /// [postgres_with_log] with an archive hold, for a tiered store.
-    pub(crate) async fn postgres_with_archive(variable: &str) -> Option<Postgres> {
-        postgres_with(variable, |options| {
-            options.notification_log = true;
-            options.notify_doorbells = 4;
-            options.archive_lease = Some(Duration::from_secs(60));
-        })
-        .await
-    }
-
-    /// [postgres] with a `NOTIFY` per append for waiting reads.
-    pub(crate) async fn postgres_notifying_reads(variable: &str) -> Option<Postgres> {
-        postgres_with(variable, |options| options.notify_reads = true).await
-    }
-
-    pub(crate) async fn postgres_with(
-        variable: &str,
-        change: impl FnOnce(&mut PostgresStoreOptions),
-    ) -> Option<Postgres> {
-        let Ok(url) = std::env::var(variable) else {
-            eprintln!("set {variable} to run the PostgreSQL store cases");
-            return None;
-        };
-        let schema = schema();
-        let mut options = options(&url, &schema);
-        change(&mut options);
-        Some(Postgres {
-            store: Arc::new(PostgresStore::connect(options).await.unwrap()),
-            raw: Arc::new(raw(&url).await),
-            schema,
-        })
-    }
-
-    /// The store through PgBouncer in transaction mode at `STREAMS_POSTGRES_PGBOUNCER_URL`, with
-    /// the log, and the listener and the migrations on the direct `STREAMS_POSTGRES_URL`.
-    pub(crate) async fn postgres_through_pgbouncer() -> Option<Postgres> {
-        let Ok(pooled) = std::env::var("STREAMS_POSTGRES_PGBOUNCER_URL") else {
-            eprintln!("set STREAMS_POSTGRES_PGBOUNCER_URL to run the PgBouncer cases");
-            return None;
-        };
-        let direct = std::env::var("STREAMS_POSTGRES_URL").unwrap();
-        let schema = schema();
-        let mut options = options(&pooled, &schema);
-        options.listen_url = Some(direct.clone());
-        options.notification_log = true;
-        options.notify_doorbells = 4;
-        Some(Postgres {
-            store: Arc::new(PostgresStore::connect(options).await.unwrap()),
-            raw: Arc::new(raw(&direct).await),
-            schema,
-        })
-    }
-
-    /// The role lines of the PostgreSQL page: one `CREATE ROLE` and the `GRANT`s after it.
-    pub(crate) fn documented_lines() -> Vec<String> {
-        let page = include_str!("../docs/postgres.md");
-        let lines: Vec<String> = page
-            .lines()
-            .filter(|line| line.starts_with("CREATE ROLE ") || line.starts_with("GRANT "))
-            .map(str::to_string)
-            .collect();
-        assert_eq!(
-            lines
-                .iter()
-                .filter(|line| line.starts_with("CREATE ROLE "))
-                .count(),
-            1,
-            "the PostgreSQL page should give one CREATE ROLE line"
-        );
-        lines
-    }
-
-    /// A store as a role with exactly the documented grants, on a schema an owner migrated. The
-    /// page's schema, role and password are swapped for the test's own, and nothing else changes.
-    pub(crate) async fn postgres_as_documented_role(variable: &str) -> Option<Postgres> {
-        postgres_as_documented_role_with(variable, false).await
-    }
-
-    /// [postgres_as_documented_role] with a notification log.
-    pub(crate) async fn postgres_as_documented_role_with_log(variable: &str) -> Option<Postgres> {
-        postgres_as_documented_role_with(variable, true).await
-    }
-
-    async fn postgres_as_documented_role_with(variable: &str, log: bool) -> Option<Postgres> {
-        let Ok(url) = std::env::var(variable) else {
-            eprintln!("set {variable} to run the PostgreSQL store cases");
-            return None;
-        };
-        let schema = schema();
-        drop(
-            PostgresStore::connect(options(&url, &schema))
-                .await
-                .unwrap(),
-        );
-        let raw = raw(&url).await;
-        let role = format!("{schema}_app");
-        let password = format!("pw_{schema}");
-        for line in documented_lines() {
-            let line = line
-                .replace("temporal_streams", &schema)
-                .replace("streams_app", &role)
-                .replace("'secret'", &format!("'{password}'"));
-            raw.batch_execute(&line).await.unwrap();
-        }
-        let (_, address) = url.split_once('@').unwrap();
-        let role_url = format!("postgres://{role}:{password}@{address}");
-        let mut options = options(&role_url, &schema);
-        options.skip_migrations = true;
-        options.notification_log = log;
-        Some(Postgres {
-            store: Arc::new(PostgresStore::connect(options).await.unwrap()),
-            raw: Arc::new(raw),
-            schema,
-        })
-    }
-
-    impl Postgres {
-        fn key(chain: &ChainId) -> (String, i16, String, String, String) {
-            let (kind, owner, activity) = match StreamOwnerKind::try_from(chain.owner_kind) {
-                Ok(StreamOwnerKind::Activity) => (2, chain.activity_id.clone(), String::new()),
-                Ok(StreamOwnerKind::WorkflowActivity) => {
-                    (3, chain.workflow_id.clone(), chain.activity_id.clone())
-                }
-                _ => (1, chain.workflow_id.clone(), String::new()),
-            };
-            (
-                chain.namespace.clone(),
-                kind,
-                owner,
-                chain.first_run_id.clone(),
-                activity,
-            )
-        }
-
-        /// Runs `sql` with the chain key as `$1` to `$5` and the topic as `$6`.
-        pub(crate) async fn on_topic(
-            &self,
-            sql: &str,
-            chain: &ChainId,
-            topic: &str,
-            more: &[&(dyn tokio_postgres::types::ToSql + Sync)],
-        ) -> u64 {
-            let (namespace, kind, owner, run, activity) = Self::key(chain);
-            let mut params: Vec<&(dyn tokio_postgres::types::ToSql + Sync)> =
-                vec![&namespace, &kind, &owner, &run, &activity, &topic];
-            params.extend_from_slice(more);
-            let sql = sql.replace("{s}", &self.schema);
-            self.raw.execute(&sql, &params).await.unwrap()
-        }
-    }
-
-    /// The topic row of `$1` to `$6`.
-    const TOPIC: &str = "SELECT t.topic_id, t.last_position FROM {s}.chains c \
-        JOIN {s}.topics t ON t.chain_id = c.chain_id AND t.topic = $6 \
-        WHERE (c.namespace, c.owner_kind, c.owner_id, c.first_run_id, c.activity_id) \
-        = ($1, $2, $3, $4, $5)";
-
-    #[async_trait::async_trait]
-    impl Case for Postgres {
-        fn store(&self) -> Arc<dyn StreamStore> {
-            self.store.clone()
-        }
-
-        fn chain(&self) -> ChainId {
-            ChainId {
-                namespace: "default".to_string(),
-                workflow_id: unique("conformance"),
-                first_run_id: unique("run"),
-                ..Default::default()
-            }
-        }
-
-        async fn drop_oldest(&self, chain: &ChainId, topic: &str, keep: usize) {
-            // Deletes as the janitor does, keeping what a live hold holds, and moves `trimmed`.
-            let keep = keep as i64;
-            self.on_topic(
-                &format!(
-                    "WITH t AS ({TOPIC}), \
-                     cut AS (SELECT t.topic_id, CASE WHEN n.position IS NULL THEN NULL \
-                       ELSE least(n.position, (SELECT min(f.position) - 1 FROM {{s}}.floors f \
-                         WHERE f.topic_id = t.topic_id AND f.until > now())) END AS position \
-                       FROM t LEFT JOIN LATERAL (SELECT r.position FROM {{s}}.records r \
-                         WHERE r.topic_id = t.topic_id ORDER BY r.position DESC \
-                         OFFSET $7 LIMIT 1) n ON true), \
-                     gone AS (DELETE FROM {{s}}.records r USING cut \
-                       WHERE r.topic_id = cut.topic_id AND r.position <= cut.position \
-                       RETURNING r.position) \
-                     UPDATE {{s}}.topics x SET trimmed = greatest(x.trimmed, \
-                       (SELECT max(position) FROM gone)) \
-                     FROM cut WHERE x.topic_id = cut.topic_id AND EXISTS (SELECT 1 FROM gone)"
-                ),
-                chain,
-                topic,
-                &[&keep],
-            )
-            .await;
-        }
-
-        async fn expire_log(&self, chain: &ChainId, topic: &str) {
-            // The records go and the topic row stays, as the tombstone.
-            self.on_topic(
-                &format!(
-                    "WITH t AS ({TOPIC}), \
-                     gone AS (DELETE FROM {{s}}.records r USING t WHERE r.topic_id = t.topic_id) \
-                     UPDATE {{s}}.topics x SET trimmed = x.last_position FROM t \
-                     WHERE x.topic_id = t.topic_id"
-                ),
-                chain,
-                topic,
-                &[],
-            )
-            .await;
-        }
-    }
-
-    #[async_trait::async_trait]
-    impl Forgets for Postgres {
-        async fn forget(&self, chain: &ChainId, topic: &str) {
-            self.on_topic(
-                &format!(
-                    "WITH t AS ({TOPIC}), \
-                     records AS (DELETE FROM {{s}}.records r USING t \
-                       WHERE r.topic_id = t.topic_id), \
-                     producers AS (DELETE FROM {{s}}.producers h USING t \
-                       WHERE h.topic_id = t.topic_id) \
-                     DELETE FROM {{s}}.topics x USING t WHERE x.topic_id = t.topic_id"
-                ),
-                chain,
-                topic,
-                &[],
-            )
-            .await;
-        }
-
-        async fn lapse_archive_hold(&self, chain: &ChainId, topic: &str) {
-            self.on_topic(
-                &format!(
-                    "WITH t AS ({TOPIC}) UPDATE {{s}}.floors f SET until = now() - interval '1 s' \
-                     FROM t WHERE f.topic_id = t.topic_id AND f.holder = 'archive'"
-                ),
-                chain,
-                topic,
-                &[],
-            )
-            .await;
         }
     }
 }
@@ -1450,6 +852,15 @@ mod cases {
 
     pub(crate) async fn latest_is_empty_on_an_empty_topic(case: &dyn Case) {
         assert_eq!(latest(case, &case.chain(), OUT).await, "");
+    }
+
+    pub(crate) async fn latest_is_empty_once_retention_dropped_every_record(case: &dyn Case) {
+        let chain = case.chain();
+        Producer::new(case, &chain, OUT, "p", 1)
+            .append(&["1", "2"])
+            .await;
+        case.expire_log(&chain, OUT).await;
+        assert_eq!(latest(case, &chain, OUT).await, "");
     }
 
     pub(crate) async fn a_cursor_resumes_strictly_after_its_record(case: &dyn Case) {
@@ -2403,124 +1814,6 @@ mod cases {
         }
     }
 
-    /// The store's log. A case runs only on a store that keeps one.
-    fn log_of(case: &dyn Case) -> Arc<dyn NotificationLog> {
-        case.store()
-            .notification_log()
-            .expect("the notification log cases run on stores that keep a log")
-    }
-
-    /// Takes the entries of `chain` from every busy partition, as `consumer`.
-    async fn entries_of(
-        log: &dyn NotificationLog,
-        chain: &ChainId,
-        consumer: &str,
-        claim_idle: Duration,
-    ) -> Vec<(u32, NotificationEntry)> {
-        let mut found = vec![];
-        for partition in log.busy().await.unwrap() {
-            for entry in log
-                .take(partition, consumer, claim_idle, 1000)
-                .await
-                .unwrap()
-            {
-                if &entry.chain == chain {
-                    found.push((partition, entry));
-                }
-            }
-        }
-        found
-    }
-
-    pub(crate) async fn an_append_writes_one_entry_with_its_last_position(case: &dyn Case) {
-        let log = log_of(case);
-        let chain = case.chain();
-        let mut producer = Producer::new(case, &chain, OUT, "p", 1);
-        let landed = producer.append(&["1", "2"]).await;
-        // A repeat of the newest batch writes nothing again.
-        producer.sequence = 1;
-        assert_eq!(producer.append(&["1", "2"]).await, landed);
-        let entries = entries_of(log.as_ref(), &chain, "a", Duration::ZERO).await;
-        let [(partition, entry)] = entries.as_slice() else {
-            panic!("one append gives one entry: {entries:?}");
-        };
-        assert!(*partition < log.partitions());
-        assert_eq!(
-            (entry.topic.as_str(), entry.position.as_str()),
-            (OUT, landed.last_position.as_str())
-        );
-    }
-
-    pub(crate) async fn an_entry_stays_until_its_ack(case: &dyn Case) {
-        let log = log_of(case);
-        let chain = case.chain();
-        Producer::new(case, &chain, OUT, "p", 1)
-            .append(&["1"])
-            .await;
-        let first = entries_of(log.as_ref(), &chain, "a", Duration::ZERO).await;
-        assert_eq!(first.len(), 1);
-        // A consumer that took an entry and didn't ack it gets it again.
-        let again = entries_of(log.as_ref(), &chain, "a", Duration::ZERO).await;
-        assert_eq!(again, first);
-        let (partition, entry) = &first[0];
-        log.ack(*partition, std::slice::from_ref(&entry.id))
-            .await
-            .unwrap();
-        assert!(
-            entries_of(log.as_ref(), &chain, "a", Duration::ZERO)
-                .await
-                .is_empty()
-        );
-    }
-
-    pub(crate) async fn another_consumer_claims_an_entry_only_after_claim_idle(case: &dyn Case) {
-        let log = log_of(case);
-        let chain = case.chain();
-        Producer::new(case, &chain, OUT, "p", 1)
-            .append(&["1"])
-            .await;
-        let hour = Duration::from_secs(3600);
-        assert_eq!(entries_of(log.as_ref(), &chain, "a", hour).await.len(), 1);
-        assert!(
-            entries_of(log.as_ref(), &chain, "b", hour).await.is_empty(),
-            "a live consumer keeps what it took"
-        );
-        tokio::time::sleep(Duration::from_millis(20)).await;
-        let claimed = entries_of(log.as_ref(), &chain, "b", Duration::from_millis(10)).await;
-        assert_eq!(claimed.len(), 1, "a stopped consumer's entry moves on");
-    }
-
-    pub(crate) async fn a_refused_append_writes_no_entry(case: &dyn Case) {
-        let log = log_of(case);
-        let store = case.store();
-        let chain = case.chain();
-        store.close_topic(&chain, OUT).await.unwrap();
-        let refused = Producer::new(case, &chain, OUT, "p", 1)
-            .send(&[data("1")])
-            .await;
-        assert!(refused.is_err());
-        assert!(
-            entries_of(log.as_ref(), &chain, "a", Duration::ZERO)
-                .await
-                .is_empty()
-        );
-    }
-
-    pub(crate) async fn the_doorbell_of_a_partition_with_entries_rings(case: &dyn Case) {
-        let log = log_of(case);
-        let chain = case.chain();
-        Producer::new(case, &chain, OUT, "p", 1)
-            .append(&["1"])
-            .await;
-        let entries = entries_of(log.as_ref(), &chain, "a", Duration::ZERO).await;
-        let partition = entries[0].0;
-        let rung = log
-            .wait_doorbell(partition % log.doorbells(), "a", Duration::from_millis(100))
-            .await
-            .unwrap();
-        assert!(rung.contains(&partition), "{rung:?}");
-    }
-
     /// What a store declares agrees with the calls it answers.
     pub(crate) async fn the_declared_capabilities_match_the_calls(case: &dyn Case) {
         let store = case.store();
@@ -2664,428 +1957,6 @@ mod cases {
     }
 }
 
-/// The archive tier, through a [TieredStore] whose hot store keeps an archive hold.
-mod archive_cases {
-    use super::*;
-
-    /// Reads a topic page by page from `after` until a page is empty. Answers the values and
-    /// their cursors.
-    async fn read_all(
-        case: &dyn Case,
-        chain: &ChainId,
-        topic: &str,
-        after: &str,
-    ) -> (Vec<String>, Vec<String>) {
-        let (mut values, mut cursors) = (Vec::new(), Vec::new());
-        let mut page = read(case, chain, topic, after).await.unwrap();
-        while !page.records.is_empty() {
-            values.extend(super::values(&page));
-            cursors.extend(page.records.iter().map(|record| record.cursor.clone()));
-            page = read_with(
-                case,
-                chain,
-                topic,
-                &page.cursor,
-                Duration::ZERO,
-                &page.state,
-            )
-            .await
-            .unwrap();
-        }
-        (values, cursors)
-    }
-
-    async fn segments(case: &dyn ArchiveCase, chain: &ChainId, topic: &str) -> usize {
-        let prefix = format!("v1/{}/", chain.namespace);
-        let mut count = 0;
-        let mut after = String::new();
-        // Each topic's objects share one directory, so walk the names of this topic only.
-        let topic_dir = archive_dir(case, chain, topic).await;
-        let Some(dir) = topic_dir else { return 0 };
-        while let Some(name) = case.archive().first_after(&dir, &after).await.unwrap() {
-            assert!(name.starts_with(&prefix), "{name}");
-            if name.ends_with(".tsr") {
-                count += 1;
-            }
-            after = name;
-        }
-        count
-    }
-
-    /// The name prefix of a topic's objects, found from its first segment.
-    async fn archive_dir(case: &dyn ArchiveCase, chain: &ChainId, topic: &str) -> Option<String> {
-        let (kind, _) = chain_owner(chain);
-        let owner = match kind {
-            "activity" => format!("a/{}/{}", chain.activity_id, chain.first_run_id),
-            "workflow_activity" => format!(
-                "wa/{}/{}/{}",
-                chain.workflow_id, chain.first_run_id, chain.activity_id
-            ),
-            _ => format!("w/{}/{}", chain.workflow_id, chain.first_run_id),
-        };
-        let dir = format!("v1/{}/{owner}/{topic}/", chain.namespace);
-        case.archive()
-            .first_after(&dir, "")
-            .await
-            .unwrap()
-            .map(|_| dir)
-    }
-
-    async fn archived(case: &dyn ArchiveCase, chain: &ChainId, topic: &str) -> String {
-        case.hot()
-            .archived(chain, topic)
-            .await
-            .unwrap()
-            .unwrap_or_default()
-    }
-
-    pub(crate) async fn archived_records_read_back_with_their_cursors(case: &dyn ArchiveCase) {
-        let chain = case.chain();
-        let mut producer = Producer::new(case, &chain, OUT, "p", 1);
-        producer.append(&["1", "2", "3"]).await;
-        let last = producer.append(&["4", "5"]).await;
-        let (values, cursors) = read_all(case, &chain, OUT, BEGINNING).await;
-        assert_eq!(values, ["1", "2", "3", "4", "5"]);
-        case.archive_now(&chain, OUT, 2).await;
-        assert_eq!(segments(case, &chain, OUT).await, 3);
-        assert_eq!(archived(case, &chain, OUT).await, last.last_position);
-        case.drop_oldest(&chain, OUT, 0).await;
-        assert_eq!(
-            read_all(case, &chain, OUT, BEGINNING).await,
-            (values.clone(), cursors.clone())
-        );
-        // A cursor in the middle resumes strictly after its record, across segments.
-        let (tail, _) = read_all(case, &chain, OUT, &cursors[1]).await;
-        assert_eq!(tail, ["3", "4", "5"]);
-    }
-
-    pub(crate) async fn one_page_crosses_segments_and_the_hot_store(case: &dyn ArchiveCase) {
-        let chain = case.chain();
-        let mut producer = Producer::new(case, &chain, OUT, "p", 1);
-        producer.append(&["1", "2", "3"]).await;
-        case.archive_now(&chain, OUT, 1).await;
-        producer.append(&["4", "5"]).await;
-        case.drop_oldest(&chain, OUT, 2).await;
-        // An exact range, as a replay reads it, comes back in one page.
-        let page = read(case, &chain, OUT, BEGINNING).await.unwrap();
-        assert_eq!(values(&page), ["1", "2", "3", "4", "5"]);
-        let cursor = page.records[0].cursor.clone();
-        let rest = read(case, &chain, OUT, &cursor).await.unwrap();
-        assert_eq!(values(&rest), ["2", "3", "4", "5"]);
-    }
-
-    pub(crate) async fn a_read_crosses_from_the_archive_into_the_hot_store(case: &dyn ArchiveCase) {
-        let chain = case.chain();
-        let mut producer = Producer::new(case, &chain, OUT, "p", 1);
-        producer.append(&["1", "2", "3"]).await;
-        case.archive_now(&chain, OUT, 10).await;
-        producer.append(&["4", "5"]).await;
-        case.drop_oldest(&chain, OUT, 2).await;
-        let (values, _) = read_all(case, &chain, OUT, BEGINNING).await;
-        assert_eq!(values, ["1", "2", "3", "4", "5"]);
-        // A later write reaches a reader that read the archive first.
-        let (_, cursors) = read_all(case, &chain, OUT, BEGINNING).await;
-        producer.append(&["6"]).await;
-        let (tail, _) = read_all(case, &chain, OUT, cursors.last().unwrap()).await;
-        assert_eq!(tail, ["6"]);
-    }
-
-    pub(crate) async fn the_trim_keeps_what_the_archive_does_not_hold(case: &dyn ArchiveCase) {
-        let chain = case.chain();
-        let mut producer = Producer::new(case, &chain, OUT, "p", 1);
-        producer.append(&["1", "2", "3"]).await;
-        case.drop_oldest(&chain, OUT, 0).await;
-        assert_eq!(
-            values(&read(case, &chain, OUT, BEGINNING).await.unwrap()),
-            ["1", "2", "3"]
-        );
-        let hot = case.hot();
-        let from_hot = hot
-            .read(StoreReadRequest {
-                chain: Some(chain.clone()),
-                topic: OUT.to_string(),
-                max_records: 10,
-                ..Default::default()
-            })
-            .await
-            .unwrap();
-        assert_eq!(from_hot.records.len(), 3);
-        case.archive_now(&chain, OUT, 10).await;
-        case.drop_oldest(&chain, OUT, 0).await;
-        let (values, _) = read_all(case, &chain, OUT, BEGINNING).await;
-        assert_eq!(values, ["1", "2", "3"]);
-    }
-
-    pub(crate) async fn an_archived_record_is_found_by_its_position(case: &dyn ArchiveCase) {
-        let chain = case.chain();
-        let first = Producer::new(case, &chain, OUT, "p", 1)
-            .append(&["1", "2"])
-            .await;
-        case.archive_now(&chain, OUT, 10).await;
-        case.forget(&chain, OUT).await;
-        let record = case
-            .store()
-            .record_at(&chain, OUT, &first.first_position)
-            .await
-            .unwrap()
-            .unwrap();
-        let record = StreamRecord::decode(&*record).unwrap();
-        assert_eq!(record.body.unwrap().data, b"1");
-        // A read that resumes with no state looks up its cursor's record, and finds it.
-        let cursor = cursor(case, &chain, OUT, &first.first_position);
-        assert_eq!(
-            values(&read(case, &chain, OUT, &cursor).await.unwrap()),
-            ["2"]
-        );
-    }
-
-    pub(crate) async fn archiving_twice_at_once_writes_each_segment_once(case: &dyn ArchiveCase) {
-        let chain = case.chain();
-        Producer::new(case, &chain, OUT, "p", 1)
-            .append(&["1", "2", "3", "4", "5"])
-            .await;
-        tokio::join!(
-            case.archive_now(&chain, OUT, 2),
-            case.archive_now(&chain, OUT, 2)
-        );
-        case.archive_now(&chain, OUT, 2).await;
-        assert_eq!(segments(case, &chain, OUT).await, 3);
-        case.drop_oldest(&chain, OUT, 0).await;
-        let (values, _) = read_all(case, &chain, OUT, BEGINNING).await;
-        assert_eq!(values, ["1", "2", "3", "4", "5"]);
-    }
-
-    pub(crate) async fn a_closed_topic_reads_its_close_from_the_archive(case: &dyn ArchiveCase) {
-        let chain = case.chain();
-        let landed = Producer::new(case, &chain, OUT, "p", 1)
-            .append(&["1", "2"])
-            .await;
-        let close = StoredClose {
-            closed_by: "run-9".to_string(),
-            ..Default::default()
-        };
-        case.store()
-            .close_topic_with(&chain, OUT, close.clone())
-            .await
-            .unwrap();
-        let limits = SegmentLimits::default();
-        let progress = archive_topic(&*case.hot(), &*case.archive(), &chain, OUT, limits, false)
-            .await
-            .unwrap();
-        assert!(progress.finished, "{progress:?}");
-        assert_eq!(progress.archived, landed.last_position);
-        case.forget(&chain, OUT).await;
-        let page = case
-            .store()
-            .read(StoreReadRequest {
-                chain: Some(chain.clone()),
-                topic: OUT.to_string(),
-                max_records: 10,
-                ..Default::default()
-            })
-            .await
-            .unwrap();
-        assert_eq!(page.records.len(), 2);
-        assert!(page.closed);
-        assert_eq!(page.close.unwrap().closed_by, "run-9");
-        let end = case
-            .store()
-            .read(StoreReadRequest {
-                chain: Some(chain.clone()),
-                topic: OUT.to_string(),
-                after_position: landed.last_position.clone(),
-                max_records: 10,
-                ..Default::default()
-            })
-            .await
-            .unwrap();
-        assert!(end.records.is_empty() && end.closed);
-        assert_eq!(end.close.unwrap().closed_by, "run-9");
-        assert_eq!(latest(case, &chain, OUT).await, landed.last_position);
-        assert_eq!(
-            case.store().newest_ever(&chain, OUT).await.unwrap(),
-            landed.last_position
-        );
-    }
-
-    pub(crate) async fn an_open_topic_the_hot_store_forgot_reads_from_the_archive(
-        case: &dyn ArchiveCase,
-    ) {
-        let chain = case.chain();
-        let landed = Producer::new(case, &chain, OUT, "p", 1)
-            .append(&["1", "2"])
-            .await;
-        case.archive_now(&chain, OUT, 10).await;
-        case.forget(&chain, OUT).await;
-        let (values, cursors) = read_all(case, &chain, OUT, BEGINNING).await;
-        assert_eq!(values, ["1", "2"]);
-        let end = read(case, &chain, OUT, &cursors[1]).await.unwrap();
-        assert!(end.records.is_empty());
-        assert_eq!(latest(case, &chain, OUT).await, landed.last_position);
-        assert_eq!(
-            case.store().newest_ever(&chain, OUT).await.unwrap(),
-            landed.last_position
-        );
-        // A topic that neither tier holds is not found, as on the hot store alone.
-        let missing = cursor(case, &chain, OTHER, &landed.last_position);
-        assert_eq!(
-            kind(read(case, &chain, OTHER, &missing).await),
-            StreamFailureKind::NotFound
-        );
-    }
-
-    pub(crate) async fn a_read_before_what_the_archive_holds_is_expired(case: &dyn ArchiveCase) {
-        let chain = case.chain();
-        let first = Producer::new(case, &chain, OUT, "p", 1)
-            .append(&["1", "2", "3", "4"])
-            .await;
-        case.archive_now(&chain, OUT, 2).await;
-        case.drop_oldest(&chain, OUT, 0).await;
-        // A bucket lifecycle rule deleted the oldest segment.
-        let dir = archive_dir(case, &chain, OUT).await.unwrap();
-        let oldest = case
-            .archive()
-            .first_after(&dir, &format!("{dir}seg-"))
-            .await
-            .unwrap()
-            .unwrap();
-        case.lose(&oldest).await;
-        let cursor = cursor(case, &chain, OUT, &first.first_position);
-        assert_eq!(
-            kind(read(case, &chain, OUT, &cursor).await),
-            StreamFailureKind::Expired
-        );
-        // A read from the beginning starts at the oldest record still held.
-        let (values, _) = read_all(case, &chain, OUT, BEGINNING).await;
-        assert_eq!(values, ["3", "4"]);
-    }
-
-    pub(crate) async fn a_read_at_the_last_record_the_archive_lost_goes_on(case: &dyn ArchiveCase) {
-        let chain = case.chain();
-        let mut producer = Producer::new(case, &chain, OUT, "p", 1);
-        let first = producer.append(&["1", "2"]).await;
-        case.archive_now(&chain, OUT, 10).await;
-        let lost = producer.append(&["3"]).await;
-        producer.append(&["4", "5"]).await;
-        // The archive's hold lapses, and retention drops `3` before the archive takes it.
-        case.lapse_archive_hold(&chain, OUT).await;
-        case.drop_oldest(&chain, OUT, 2).await;
-        case.archive_now(&chain, OUT, 10).await;
-        // Only the archive answers now.
-        case.forget(&chain, OUT).await;
-        let at_lost = cursor(case, &chain, OUT, &lost.last_position);
-        let (values, _) = read_all(case, &chain, OUT, &at_lost).await;
-        assert_eq!(values, ["4", "5"]);
-        let before_lost = cursor(case, &chain, OUT, &first.last_position);
-        assert_eq!(
-            kind(read(case, &chain, OUT, &before_lost).await),
-            StreamFailureKind::Expired
-        );
-    }
-
-    pub(crate) async fn a_driver_finds_the_topics_to_archive(case: &dyn ArchiveCase) {
-        let chain = case.chain();
-        Producer::new(case, &chain, OUT, "p", 1)
-            .append(&["1"])
-            .await;
-        let marks = case
-            .hot()
-            .notification_log()
-            .unwrap()
-            .archive_marks(1000)
-            .await
-            .unwrap();
-        assert!(
-            marks
-                .iter()
-                .any(|mark| mark.chain == chain && mark.topic == OUT),
-            "{marks:?}"
-        );
-    }
-
-    pub(crate) async fn a_drop_the_archive_holds_loses_nothing(case: &dyn ArchiveCase) {
-        let chain = case.chain();
-        let first = read(case, &chain, OUT, BEGINNING).await.unwrap();
-        assert!(first.records.is_empty());
-        Producer::new(case, &chain, OUT, "p", 1)
-            .append(&["1", "2"])
-            .await;
-        case.archive_now(&chain, OUT, 10).await;
-        case.drop_oldest(&chain, OUT, 1).await;
-        let next = read_with(
-            case,
-            &chain,
-            OUT,
-            &first.cursor,
-            Duration::ZERO,
-            &first.state,
-        )
-        .await
-        .unwrap();
-        assert_eq!(values(&next), ["1", "2"]);
-    }
-
-    pub(crate) async fn deleting_an_owner_deletes_its_archive(case: &dyn ArchiveCase) {
-        let chain = case.chain();
-        Producer::new(case, &chain, OUT, "p", 1)
-            .append(&["1"])
-            .await;
-        case.archive_now(&chain, OUT, 10).await;
-        assert_eq!(segments(case, &chain, OUT).await, 1);
-        let (kind_name, id) = chain_owner(&chain);
-        let request = match kind_name {
-            "activity" => DeleteOwnerRequest {
-                namespace: chain.namespace.clone(),
-                owner_kind: StreamOwnerKind::Activity as i32,
-                activity_id: id.to_string(),
-                ..Default::default()
-            },
-            _ => DeleteOwnerRequest {
-                namespace: chain.namespace.clone(),
-                owner_kind: StreamOwnerKind::Workflow as i32,
-                workflow_id: chain.workflow_id.clone(),
-                ..Default::default()
-            },
-        };
-        let deleted = case.store().delete_owner(request).await.unwrap();
-        assert!(deleted.deleted >= 1);
-        assert_eq!(segments(case, &chain, OUT).await, 0);
-        assert!(read_all(case, &chain, OUT, BEGINNING).await.0.is_empty());
-    }
-}
-
-macro_rules! archive_conformance {
-    ($case:expr; $($name:ident),* $(,)?) => {
-        $(
-            #[tokio::test]
-            async fn $name() {
-                let Some(case) = $case.await else { return };
-                super::archive_cases::$name(&case).await;
-            }
-        )*
-    };
-}
-
-/// The archive cases. `the_trim_keeps_what_the_archive_does_not_hold` runs on its own, since it
-/// needs a test trim that keeps what a hold holds.
-macro_rules! archive_cases {
-    ($case:expr) => {
-        archive_conformance!($case;
-            archived_records_read_back_with_their_cursors,
-            one_page_crosses_segments_and_the_hot_store,
-            a_read_crosses_from_the_archive_into_the_hot_store,
-            an_archived_record_is_found_by_its_position,
-            archiving_twice_at_once_writes_each_segment_once,
-            a_closed_topic_reads_its_close_from_the_archive,
-            an_open_topic_the_hot_store_forgot_reads_from_the_archive,
-            a_read_before_what_the_archive_holds_is_expired,
-            a_read_at_the_last_record_the_archive_lost_goes_on,
-            a_drop_the_archive_holds_loses_nothing,
-            deleting_an_owner_deletes_its_archive,
-        );
-    };
-}
-
 macro_rules! conformance {
     ($case:expr; $($name:ident),* $(,)?) => {
         $(
@@ -3107,6 +1978,7 @@ macro_rules! store_cases {
             an_empty_append_is_refused,
             an_append_without_a_digest_is_refused,
             latest_is_empty_on_an_empty_topic,
+            latest_is_empty_once_retention_dropped_every_record,
             a_cursor_resumes_strictly_after_its_record,
             latest_positions_a_reader_at_the_end,
             end_reads_only_what_arrives_after_the_read_starts,
@@ -3149,38 +2021,18 @@ macro_rules! store_cases {
     };
 }
 
-/// The notification log, for a store that keeps one.
-macro_rules! log_cases {
-    ($case:expr) => {
-        conformance!($case;
-            an_append_writes_one_entry_with_its_last_position,
-            an_entry_stays_until_its_ack,
-            another_consumer_claims_an_entry_only_after_claim_idle,
-            a_refused_append_writes_no_entry,
-            the_doorbell_of_a_partition_with_entries_rings,
-        );
-    };
-}
-
 mod memory {
     store_cases!(super::memory());
     conformance!(super::memory(); deleting_an_owner_drops_every_chain_of_it);
 }
 
-mod memory_with_log {
-    store_cases!(super::memory_with_log());
-    log_cases!(super::memory_with_log());
-}
-
 mod activity_memory {
     store_cases!(super::activity(super::memory()));
-    log_cases!(super::activity(super::memory_with_log()));
     conformance!(super::activity(super::memory()); deleting_an_owner_drops_every_chain_of_it);
 }
 
 mod workflow_activity_memory {
     store_cases!(super::workflow_activity(super::memory()));
-    log_cases!(super::workflow_activity(super::memory_with_log()));
     conformance!(super::workflow_activity(super::memory());
         deleting_a_workflow_drops_its_workflow_activities,
     );
@@ -3188,7 +2040,6 @@ mod workflow_activity_memory {
 
 mod notifying_memory {
     store_cases!(super::notifying(super::memory()));
-    log_cases!(super::notifying(super::memory_with_log()));
     conformance!(super::notifying(super::memory());
         deleting_an_owner_drops_every_chain_of_it,
     );
@@ -3214,10 +2065,6 @@ mod cluster_redis {
 #[cfg(feature = "redis")]
 mod activity_standalone_redis {
     store_cases!(super::activity(super::on_redis::redis(
-        "STREAMS_REDIS_URL",
-        false
-    )));
-    log_cases!(super::activity(super::on_redis::redis_with_log(
         "STREAMS_REDIS_URL",
         false
     )));
@@ -3249,10 +2096,6 @@ mod activity_cluster_redis {
         "STREAMS_REDIS_CLUSTER_URL",
         true
     )));
-    log_cases!(super::activity(super::on_redis::redis_with_log(
-        "STREAMS_REDIS_CLUSTER_URL",
-        true
-    )));
     conformance!(super::activity(super::on_redis::redis("STREAMS_REDIS_CLUSTER_URL", true));
         deleting_an_owner_drops_every_chain_of_it,
     );
@@ -3261,10 +2104,6 @@ mod activity_cluster_redis {
 #[cfg(feature = "redis")]
 mod workflow_activity_standalone_redis {
     store_cases!(super::workflow_activity(super::on_redis::redis(
-        "STREAMS_REDIS_URL",
-        false
-    )));
-    log_cases!(super::workflow_activity(super::on_redis::redis_with_log(
         "STREAMS_REDIS_URL",
         false
     )));
@@ -3289,19 +2128,15 @@ mod workflow_activity_documented_acl_redis {
 }
 
 #[cfg(feature = "redis")]
-mod workflow_activity_documented_acl_cluster_redis_with_log {
+mod workflow_activity_documented_acl_cluster_redis {
     store_cases!(super::workflow_activity(
-        super::on_redis::redis_as_documented_user_with_log("STREAMS_REDIS_CLUSTER_URL", true)
+        super::on_redis::redis_as_documented_user("STREAMS_REDIS_CLUSTER_URL", true, &[])
     ));
 }
 
 #[cfg(feature = "redis")]
 mod workflow_activity_cluster_redis {
     store_cases!(super::workflow_activity(super::on_redis::redis(
-        "STREAMS_REDIS_CLUSTER_URL",
-        true
-    )));
-    log_cases!(super::workflow_activity(super::on_redis::redis_with_log(
         "STREAMS_REDIS_CLUSTER_URL",
         true
     )));
@@ -3312,24 +2147,6 @@ mod workflow_activity_cluster_redis {
     ));
         deleting_a_workflow_drops_its_workflow_activities,
     );
-}
-
-#[cfg(feature = "redis")]
-mod standalone_redis_with_log {
-    store_cases!(super::on_redis::redis_with_log("STREAMS_REDIS_URL", false));
-    log_cases!(super::on_redis::redis_with_log("STREAMS_REDIS_URL", false));
-}
-
-#[cfg(feature = "redis")]
-mod cluster_redis_with_log {
-    store_cases!(super::on_redis::redis_with_log(
-        "STREAMS_REDIS_CLUSTER_URL",
-        true
-    ));
-    log_cases!(super::on_redis::redis_with_log(
-        "STREAMS_REDIS_CLUSTER_URL",
-        true
-    ));
 }
 
 #[cfg(feature = "redis")]
@@ -3351,22 +2168,6 @@ mod documented_acl_redis {
     conformance!(super::on_redis::redis_as_documented_user("STREAMS_REDIS_URL", false, &["+scan"]);
         deleting_an_owner_drops_every_chain_of_it,
     );
-}
-
-#[cfg(feature = "redis")]
-mod documented_acl_redis_with_log {
-    store_cases!(super::on_redis::redis_as_documented_user_with_log(
-        "STREAMS_REDIS_URL",
-        false
-    ));
-}
-
-#[cfg(feature = "redis")]
-mod documented_acl_cluster_redis_with_log {
-    store_cases!(super::on_redis::redis_as_documented_user_with_log(
-        "STREAMS_REDIS_CLUSTER_URL",
-        true
-    ));
 }
 
 #[cfg(feature = "redis")]
@@ -3416,14 +2217,6 @@ mod kvrocks {
     conformance!(super::on_redis::redis("STREAMS_KVROCKS_URL", false);
         deleting_an_owner_drops_every_chain_of_it,
     );
-    // Kvrocks answers an empty `XREADGROUP` for a missing group where Redis fails with
-    // `NOGROUP`, so the doorbell's group is never made and its case can't pass.
-    conformance!(super::on_redis::redis_with_log("STREAMS_KVROCKS_URL", false);
-        an_append_writes_one_entry_with_its_last_position,
-        an_entry_stays_until_its_ack,
-        another_consumer_claims_an_entry_only_after_claim_idle,
-        a_refused_append_writes_no_entry,
-    );
 }
 
 #[cfg(feature = "redis")]
@@ -3431,251 +2224,6 @@ mod workflow_activity_kvrocks {
     store_cases!(super::workflow_activity(super::on_redis::redis(
         "STREAMS_KVROCKS_URL",
         false
-    )));
-}
-
-#[cfg(feature = "postgres")]
-mod postgres {
-    store_cases!(super::on_postgres::postgres("STREAMS_POSTGRES_URL"));
-    conformance!(super::on_postgres::postgres("STREAMS_POSTGRES_URL");
-        deleting_an_owner_drops_every_chain_of_it,
-    );
-}
-
-#[cfg(feature = "postgres")]
-mod postgres_with_log {
-    store_cases!(super::on_postgres::postgres_with_log(
-        "STREAMS_POSTGRES_URL"
-    ));
-    log_cases!(super::on_postgres::postgres_with_log(
-        "STREAMS_POSTGRES_URL"
-    ));
-}
-
-#[cfg(feature = "postgres")]
-mod postgres_notifying_reads {
-    store_cases!(super::on_postgres::postgres_notifying_reads(
-        "STREAMS_POSTGRES_URL"
-    ));
-}
-
-#[cfg(feature = "postgres")]
-mod pgbouncer_postgres {
-    // Transaction mode, with the listener and the migrations on a direct connection.
-    store_cases!(super::on_postgres::postgres_through_pgbouncer());
-    log_cases!(super::on_postgres::postgres_through_pgbouncer());
-}
-
-#[cfg(feature = "postgres")]
-mod activity_postgres {
-    store_cases!(super::activity(super::on_postgres::postgres(
-        "STREAMS_POSTGRES_URL"
-    )));
-    log_cases!(super::activity(super::on_postgres::postgres_with_log(
-        "STREAMS_POSTGRES_URL"
-    )));
-    conformance!(super::activity(super::on_postgres::postgres("STREAMS_POSTGRES_URL"));
-        deleting_an_owner_drops_every_chain_of_it,
-    );
-}
-
-#[cfg(feature = "postgres")]
-mod workflow_activity_postgres {
-    store_cases!(super::workflow_activity(super::on_postgres::postgres(
-        "STREAMS_POSTGRES_URL"
-    )));
-    log_cases!(super::workflow_activity(
-        super::on_postgres::postgres_with_log("STREAMS_POSTGRES_URL")
-    ));
-    conformance!(super::workflow_activity(super::on_postgres::postgres("STREAMS_POSTGRES_URL"));
-        deleting_a_workflow_drops_its_workflow_activities,
-    );
-}
-
-#[cfg(feature = "postgres")]
-mod documented_role_postgres_with_log {
-    store_cases!(super::on_postgres::postgres_as_documented_role_with_log(
-        "STREAMS_POSTGRES_URL"
-    ));
-    log_cases!(super::on_postgres::postgres_as_documented_role_with_log(
-        "STREAMS_POSTGRES_URL"
-    ));
-}
-
-#[cfg(feature = "postgres")]
-mod notifying_postgres {
-    store_cases!(super::notifying(super::on_postgres::postgres(
-        "STREAMS_POSTGRES_URL"
-    )));
-}
-
-#[cfg(feature = "postgres")]
-mod documented_role_postgres {
-    // A role with only the page's grants, on a schema that a DBA migrated.
-    store_cases!(super::on_postgres::postgres_as_documented_role(
-        "STREAMS_POSTGRES_URL"
-    ));
-    conformance!(super::on_postgres::postgres_as_documented_role("STREAMS_POSTGRES_URL");
-        deleting_an_owner_drops_every_chain_of_it,
-    );
-}
-
-mod tiered_memory {
-    store_cases!(super::tiered(super::memory()));
-    log_cases!(super::tiered(super::memory_with_log()));
-    conformance!(super::tiered(super::memory()); deleting_an_owner_drops_every_chain_of_it);
-}
-
-mod archive_memory {
-    archive_cases!(super::tiered(super::memory_holding_for_archive()));
-    archive_conformance!(super::tiered(super::memory_holding_for_archive());
-        the_trim_keeps_what_the_archive_does_not_hold,
-    );
-}
-
-mod archive_activity_memory {
-    archive_cases!(super::tiered(super::activity(
-        super::memory_holding_for_archive()
-    )));
-}
-
-mod archive_workflow_activity_memory {
-    archive_cases!(super::tiered(super::workflow_activity(
-        super::memory_holding_for_archive()
-    )));
-}
-
-#[cfg(feature = "redis")]
-mod archive_standalone_redis {
-    archive_cases!(super::tiered(super::on_redis::redis_with_archive(
-        "STREAMS_REDIS_URL",
-        false
-    )));
-    archive_conformance!(super::tiered(super::on_redis::redis_with_archive(
-        "STREAMS_REDIS_URL",
-        false
-    ));
-        the_trim_keeps_what_the_archive_does_not_hold,
-    );
-    // The test trim keeps what the archive's hold holds, so the store cases that trim run with no
-    // hold, as on memory and PostgreSQL.
-    store_cases!(super::tiered(super::on_redis::redis_with_log(
-        "STREAMS_REDIS_URL",
-        false
-    )));
-    log_cases!(super::tiered(super::on_redis::redis_with_archive(
-        "STREAMS_REDIS_URL",
-        false
-    )));
-}
-
-#[cfg(feature = "redis")]
-mod archive_documented_acl_redis {
-    archive_cases!(super::tiered(
-        super::on_redis::redis_as_documented_user_with_archive("STREAMS_REDIS_URL", false)
-    ));
-    archive_conformance!(super::tiered(
-        super::on_redis::redis_as_documented_user_with_archive("STREAMS_REDIS_URL", false)
-    );
-        a_driver_finds_the_topics_to_archive,
-    );
-}
-
-#[cfg(feature = "redis")]
-mod archive_cluster_redis {
-    archive_cases!(super::tiered(super::on_redis::redis_with_archive(
-        "STREAMS_REDIS_CLUSTER_URL",
-        true
-    )));
-    archive_conformance!(super::tiered(super::on_redis::redis_with_archive(
-        "STREAMS_REDIS_CLUSTER_URL",
-        true
-    ));
-        the_trim_keeps_what_the_archive_does_not_hold,
-    );
-    store_cases!(super::tiered(super::on_redis::redis_with_log(
-        "STREAMS_REDIS_CLUSTER_URL",
-        true
-    )));
-}
-
-#[cfg(feature = "redis")]
-mod archive_workflow_activity_cluster_redis {
-    archive_cases!(super::tiered(super::workflow_activity(
-        super::on_redis::redis_with_archive("STREAMS_REDIS_CLUSTER_URL", true)
-    )));
-}
-
-#[cfg(feature = "postgres")]
-mod archive_postgres {
-    archive_cases!(super::tiered(super::on_postgres::postgres_with_archive(
-        "STREAMS_POSTGRES_URL"
-    )));
-    // The test trim keeps what a hold holds, as the janitor does.
-    archive_conformance!(super::tiered(super::on_postgres::postgres_with_archive(
-        "STREAMS_POSTGRES_URL"
-    ));
-        the_trim_keeps_what_the_archive_does_not_hold,
-    );
-    log_cases!(super::tiered(super::on_postgres::postgres_with_archive(
-        "STREAMS_POSTGRES_URL"
-    )));
-}
-
-#[cfg(feature = "postgres")]
-mod tiered_postgres {
-    // The test trim keeps what the archive's hold holds, so the store cases that trim run with no
-    // hold, as on memory.
-    store_cases!(super::tiered(super::on_postgres::postgres_with_log(
-        "STREAMS_POSTGRES_URL"
-    )));
-    log_cases!(super::tiered(super::on_postgres::postgres_with_log(
-        "STREAMS_POSTGRES_URL"
-    )));
-    conformance!(super::tiered(super::on_postgres::postgres("STREAMS_POSTGRES_URL"));
-        deleting_an_owner_drops_every_chain_of_it,
-    );
-}
-
-#[cfg(feature = "postgres")]
-mod archive_activity_postgres {
-    archive_cases!(super::tiered(super::activity(
-        super::on_postgres::postgres_with_archive("STREAMS_POSTGRES_URL")
-    )));
-}
-
-#[cfg(feature = "postgres")]
-mod archive_workflow_activity_postgres {
-    archive_cases!(super::tiered(super::workflow_activity(
-        super::on_postgres::postgres_with_archive("STREAMS_POSTGRES_URL")
-    )));
-}
-
-#[cfg(all(feature = "archive", feature = "postgres"))]
-mod archive_s3_postgres {
-    archive_cases!(super::tiered_on_s3(
-        super::on_postgres::postgres_with_archive("STREAMS_POSTGRES_URL")
-    ));
-    archive_conformance!(super::tiered_on_s3(super::on_postgres::postgres_with_archive(
-        "STREAMS_POSTGRES_URL"
-    ));
-        the_trim_keeps_what_the_archive_does_not_hold,
-    );
-}
-
-#[cfg(feature = "archive")]
-mod archive_s3_memory {
-    archive_cases!(super::tiered_on_s3(super::memory_holding_for_archive()));
-    archive_conformance!(super::tiered_on_s3(super::memory_holding_for_archive());
-        the_trim_keeps_what_the_archive_does_not_hold,
-    );
-}
-
-#[cfg(all(feature = "archive", feature = "redis"))]
-mod archive_s3_cluster_redis {
-    archive_cases!(super::tiered_on_s3(super::on_redis::redis_with_archive(
-        "STREAMS_REDIS_CLUSTER_URL",
-        true
     )));
 }
 

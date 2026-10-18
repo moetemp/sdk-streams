@@ -25,17 +25,6 @@ serde_serialize = ["temporalio-common/serde_serialize"]
 # The Redis store. Off by default, so a build that needs only the trait takes no Redis client.
 # TLS uses the rustls provider the process installs, the same one Core uses.
 redis = ["dep:redis", "dep:crc16"]
-# The archive on object storage: S3 and S3-compatible stores. The local-file archive needs no
-# feature.
-archive = ["dep:object_store", "dep:futures-util"]
-# The PostgreSQL store. TLS uses the rustls provider the process installs, as the Redis store does.
-postgres = [
-    "dep:deadpool-postgres",
-    "dep:rustls",
-    "dep:rustls-native-certs",
-    "dep:tokio-postgres",
-    "dep:tokio-postgres-rustls",
-]
 
 [dependencies]
 async-trait = "0.1"
@@ -45,11 +34,8 @@ bytes = "1"
 # the build into FIPS mode.
 aws-lc-rs = { version = "1", features = ["fips"], optional = true }
 crc16 = { version = "0.4", optional = true }
-deadpool-postgres = { version = "0.14", optional = true }
-futures-util = { version = "0.3", optional = true, default-features = false }
 gethostname = "1.0.2"
 lru = "0.18"
-object_store = { version = "0.14", optional = true, default-features = false, features = ["aws"] }
 parking_lot = "0.12"
 prost = { workspace = true }
 prost-types = { workspace = true }
@@ -60,8 +46,6 @@ redis = { version = "1.7", optional = true, default-features = false, features =
     "streams",
     "tokio-rustls-comp",
 ] }
-rustls = { version = "0.23", optional = true, default-features = false, features = ["std"] }
-rustls-native-certs = { version = "0.8", optional = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
 sha2 = "0.10"
@@ -70,8 +54,6 @@ temporalio-common = { workspace = true }
 thiserror = { workspace = true }
 tonic = { workspace = true }
 tokio = { version = "1.47", default-features = false, features = ["macros", "rt", "sync", "time"] }
-tokio-postgres = { version = "0.7", optional = true }
-tokio-postgres-rustls = { version = "0.14", optional = true }
 tokio-util = { version = "0.7", default-features = false, features = ["rt"] }
 tracing = "0.1"
 
@@ -85,7 +67,6 @@ assert_matches = "1.5"
 futures-util = { version = "0.3", default-features = false }
 parking_lot = "0.12"
 rstest = "0.26"
-rustls = { version = "0.23", default-features = false, features = ["ring", "std"] }
 tonic = { workspace = true }
 serde_yaml = "0.9"
 tracing-subscriber = { version = "0.3", default-features = false, features = ["fmt"] }
