@@ -13,7 +13,7 @@ the `sdk-core` submodule commit of the sdk-python stage that links the crate.
 
 | Stage | sdk-streams branch | sdk-rust commit |
 |---|---|---|
-| Brook | `moe/brook/ss1-import-store` and up | `moe/brook/k1-workflow-task-info` `d6cad205` |
+| Brook | `moe/brook/ss1-import-store` and up | `moe/brook/k1-workflow-task-info` `c7080de9` |
 
 ## Linking from a lang bridge
 
