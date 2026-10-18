@@ -1796,7 +1796,7 @@ async fn a_replay_read_on_redis_repeats_the_read_and_survives_retention_under_a_
 /// A reader's first range starts at the stream's start, so it has no cursor to find gone. Once
 /// its hold lapsed and retention trimmed the range, later records stand where it began.
 #[tokio::test]
-async fn a_replay_read_from_a_trimmed_start_on_redis_is_rec_01() {
+async fn a_replay_read_from_a_trimmed_start_on_redis_is_a_lost_range() {
     use sha2::{Digest, Sha256};
     use temporalio_common::protos::temporal::api::{
         common::v1::Payload, enums::v1::WorkflowExecutionStatus,
@@ -2043,7 +2043,7 @@ async fn a_topic_refuses_a_floor_holder_past_the_cap() {
 }
 
 #[tokio::test]
-async fn a_replay_whose_end_record_the_store_lost_is_rec_01() {
+async fn a_replay_whose_end_record_the_store_lost_is_a_lost_range() {
     use sha2::{Digest, Sha256};
     use temporalio_common::protos::temporal::api::{
         common::v1::Payload, enums::v1::WorkflowExecutionStatus,

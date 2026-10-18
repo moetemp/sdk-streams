@@ -3,8 +3,8 @@
 The store on the application's Redis.
 
 Records live in Redis and never pass through Temporal. The key layout, the stored values and
-the Lua scripts are the ones the SDKs used before the store moved into this crate, apart from the
-append's topic check, so a stream one wrote stays readable and writable by the other.
+the Lua scripts are the ones the SDKs' own Redis providers use, apart from the append's topic
+check, so a stream one wrote stays readable and writable by the other.
 
 **Appends.** One script writes a whole batch, so a reader never sees part of one. The topic's
 meta hash keeps one field per producer attempt: the newest batch's first sequence, its record

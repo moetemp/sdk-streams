@@ -222,7 +222,7 @@ impl Call<'_> {
     }
 }
 
-/// Reads a stream and the streams it links, in one order (DD-204, DD-205).
+/// Reads a stream and the streams it links, in one order.
 pub(crate) async fn follow(
     streams: &Streams,
     subscriptions: &Subscriptions,

@@ -1,7 +1,7 @@
-//! The Lua scripts, on the stored format the SDKs used before the store moved into this crate.
+//! The Lua scripts, on the stored format the SDKs' own Redis providers share.
 //!
 //! The append script is the one the SDKs sent, with one more check, the topic's close flag, so a
-//! batch can't land after the topic's close returned (DD-16), and its trim keeps what
+//! batch can't land after the topic's close returned, and its trim keeps what
 //! positions-only readers hold. Its trim reads back from the floor only when the oldest record is
 //! below it, since `XREVRANGE` from the floor reads the whole retained log when no record is older,
 //! and a forward read copies every doomed record into Lua. Redis doesn't roll a script back, so it
