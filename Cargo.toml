@@ -26,7 +26,7 @@ default-features = false
 
 [workspace.dependencies.temporalio-sdk-core]
 git = "https://github.com/moetemp/sdk-rust"
-rev = "5dd6f0ec32f5f1f951c0ef8faa38ade5808cef0b"
+rev = "d6cad205043d4d99928e67a7859247da3c91e368"
 default-features = false
 
 [workspace.dependencies.temporalio-client]
