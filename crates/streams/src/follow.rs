@@ -60,7 +60,7 @@ impl Call<'_> {
 
     /// The read of source `number` that comes next, waiting up to `wait`.
     fn read_request(&self, number: u32, wait: Duration) -> Option<ReadRequest> {
-        let (stream, cursor, state, _) = self.state.read_input(number)?;
+        let (stream, cursor, state) = self.state.read_input(number)?;
         Some(ReadRequest {
             stream: Some(stream),
             after: cursor,
