@@ -1,4 +1,4 @@
-//! The N0a contract's models in their JSON transfer form.
+//! The stream contract's models in their JSON transfer form.
 //!
 //! Inputs reject unknown members, so a typo fails at the endpoint. Outputs skip absent members, as
 //! the generated callers expect. Bytes cross as padded standard base64, and an integer may cross

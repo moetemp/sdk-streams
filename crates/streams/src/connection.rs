@@ -94,8 +94,9 @@ async fn notifier_call<Resp: Message + Default>(
 
 /// Runs one synchronous Nexus operation through `connection`'s server and answers with its result
 /// or its failure. sdk-rust lists no stub for the RPC, so the call goes by its method path, with
-/// the namespace header. The server persists nothing and does not retry, so neither does this
-/// call past the connection's own retry of a call that never reached the server.
+/// the namespace header. The connection's retry policy applies, so the server can run one call
+/// twice. That is safe for the calls the crate sends, which are reads, follows and attaches keyed
+/// by the start's request id.
 pub async fn execute_sync_nexus_operation(
     connection: &Connection,
     request: ExecuteSyncNexusOperationRequest,
