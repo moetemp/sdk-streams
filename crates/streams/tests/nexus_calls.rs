@@ -4,6 +4,9 @@
 //! The cases run on memory, and on Redis when `STREAMS_REDIS_URL` is set.
 
 mod nexus_support;
+#[cfg(feature = "redis")]
+#[path = "support/server.rs"]
+mod server;
 
 use nexus_support::*;
 use prost::Message;
@@ -872,10 +875,7 @@ mod memory_lane {
 
 #[cfg(feature = "redis")]
 async fn on_redis() -> Option<Arc<dyn StreamStore>> {
-    let Ok(url) = std::env::var("STREAMS_REDIS_URL") else {
-        eprintln!("set STREAMS_REDIS_URL to run the Redis cases");
-        return None;
-    };
+    let url = server::server_url("STREAMS_REDIS_URL")?;
     let mut options = temporalio_streams::RedisStoreOptions::new(url);
     options.key_prefix = workflow();
     Some(Arc::new(
