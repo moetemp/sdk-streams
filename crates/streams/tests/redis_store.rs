@@ -5,6 +5,9 @@
 
 #![cfg(feature = "redis")]
 
+#[path = "support/server.rs"]
+mod server;
+
 use prost::Message;
 use redis::AsyncCommands;
 use serde_json::Value as Json;
@@ -39,11 +42,7 @@ fn unique(prefix: &str) -> String {
 }
 
 fn url() -> Option<String> {
-    let url = std::env::var("STREAMS_REDIS_URL").ok();
-    if url.is_none() {
-        eprintln!("set STREAMS_REDIS_URL to run the Redis store tests");
-    }
-    url
+    server::server_url("STREAMS_REDIS_URL")
 }
 
 struct Setup {
@@ -656,7 +655,7 @@ async fn appends_trim_to_retention_and_slide_the_expiry() {
 }
 
 #[tokio::test]
-async fn rule_18_1_a_session_older_than_the_retention_leaves_the_meta() {
+async fn a_session_older_than_the_retention_leaves_the_meta() {
     // One field per session would otherwise grow the meta for as long as the topic is written,
     // long after the records it guards are gone.
     let Some(mut setup) = retained_for(Duration::from_millis(200)).await else {
@@ -690,7 +689,7 @@ fn waiting_read(chain: &ChainId, wait: Duration) -> StoreReadRequest {
 }
 
 #[tokio::test]
-async fn rule_8_2_a_blocked_read_on_a_silent_server_ends_by_its_deadline() {
+async fn a_blocked_read_on_a_silent_server_ends_by_its_deadline() {
     let Some(url) = url() else {
         return;
     };
@@ -727,7 +726,7 @@ async fn rule_8_2_a_blocked_read_on_a_silent_server_ends_by_its_deadline() {
 }
 
 #[tokio::test]
-async fn rule_8_3_a_dead_idle_connection_is_replaced_in_the_same_read() {
+async fn a_dead_idle_connection_is_replaced_in_the_same_read() {
     let Some(url) = url() else {
         return;
     };
@@ -855,7 +854,7 @@ async fn a_topic_closed_before_its_first_write_still_expires() {
 }
 
 #[tokio::test]
-async fn rule_10_1_an_append_that_races_a_topic_close_is_refused_once_the_close_returned() {
+async fn an_append_that_races_a_topic_close_is_refused_once_the_close_returned() {
     let Some(url) = url() else {
         return;
     };
@@ -1022,7 +1021,7 @@ async fn a_read_that_falls_behind_retention_fails_instead_of_skipping() {
 }
 
 #[tokio::test]
-async fn rule_22_1_a_lost_connection_on_the_read_checks_is_a_storage_failure() {
+async fn a_lost_connection_on_the_read_checks_is_a_storage_failure() {
     let Some(url) = url() else {
         return;
     };
@@ -1044,7 +1043,7 @@ async fn rule_22_1_a_lost_connection_on_the_read_checks_is_a_storage_failure() {
 }
 
 #[tokio::test]
-async fn rule_20_4_a_malformed_entry_fails_with_its_cursor() {
+async fn a_malformed_entry_fails_with_its_cursor() {
     use temporalio_streams::{ReadTarget, mint_cursor, proto::ReadRequest, read_page, stream_hash};
     let Some(mut setup) = setup().await else {
         return;
@@ -1208,8 +1207,7 @@ async fn a_server_that_refuses_config_is_not_warned_about() {
 
 #[tokio::test]
 async fn an_evicting_primary_of_a_cluster_is_warned_about() {
-    let Ok(url) = std::env::var("STREAMS_REDIS_CLUSTER_URL") else {
-        eprintln!("set STREAMS_REDIS_CLUSTER_URL to run the Redis cluster tests");
+    let Some(url) = server::server_url("STREAMS_REDIS_CLUSTER_URL") else {
         return;
     };
     let _serial = POLICY.lock().await;
@@ -1419,8 +1417,7 @@ async fn a_delete_without_scan_is_refused_under_the_documented_acl() {
 
 #[tokio::test]
 async fn a_delete_reaches_every_primary_of_a_cluster() {
-    let Ok(url) = std::env::var("STREAMS_REDIS_CLUSTER_URL") else {
-        eprintln!("set STREAMS_REDIS_CLUSTER_URL to run the Redis cluster tests");
+    let Some(url) = server::server_url("STREAMS_REDIS_CLUSTER_URL") else {
         return;
     };
     let prefix = unique("cluster-delete");
