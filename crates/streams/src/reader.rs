@@ -85,24 +85,18 @@ fn task_failed(previous: i64, started: i64, task: i64, completed: &[i64]) -> boo
 /// Whether `record` withdraws what its producer's `previous` attempt wrote. `started` is the
 /// WorkflowTaskStarted event id that `previous` carried.
 ///
-/// Any producer's higher attempt is a retry, except a Workflow producer's (`@<run id>`) and a
-/// Local Activity producer's (`__temporal_local_<n>@<run id>`). They move to a higher attempt
-/// with each completed task, so a later task withdraws nothing by itself, as [task_failed] says.
-/// A Local Activity's own retry in the same task attempt withdraws too.
+/// Any producer's higher attempt is a retry, except a Workflow producer's (`@<run id>`). It moves
+/// to a higher attempt with each completed task, so a later task withdraws nothing by itself, as
+/// [task_failed] says. A Local Activity call (`__temporal_local_<n>@<run id>`) runs again only
+/// when History has no marker for it, so its higher attempt is a retry too.
 fn supersedes(previous: i64, started: i64, record: &StreamRecord) -> bool {
     match TaskProducer::of(&record.producer_id) {
         None => true,
         Some(TaskProducer::Workflow(_)) => {
             task_failed(previous, started, record.attempt, &record.completed_tasks)
         }
-        Some(call) => {
-            // The read withdrew this attempt already, and no record has it.
-            if previous & LOCAL_CALL_ATTEMPT == 0 {
-                return false;
-            }
-            let (previous, task) = (call.task(previous), call.task(record.attempt));
-            previous == task || task_failed(previous, started, task, &record.completed_tasks)
-        }
+        // The read withdrew this attempt already, and no record has it.
+        Some(TaskProducer::Local(_)) => previous & LOCAL_CALL_ATTEMPT != 0,
     }
 }
 
