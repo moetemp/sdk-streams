@@ -676,6 +676,7 @@ mod tests {
             producer: Some(append_request::Producer::Named(NamedProducer {
                 producer_id: "p".to_string(),
                 attempt: 1,
+                ..Default::default()
             })),
             sequence: 1,
             digest: vec![1; 32],
