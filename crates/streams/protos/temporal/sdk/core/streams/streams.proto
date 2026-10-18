@@ -782,7 +782,7 @@ message StoreLatestResponse {
 
 // One live activation's stream output and the facts of its run, sent before lang completes the
 // activation. Lang sends none while it replays, since the records are in the store already. It
-// sends one for an activation with records or with a terminal command.
+// sends one for an activation with records, a terminal command or a resolved owner Activity.
 message PublishWorkflowTaskRequest {
   string namespace = 1;
   // Names the lang Worker. The service keys each run's state by the Worker and the run, so two
@@ -808,8 +808,8 @@ message PublishWorkflowTaskRequest {
   WorkflowTerminalCommand terminal_command = 14;
   // The Activities of this activation's `ResolveActivity` jobs that own their streams, in job
   // order. Lang marks an owner Activity with the `__temporal_stream_owner` header when it
-  // schedules it. The service closes each one's streams after the records land, in the
-  // background.
+  // schedules it. The service closes each one's streams after the records land, before it
+  // answers. A close that fails is logged and dropped.
   repeated ResolvedOwnerActivity resolved_owner_activities = 15;
 }
 
