@@ -5,6 +5,10 @@
 //! chains and drops its oldest records. Cases that need a Worker or the owner's History live with
 //! the Worker and the owner checks.
 
+#[cfg(feature = "redis")]
+#[path = "support/server.rs"]
+mod server;
+
 use prost::Message;
 use std::{
     sync::{
@@ -467,10 +471,7 @@ mod on_redis {
         cluster: bool,
         extra: &[&str],
     ) -> Option<Redis> {
-        let Ok(url) = std::env::var(variable) else {
-            eprintln!("set {variable} to run the Redis store cases");
-            return None;
-        };
+        let url = crate::server::server_url(variable)?;
         let prefix = unique("conformance-acl");
         let user = DocumentedUser::create(&url, &prefix, "default", extra).await;
         let mut options = RedisStoreOptions::new(user.url.clone());
@@ -513,10 +514,7 @@ mod on_redis {
     }
 
     async fn redis_with(variable: &str, cluster: bool, plain: bool) -> Option<Redis> {
-        let Ok(url) = std::env::var(variable) else {
-            eprintln!("set {variable} to run the Redis store cases");
-            return None;
-        };
+        let url = crate::server::server_url(variable)?;
         // A prefix per case keeps cases apart in one Redis.
         let prefix = unique("conformance");
         let mut options = RedisStoreOptions::new(url.clone());

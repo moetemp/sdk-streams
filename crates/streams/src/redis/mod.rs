@@ -6,8 +6,7 @@ mod keys;
 mod scripts;
 
 use crate::{
-    Capabilities, ConditionForms, MAX_BATCH_BYTES, MAX_RECORD_BYTES, StreamError, StreamResult,
-    StreamStore,
+    Capabilities, MAX_BATCH_BYTES, MAX_RECORD_BYTES, StreamError, StreamResult, StreamStore,
     proto::{
         ChainId, DeleteOwnerRequest, DeleteOwnerResponse, StoreAppendRequest, StoreAppendResponse,
         StoreLatestRequest, StoreLatestResponse, StoreReadRequest, StoreReadResponse, StoredClose,
@@ -38,10 +37,6 @@ const DELETE_BATCH: usize = 500;
 
 const CAPABILITIES: Capabilities = Capabilities {
     producer_state: true,
-    conditional: ConditionForms {
-        tail: false,
-        fence: false,
-    },
     kept_last: true,
     holds: true,
     change_feed: false,
@@ -1091,10 +1086,7 @@ mod tests {
     }
 
     async fn store(per_node: usize) -> Option<RedisStore> {
-        let Ok(url) = std::env::var("STREAMS_REDIS_URL") else {
-            eprintln!("set STREAMS_REDIS_URL to run the Redis store tests");
-            return None;
-        };
+        let url = crate::server::server_url("STREAMS_REDIS_URL")?;
         let mut options = RedisStoreOptions::new(url);
         options.key_prefix = format!("pool-{}", std::process::id());
         options.blocking_reads_per_node = per_node;
@@ -1182,7 +1174,7 @@ mod tests {
 
     #[tokio::test]
     async fn in_plain_mode_a_repeat_lands_again_and_a_close_is_a_record() {
-        let Ok(url) = std::env::var("STREAMS_REDIS_URL") else {
+        let Some(url) = crate::server::server_url("STREAMS_REDIS_URL") else {
             return;
         };
         let mut options = RedisStoreOptions::new(url);

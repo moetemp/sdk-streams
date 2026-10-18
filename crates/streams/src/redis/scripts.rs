@@ -1,12 +1,12 @@
 //! The Lua scripts, on the stored format the SDKs' own Redis providers share.
 //!
-//! The append script is the one the SDKs sent, with one more check, the topic's close flag, so a
-//! batch can't land after the topic's close returned, and its trim keeps what
-//! positions-only readers hold. Its trim reads back from the floor only when the oldest record is
-//! below it, since `XREVRANGE` from the floor reads the whole retained log when no record is older,
-//! and a forward read copies every doomed record into Lua. Redis doesn't roll a script back, so it
-//! runs every step that can fail before its first record lands. `keep.lua` is the prelude of every
-//! script that writes a log, and `floor.lua` of every script that reads or writes the holds.
+//! The append script checks the topic's close flag too, so a batch can't land after the topic's
+//! close returned, and its trim keeps what positions-only readers hold. Its trim reads back from
+//! the floor only when the oldest record is below it, since `XREVRANGE` from the floor reads the
+//! whole retained log when no record is older, and a forward read copies every doomed record into
+//! Lua. Redis doesn't roll a script back, so it runs every step that can fail before its first
+//! record lands. `keep.lua` is the prelude of every script that writes a log, and `floor.lua` of
+//! every script that reads or writes the holds.
 
 use redis::Script;
 use std::sync::LazyLock;
