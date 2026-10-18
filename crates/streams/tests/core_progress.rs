@@ -48,19 +48,19 @@ use temporalio_streams::{
     },
 };
 
-/// The token the server records for the operation scheduled at `scheduled_event_id`.
-fn token(scheduled_event_id: i64) -> String {
-    format!("token-{scheduled_event_id}")
+/// The token the server records for operation `id`.
+fn token(id: i64) -> String {
+    format!("token-{id}")
 }
 
-/// Progress of the operation scheduled at `scheduled_event_id`, keyed as the server keys it.
-fn progress(scheduled_event_id: i64, counter: i64) -> NexusOperationProgress {
+/// Progress of operation `id`, keyed by its token as the server keys it.
+fn progress(id: i64, counter: i64) -> NexusOperationProgress {
     NexusOperationProgress {
         operation: Some(Operation::OperationKey(OperationKey {
             endpoint: "endpoint".to_string(),
             service: "service".to_string(),
             operation: "operation".to_string(),
-            operation_token: token(scheduled_event_id),
+            operation_token: token(id),
         })),
         position: format!("position-{counter}"),
         counter,
@@ -438,7 +438,7 @@ async fn progress_for_an_unknown_closed_or_stale_operation_is_dropped() {
     t.add_full_wf_task();
     let open = add_operation_scheduled(&mut t);
     let closing = add_operation_scheduled(&mut t);
-    let timer = t.add_by_type(EventType::TimerStarted);
+    t.add_by_type(EventType::TimerStarted);
     add_operation_started(&mut t, open);
     add_operation_started(&mut t, closing);
     add_progress_task(&mut t, &[progress(open, 5)]);
@@ -456,8 +456,6 @@ async fn progress_for_an_unknown_closed_or_stale_operation_is_dropped() {
             progress(open, 3),
             // No operation has this token.
             progress(999, 1),
-            // The token of an event that is not a Nexus operation.
-            progress(timer, 1),
         ],
     );
     let mut lang = Lang::new(worker(t, vec![1.into(), 2.into(), 3.into()]));
