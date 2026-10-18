@@ -942,6 +942,7 @@ mod tests {
                 crate::proto::NamedProducer {
                     producer_id: "p".to_string(),
                     attempt: 1,
+                    ..Default::default()
                 },
             )),
             sequence: 1,

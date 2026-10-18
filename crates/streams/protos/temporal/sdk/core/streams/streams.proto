@@ -190,6 +190,13 @@ message NamedProducer {
   // A process that restarts its work raises the attempt, which starts a new sequence and tells
   // readers that the earlier attempt's records are superseded. From one.
   int64 attempt = 2;
+  // A Local Activity call (`__temporal_local_<n>@<run id>`) sets it to the `started_event_id` of
+  // the `WorkflowTaskHistoryInfo` of the activation that scheduled it. Its records carry it, so a
+  // reader learns when the call's task attempt never completed.
+  int64 task_started_event_id = 3;
+  // The `completed_started_event_ids` of that info, at most eight. The first record of each batch
+  // carries them as `completed_tasks`.
+  repeated int64 completed_started_event_ids = 4;
 }
 
 // An Activity attempt that writes. The service derives the producer id from it, so every SDK writes
