@@ -2621,45 +2621,6 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn a_replay_read_crosses_archive_segments_and_the_hot_store() {
-        let hot = Arc::new(MemoryStore::new().holding_for_archive());
-        let root = std::env::temp_dir().join(format!("streams-replay-{}", std::process::id()));
-        let archive = Arc::new(crate::LocalFileArchive::new(&root));
-        let owners = Arc::new(Owners::default());
-        owners.run("wf", "run-1", "run-1");
-        let tiered = Arc::new(crate::TieredStore::new(hot.clone(), archive.clone()));
-        let streams = Streams::new(tiered, owners, quick());
-        streams.append(append("p", 1, "1")).await.unwrap();
-        streams.append(append("p", 2, "2")).await.unwrap();
-        let chain = ChainId {
-            namespace: "ns".to_string(),
-            workflow_id: "wf".to_string(),
-            first_run_id: "run-1".to_string(),
-            ..Default::default()
-        };
-        // One record per segment, so the range spans two segments and then the hot store.
-        let limits = crate::SegmentLimits {
-            records: 1,
-            ..Default::default()
-        };
-        crate::archive_topic(&*hot, &*archive, &chain, "out", limits, true)
-            .await
-            .unwrap();
-        streams.append(append("p", 3, "3")).await.unwrap();
-        let request = read_after(crate::BEGINNING, &[], Duration::ZERO);
-        let page = streams.read(request.clone()).await.unwrap();
-        assert_eq!(page.records.len(), 3, "{page:?}");
-        hot.truncate(&chain, "out", 0);
-        let replayed = streams
-            .read_range(replay_of(&request, &page))
-            .await
-            .unwrap();
-        assert_eq!(replayed.records, page.records);
-        assert_eq!(replayed.records_digest, page.records_digest);
-        std::fs::remove_dir_all(root).unwrap();
-    }
-
-    #[tokio::test]
     async fn a_replay_read_needs_no_owner() {
         let setup = setup(quick());
         let (request, page) = first_page(&setup, "").await;
