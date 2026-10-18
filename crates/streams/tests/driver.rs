@@ -7,6 +7,9 @@
 
 #![cfg(any(feature = "redis", feature = "postgres"))]
 
+#[path = "support/server.rs"]
+mod server;
+
 use std::{
     collections::{BTreeMap, HashMap},
     sync::{
@@ -246,11 +249,7 @@ async fn activity_streams_in_a_cluster_reach_their_notifiers() {
 }
 
 fn url(variable: &str) -> Option<String> {
-    let url = std::env::var(variable).ok();
-    if url.is_none() {
-        eprintln!("set {variable} to run the stream driver tests");
-    }
-    url
+    server::server_url(variable)
 }
 
 async fn streams_in_every_slot_reach_their_notifiers(store: Arc<dyn StreamStore>) {

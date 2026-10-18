@@ -10,8 +10,8 @@ use temporalio_common::protos::temporal::api::{
     enums::v1::WorkflowExecutionStatus, failure::v1::Failure,
 };
 use temporalio_streams::{
-    CONTENT_HASH_KEY, StreamError, StreamService, StreamStore, StreamsOptions, content_hash_text,
-    empty_close_result,
+    CONTENT_HASH_KEY, Capabilities, MemoryStore, StreamError, StreamService, StreamStore,
+    StreamsOptions, content_hash_text, empty_close_result,
     proto::{
         ChainId, PublishWorkflowTaskRequest, PublishWorkflowTaskResponse, ResolvedActivityOutcome,
         ResolvedOwnerActivity, RunEvictedRequest, ShutdownWorkerRequest, StoreAppendRequest,
@@ -165,7 +165,7 @@ async fn a_task_s_activations_share_its_attempt_and_the_next_task_retires_it() {
     assert_eq!(
         store.retired(),
         [(TOPIC.to_string(), producer, 1)],
-        "the later attempt retires the earlier one, and the eviction keeps the current one"
+        "the later attempt retires the earlier one, and the shutdown keeps the current one"
     );
     assert_eq!(
         store.read(TOPIC).await,
@@ -228,6 +228,22 @@ async fn an_append_that_may_not_have_landed_is_sent_again_and_a_refusal_is_not()
         failure.message
     );
     assert_eq!(store.calls(), ["append"]);
+}
+
+#[tokio::test]
+async fn a_failed_publish_leaves_the_sequences_where_they_were() {
+    let store = Arc::new(RecordingStore::failing_first([StreamError::refused(
+        "the ACL denies the key",
+    )]));
+    let service = service_on(&store, &Owner::with(WorkflowExecutionStatus::Running));
+    send(&service, publish(3, 0, &[], &["a"]))
+        .await
+        .unwrap_err();
+    send(&service, publish(3, 0, &[], &["a"])).await.unwrap();
+    assert_eq!(
+        store.append_log(),
+        [(TOPIC.to_string(), "@run-1".to_string(), 1, 1, 1)]
+    );
 }
 
 #[tokio::test]
@@ -349,7 +365,32 @@ async fn the_close_uses_the_attempt_and_run_of_the_terminal_completion() {
         *owner.asked.lock(),
         [("ns".to_string(), "wf-id".to_string(), RUN.to_string())]
     );
-    assert_eq!(store.calls(), ["append", "close_chain"]);
+    assert_eq!(store.calls(), ["append", "list_topics", "close_chain"]);
+}
+
+#[tokio::test]
+async fn a_run_that_wrote_no_stream_closes_no_chain_unless_the_store_cannot_list() {
+    for listing in [true, false] {
+        let store = Arc::new(RecordingStore {
+            inner: MemoryStore::with_capabilities(Capabilities {
+                topic_listing: listing,
+                ..MemoryStore::default().capabilities()
+            }),
+            ..Default::default()
+        });
+        let owner = Owner::closed_by(WorkflowExecutionStatus::Completed, Some(3));
+        let service = service_on(&store, &owner);
+        let last = ending(publish(3, 0, &[], &[]), WorkflowTerminalCommand::Complete);
+        send(&service, last).await.unwrap();
+        evict(&service, "worker-1", true).await;
+        shutdown(&service, "worker-1").await;
+        assert_eq!(owner.asked.lock().is_empty(), listing, "{listing}");
+        assert_eq!(
+            store.calls().contains(&"close_chain"),
+            !listing,
+            "{listing}"
+        );
+    }
 }
 
 #[tokio::test]
@@ -437,7 +478,7 @@ async fn an_eviction_returns_before_the_history_read_and_shutdown_waits_for_it()
     assert!(!store.calls().contains(&"close_chain"));
     gate.add_permits(1);
     shutdown.await;
-    assert_eq!(store.calls(), ["append", "close_chain"]);
+    assert_eq!(store.calls(), ["append", "list_topics", "close_chain"]);
 }
 
 /// What a Workflow Activity's stream holds once [RUN] scheduled Activity `tool`.

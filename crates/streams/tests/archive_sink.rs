@@ -5,6 +5,10 @@
 //! `STREAMS_POSTGRES_URL` for the PostgreSQL case, and `STREAMS_S3_URL` with the `AWS_*` variables
 //! for the S3 case.
 
+#[cfg(any(feature = "archive", feature = "redis"))]
+#[path = "support/server.rs"]
+mod server;
+
 use std::{
     sync::{
         Arc,
@@ -208,8 +212,7 @@ async fn the_driver_archives_a_memory_store_into_a_directory() {
 #[cfg(feature = "archive")]
 #[tokio::test]
 async fn the_driver_archives_a_memory_store_into_s3() {
-    let Ok(url) = std::env::var("STREAMS_S3_URL") else {
-        eprintln!("set STREAMS_S3_URL to run the S3 archive cases");
+    let Some(url) = server::server_url("STREAMS_S3_URL") else {
         return;
     };
     let store = Arc::new(MemoryStore::with_notification_log().holding_for_archive());
@@ -231,8 +234,7 @@ async fn the_driver_archives_a_memory_store_into_s3() {
 #[cfg(feature = "redis")]
 #[tokio::test]
 async fn the_driver_archives_a_redis_store_into_a_directory() {
-    let Ok(url) = std::env::var("STREAMS_REDIS_URL") else {
-        eprintln!("set STREAMS_REDIS_URL to run the Redis archive cases");
+    let Some(url) = server::server_url("STREAMS_REDIS_URL") else {
         return;
     };
     let prefix = unique("archive-sink");
@@ -316,8 +318,7 @@ async fn the_driver_archives_a_postgres_store_into_a_directory() {
 #[cfg(feature = "redis")]
 #[tokio::test]
 async fn the_archive_releases_the_mark_of_a_redis_topic_that_expired() {
-    let Ok(url) = std::env::var("STREAMS_REDIS_URL") else {
-        eprintln!("set STREAMS_REDIS_URL to run the Redis archive cases");
+    let Some(url) = server::server_url("STREAMS_REDIS_URL") else {
         return;
     };
     let prefix = unique("archive-expired");
@@ -380,8 +381,7 @@ async fn the_archive_releases_the_mark_of_a_redis_topic_that_expired() {
 #[cfg(feature = "redis")]
 #[tokio::test]
 async fn a_redis_mark_is_aged_on_the_store_clock() {
-    let Ok(url) = std::env::var("STREAMS_REDIS_URL") else {
-        eprintln!("set STREAMS_REDIS_URL to run the Redis archive cases");
+    let Some(url) = server::server_url("STREAMS_REDIS_URL") else {
         return;
     };
     let mut options = temporalio_streams::RedisStoreOptions::new(url);

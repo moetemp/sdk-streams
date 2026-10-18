@@ -8,9 +8,9 @@
 //! [MemoryStore::with_capabilities] masks capabilities off, so the fallbacks run in tests.
 
 use crate::{
-    ACTIVITY_OWNER_KIND, ARCHIVE_HOLDER, ArchiveMark, Capabilities, ConditionForms,
-    MAX_BATCH_BYTES, MAX_RECORD_BYTES, NotificationEntry, NotificationLog, StreamError,
-    StreamResult, StreamStore, WORKFLOW_ACTIVITY_OWNER_KIND, WORKFLOW_OWNER_KIND, chain_owner,
+    ACTIVITY_OWNER_KIND, ARCHIVE_HOLDER, ArchiveMark, Capabilities, MAX_BATCH_BYTES,
+    MAX_RECORD_BYTES, NotificationEntry, NotificationLog, StreamError, StreamResult, StreamStore,
+    WORKFLOW_ACTIVITY_OWNER_KIND, WORKFLOW_OWNER_KIND, chain_owner,
     proto::{
         ChainId, DeleteOwnerRequest, DeleteOwnerResponse, StoreAppendRequest, StoreAppendResponse,
         StoreLatestRequest, StoreLatestResponse, StoreReadRequest, StoreReadResponse, StoredClose,
@@ -30,10 +30,6 @@ const NAME: &str = "memory";
 /// Every capability the memory store has.
 const FULL: Capabilities = Capabilities {
     producer_state: true,
-    conditional: ConditionForms {
-        tail: false,
-        fence: false,
-    },
     kept_last: true,
     holds: true,
     change_feed: true,
