@@ -270,6 +270,70 @@ async fn the_driver_archives_a_redis_store_into_a_directory() {
 
 #[cfg(feature = "redis")]
 #[tokio::test]
+async fn the_archive_releases_the_mark_of_a_redis_topic_that_expired() {
+    let Ok(url) = std::env::var("STREAMS_REDIS_URL") else {
+        eprintln!("set STREAMS_REDIS_URL to run the Redis archive cases");
+        return;
+    };
+    let prefix = unique("archive-expired");
+    let mut options = temporalio_streams::RedisStoreOptions::new(url.clone());
+    options.key_prefix = prefix.clone();
+    options.notification_log = true;
+    options.archive_lease = Some(Duration::from_secs(60));
+    let store = temporalio_streams::RedisStore::connect(options)
+        .await
+        .unwrap();
+    let chain = chain();
+    store
+        .append(append(&chain, "out", 1, &["1"]))
+        .await
+        .unwrap();
+    let marks = async || {
+        store
+            .notification_log()
+            .unwrap()
+            .archive_marks(10)
+            .await
+            .unwrap()
+            .len()
+    };
+    assert_eq!(marks().await, 1);
+    // Retention drops the topic's keys before any driver archived it. The mark stays behind.
+    let log = format!(
+        "{prefix}:{{{}:{}:{}}}:t:out",
+        chain.namespace, chain.workflow_id, chain.first_run_id
+    );
+    let mut raw = redis::Client::open(url.as_str())
+        .unwrap()
+        .get_multiplexed_async_connection()
+        .await
+        .unwrap();
+    let _: i64 = redis::cmd("DEL")
+        .arg(&log)
+        .arg(format!("{log}:meta"))
+        .arg(format!("{log}:floors"))
+        .query_async(&mut raw)
+        .await
+        .unwrap();
+    assert_eq!(marks().await, 1);
+    let root = std::env::temp_dir().join(unique("streams-archive-expired"));
+    let archive = LocalFileArchive::new(&root);
+    let progress = temporalio_streams::archive_topic(
+        &store,
+        &archive,
+        &chain,
+        "out",
+        SegmentLimits::default(),
+        false,
+    )
+    .await
+    .unwrap();
+    assert_eq!(progress.segments, 0);
+    assert_eq!(marks().await, 0);
+}
+
+#[cfg(feature = "redis")]
+#[tokio::test]
 async fn a_redis_mark_is_aged_on_the_store_clock() {
     let Ok(url) = std::env::var("STREAMS_REDIS_URL") else {
         eprintln!("set STREAMS_REDIS_URL to run the Redis archive cases");
