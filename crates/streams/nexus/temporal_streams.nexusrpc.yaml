@@ -1,6 +1,6 @@
-# The stream service's wire contract. Core serves it, so this copy in Core is
-# the canonical one. Every SDK generates its models, its forwarding handler and
-# its HTTP caller from the copy in the Core it vendors. Core's serde types are
+# The stream service's wire contract. This crate serves it, so this copy is the
+# canonical one. Every SDK generates its models, its forwarding handler and its
+# HTTP caller from the copy in the crate it pins. The crate's serde types are
 # checked against it by tests/nexus_contract.rs.
 #
 # Inputs reject unknown members so a typo fails at the handler. Outputs accept
@@ -634,7 +634,7 @@ $defs:
         type: string
         contentEncoding: base64
         description: >-
-          Pass as state on the next call of this follow. Core always sets it.
+          Pass as state on the next call of this follow. The service always sets it.
           At most 64 KiB, which is about 86 KiB as base64.
       sources:
         type: array
@@ -649,7 +649,7 @@ $defs:
   StreamOperationToken:
     type: object
     description: >-
-      What a stream-returning operation's token carries. Core mints it when
+      What a stream-returning operation's token carries. The service mints it when
       the operation starts, and a caller reads the stream back from it. The
       token is this model's transfer form as JSON with sorted keys and no
       spaces, in base64url with no padding.

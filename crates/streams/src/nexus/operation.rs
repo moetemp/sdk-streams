@@ -317,8 +317,8 @@ pub(crate) fn owner_kind(kind: &str) -> Option<StreamOwnerKind> {
         .map(|(_, owner_kind)| *owner_kind)
 }
 
-/// The contract `kind` of an owner kind. Any kind but the Activity one is a Workflow, as an
-/// unset kind is in a `ChainId`.
+/// The contract `kind` of an owner kind. An unset or unknown kind is a Workflow, as an unset kind
+/// is in a `ChainId`.
 pub(crate) fn kind_name(owner_kind: i32) -> &'static str {
     KINDS
         .iter()
@@ -1373,7 +1373,7 @@ mod tests {
     }
 
     #[test]
-    fn a_token_from_before_core_still_decodes() {
+    fn a_token_with_a_null_chain_run_id_decodes() {
         for vector in vectors().decode_only {
             assert_eq!(
                 OperationToken::decode("ns", &vector.token).unwrap(),

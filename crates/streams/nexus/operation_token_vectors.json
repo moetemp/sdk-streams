@@ -1,5 +1,5 @@
 {
-  "comment": "Token v2 of a stream-returning Nexus operation: base64url JSON, no padding, keys sorted, non-ASCII escaped, no chain_run_id for a ref to the newest chain, and no activity_id for a Workflow's ref. An Activity's ref has kind activity, an empty workflow_id and its activity_id, and its chain is the Activity run. A Workflow Activity's ref has kind workflow_activity, its workflow_id, its activity_id and the scheduling run as chain_run_id, which is also its chain. Core's encoder and every SDK's encoder write the vectors, and every decoder reads them. Decoders also read decode_only, the null chain_run_id that SDK releases before Core wrote.",
+  "comment": "Token v2 of a stream-returning Nexus operation: base64url JSON, no padding, keys sorted, non-ASCII escaped, no chain_run_id for a ref to the newest chain, and no activity_id for a Workflow's ref. An Activity's ref has kind activity, an empty workflow_id and its activity_id, and its chain is the Activity run. A Workflow Activity's ref has kind workflow_activity, its workflow_id, its activity_id and the scheduling run as chain_run_id, which is also its chain. The service's encoder and every SDK's encoder write the vectors, and every decoder reads them. Decoders also read decode_only, a null chain_run_id that a caller may send.",
   "vectors": [
     {
       "ref": {

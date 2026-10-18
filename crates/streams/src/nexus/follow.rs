@@ -1,6 +1,6 @@
 //! The `follow` and `follow_range` operations: the follower behind the stream service.
 //!
-//! The owner's Worker has the store, so one call expands every link that store holds (DD-209).
+//! The owner's Worker has the store, so one call expands every link that store holds.
 //! Each record's body crosses decoded with its own owner's codec context, so an answer asks lang
 //! for codec work once per owner whose records it holds.
 
@@ -29,7 +29,7 @@ use std::{
 use temporalio_common::protos::temporal::api::common::v1::Payload;
 
 /// The most bytes a follow's state may take. It holds every open stream's read state, so it is
-/// larger than a read's, and the limits keep it below this (DD-206).
+/// larger than a read's, and the limits keep it below this.
 const MAX_FOLLOW_STATE_BYTES: usize = 64 << 10;
 /// The longest `floor_holder` a follow takes. Each stream holds as `<floor_holder>/<source>`, which
 /// must fit the store's 512 bytes.

@@ -1,7 +1,7 @@
 //! The stream service's Nexus operations, served in process.
 //!
-//! Lang forwards each `append`, `read` and `read_range` call as N0a's JSON transfer form and gets
-//! back a [NexusStep]. A call whose bodies need lang's payload codec answers first with
+//! Lang forwards each `append`, `read` and `read_range` call in the contract's JSON transfer form
+//! and gets back a [NexusStep]. A call whose bodies need lang's payload codec answers first with
 //! [CodecWork], and lang resumes it with the results. The service runs every rule of the contract,
 //! so each SDK's handler keeps only its authorizer and its codec. The state a reader carries makes
 //! the endpoint stateless, so a read goes on at any handler Worker.
@@ -1113,8 +1113,6 @@ fn carried_state(state: Option<String>) -> Result<Vec<u8>, Box<NexusFailure>> {
     }
 }
 
-/// The stream address a call names. An owner kind this release can't open is refused before any
-/// codec work.
 /// Checks a caller's floor holder. A Nexus caller holds as `<caller namespace>/<run id>/<reader
 /// id>`, so callers in other namespaces can't share or release a holder. A positions-only read
 /// can't start at `$end`, since its replay would look up the record there, which the live read
@@ -1138,6 +1136,8 @@ fn check_holder(floor_holder: &str, after: &str) -> Result<(), Box<NexusFailure>
     Ok(())
 }
 
+/// The stream address a call names. An owner kind this release can't open is refused before any
+/// codec work.
 fn address(namespace: &str, stream: &StreamRef) -> Result<StreamAddress, Box<NexusFailure>> {
     let Some(owner_kind) = operation::owner_kind(&stream.kind) else {
         return Err(Box::new(failure::of_stream(&StreamError::unsupported(

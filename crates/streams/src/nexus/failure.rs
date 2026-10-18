@@ -1,7 +1,7 @@
 //! How a stream call's failure crosses to a Nexus caller.
 //!
-//! The mapping and the class names are N0b's, so a caller in any language raises the class the
-//! store raised.
+//! Every SDK maps a failure with the same class names, so a caller in any language raises the class
+//! the store raised.
 
 use crate::{StreamError, proto::NexusFailure, proto::StreamFailureKind};
 use temporalio_common::protos::temporal::api::{
@@ -190,8 +190,8 @@ mod tests {
             (Storage, "StreamStorageError", UNAVAILABLE, true),
             // A record that can't be parsed stays that way, so a retry would loop.
             (Record, "StreamRecordError", INTERNAL, false),
-            // A class the table doesn't name crosses as a retryable internal error, as N0b's
-            // table answered any other error.
+            // A class the table doesn't name crosses as a retryable internal error, since a later
+            // release may know it.
             (Unspecified, "StreamError", INTERNAL, true),
         ] {
             let crossed = of_stream(&StreamError::new(kind, "why"));
