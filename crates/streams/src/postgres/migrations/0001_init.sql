@@ -132,10 +132,12 @@ BEGIN
   SELECT t.topic_id INTO v_topic FROM topics t WHERE t.chain_id = p_chain AND t.topic = p_topic;
   IF NOT FOUND THEN
     -- The base is the clock in ms << 20, so a topic made again after its tombstone went
-    -- starts above every position it had before.
-    INSERT INTO topics (chain_id, topic, partition, base)
+    -- starts above every position it had before. A close or a hold can make a topic that no
+    -- append ever writes, so the janitor visits it at once and schedules it from there.
+    INSERT INTO topics (chain_id, topic, partition, base, written_at, trim_at)
     VALUES (p_chain, p_topic, p_partition,
-            (extract(epoch FROM clock_timestamp()) * 1000)::bigint << 20)
+            (extract(epoch FROM clock_timestamp()) * 1000)::bigint << 20,
+            clock_timestamp(), clock_timestamp())
     ON CONFLICT ON CONSTRAINT topics_key DO NOTHING;
     SELECT t.topic_id INTO v_topic FROM topics t
      WHERE t.chain_id = p_chain AND t.topic = p_topic;

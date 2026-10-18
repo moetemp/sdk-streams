@@ -333,6 +333,34 @@ async fn the_janitor_keeps_holds_and_deletes_ended_holds_and_tombstones() {
     assert!(again.first_position.parse::<i64>().unwrap() > last);
 }
 
+#[tokio::test]
+async fn a_topic_that_no_append_wrote_goes_after_the_retention() {
+    let Some(url) = url() else { return };
+    let options = options(&url);
+    let schema = options.schema.clone();
+    let store = PostgresStore::connect(options).await.unwrap();
+    let raw = raw(&url).await;
+    let chain = chain("unwritten");
+    store.close_topic(&chain, "closed").await.unwrap();
+    store.hold_floor(&chain, "held", "a/1", "").await.unwrap();
+    store.release_floor(&chain, "held", "a/1").await.unwrap();
+    // Only the clock moves, so the janitor finds these topics by their own schedule.
+    raw.batch_execute(&format!(
+        "UPDATE {schema}.topics SET written_at = written_at - interval '40 days'; \
+         UPDATE {schema}.floors SET until = now() - interval '1 second'; \
+         UPDATE {schema}.chains SET touched_at = touched_at - interval '40 days'"
+    ))
+    .await
+    .unwrap();
+    store.run_janitor().await.unwrap();
+    let topics: i64 = raw
+        .query_one(&format!("SELECT count(*) FROM {schema}.topics"), &[])
+        .await
+        .unwrap()
+        .get(0);
+    assert_eq!(topics, 0);
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn janitors_on_many_connections_leave_no_lock_behind() {
     // Through PgBouncer in transaction mode, a session lock taken on one server connection and
