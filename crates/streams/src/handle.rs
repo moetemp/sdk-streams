@@ -636,6 +636,7 @@ impl Streams {
                 "the replayed records differ from the records the read got".to_string(),
             ));
         }
+        state.fit_within(crate::MAX_STATE_BYTES);
         Ok(ReadResponse {
             state: state.encode_to_vec(),
             ..page
