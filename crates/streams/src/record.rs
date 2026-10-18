@@ -25,7 +25,7 @@ pub(crate) const LOCAL_PRODUCER_PREFIX: &str = "__temporal_local_";
 
 /// How many completed tasks a record of a Workflow run names. A reader learns from them whether
 /// an earlier attempt it delivered completed, as long as fewer tasks completed since.
-pub(crate) const STREAM_COMPLETED_TASKS: usize = 8;
+pub const STREAM_COMPLETED_TASKS: usize = 8;
 
 /// The completed tasks a record names, from an activation's list, with a trailing zero when the
 /// list goes back to the run's start.

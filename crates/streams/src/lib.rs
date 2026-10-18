@@ -45,13 +45,13 @@ pub use reader::{
     DEFAULT_MAX_RECORDS, MAX_STATE_BYTES, MAX_TRACKED_PRODUCERS, ReadTarget, read_page,
 };
 pub use record::{
-    WORKFLOW_OWNER_KIND, activity_producer_id, check_append_digest, check_record_limit,
-    check_store_limits, close_record, stored_append_record, topic_record, workflow_batch_digest,
-    workflow_producer_id,
+    STREAM_COMPLETED_TASKS, WORKFLOW_OWNER_KIND, activity_producer_id, check_append_digest,
+    check_record_limit, check_store_limits, close_record, stored_append_record, topic_record,
+    workflow_batch_digest, workflow_producer_id,
 };
 pub use service::StreamService;
 pub use store::{Capabilities, MAX_BATCH_BYTES, MAX_RECORD_BYTES, StreamStore};
-pub use workflow::{STREAM_COMPLETED_TASKS, STREAM_RETRY_BITS, stream_attempt};
+pub use workflow::{STREAM_RETRY_BITS, stream_attempt};
 
 /// The protos stores and lang exchange.
 pub mod proto {
