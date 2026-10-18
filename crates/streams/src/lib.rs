@@ -9,6 +9,7 @@
 //! reaches a store through the crate's [StreamService], which also appends a Workflow's own
 //! output through the same trait.
 
+mod archive;
 mod close;
 mod connection;
 mod conventions;
@@ -32,11 +33,15 @@ mod redis;
 mod service;
 mod store;
 mod subscribe;
+mod tiered;
 mod wake;
 mod workflow;
 
 #[cfg(feature = "redis")]
 pub use self::redis::{DEFAULT_NOTIFY_DOORBELLS, RedisStore, RedisStoreOptions};
+#[cfg(feature = "archive")]
+pub use archive::ObjectStoreArchive;
+pub use archive::{ArchiveProgress, LocalFileArchive, SegmentLimits, StreamArchive, archive_topic};
 pub use close::{CHAIN_LOG, append_batch, close_chain, close_topic};
 pub use connection::{connect_stream_service, execute_sync_nexus_operation};
 pub use conventions::{
@@ -44,7 +49,7 @@ pub use conventions::{
     check_topic, content_hash_text,
 };
 pub use cursor::{BEGINNING, END, cursor_position, mint_cursor, stream_hash};
-pub use driver::{StreamDriver, StreamDriverOptions};
+pub use driver::{ArchiveSink, StreamDriver, StreamDriverOptions};
 pub use error::{StreamError, StreamResult};
 pub use handle::{OWNER_RECHECK, OWNER_START_GRACE, Streams, StreamsOptions};
 pub use memory::MemoryStore;
@@ -74,6 +79,7 @@ pub use store::{
     ARCHIVE_HOLDER, Capabilities, CloseOutcome, ConditionForms, MAX_BATCH_BYTES, MAX_CLOSE_BYTES,
     MAX_FLOOR_HOLDERS, MAX_RECORD_BYTES, StreamStore, empty_close_result,
 };
+pub use tiered::TieredStore;
 pub use wake::{STREAM_WAKE_TYPE_URL, fold_stream_wake, fold_stream_wakes};
 pub use workflow::{
     MAX_APPEND_BYTES, STREAM_COMPLETED_TASKS, STREAM_OWNER_HEADER, STREAM_RETRY_BITS,

@@ -111,6 +111,29 @@ message StreamStoreConfig {
   // notifications. A `StreamDriver` reads the entries and notifies the server, so readers wake
   // only while one runs. Off by default. A store without a notification log refuses it.
   bool notification_log = 7;
+  // Keeps streams in object storage after the store drops them, so they stay readable for longer
+  // than the store's retention. Reads cross from the archive to the store with no gap, with the
+  // same cursors. A `StreamDriver` writes the archive, so it needs `notification_log`.
+  ArchiveConfig archive = 8;
+}
+
+// Where and how a stream archive keeps streams.
+message ArchiveConfig {
+  // `s3://<bucket>/<prefix>` or `file:///<directory>`. S3 credentials, the region and the
+  // endpoint come from the environment, as `AWS_ACCESS_KEY_ID`, `AWS_REGION` and
+  // `AWS_ENDPOINT_URL`. The archive deletes nothing but an owner's delete, so a bucket lifecycle
+  // rule sets how long it keeps streams.
+  string url = 1;
+  // A segment ends at the first record that takes it to this many bytes or more. Zero uses
+  // 4 MiB.
+  uint64 segment_bytes = 2;
+  // How long a stream goes without a write before the driver archives its tail. A stream that
+  // keeps taking writes has its tail archived this often too. Unset uses five minutes.
+  google.protobuf.Duration segment_idle = 3;
+  // How long the store holds records that the archive doesn't hold yet, after the archive last
+  // moved. When the driver stops for longer, the store's retention goes on and readers find the
+  // gap as expired. Unset uses seven days.
+  google.protobuf.Duration stall_limit = 4;
 }
 
 // Streams in a Redis or Redis Cluster that the service connects to itself.

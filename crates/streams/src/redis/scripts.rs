@@ -46,6 +46,59 @@ pub(crate) static APPEND_LOGGED: LazyLock<String> = LazyLock::new(|| {
 pub(crate) static APPEND_LOGGED_SCRIPT: LazyLock<Script> =
     LazyLock::new(|| Script::new(&APPEND_LOGGED));
 
+/// What a store with an archive adds before the batch: the archive's hold on a topic's first
+/// write, from the topic's start, with the lease in `ARGV[6]`. So retention can't drop a record
+/// before the archive's first pass. The holds hash lives at least as long as the lease, since a
+/// reader's hold only lengthens its life and a shorter one must not take the archive's hold away.
+const ARCHIVE_HOLD: &str = "if redis.call('EXISTS', KEYS[2]) == 0 and \
+redis.call('HEXISTS', KEYS[4], 'archive') == 0 then
+  local lease = tonumber(ARGV[6])
+  redis.call('HSET', KEYS[4], 'archive', '0-1|' .. (now_ms() + lease))
+  if redis.call('PTTL', KEYS[4]) < lease then
+    redis.call('PEXPIRE', KEYS[4], lease)
+  end
+end
+revive(KEYS[1], KEYS[2])
+";
+
+/// What a store with an archive adds after the notification entry: the log key in the slot's
+/// set of topics with records to archive (`KEYS[6]`), scored by the time of its newest write.
+const ARCHIVE_MARK: &str = "redis.call('ZADD', KEYS[6], now_ms(), KEYS[1])
+return {first, last, redis.call('XLEN', KEYS[5])}
+";
+
+/// [APPEND_LOGGED] with the archive's hold and mark. The lease takes `ARGV[6]`, so the records
+/// start at `ARGV[7]`, and the topic set moves to `KEYS[7]`.
+pub(crate) static APPEND_ARCHIVED: LazyLock<String> = LazyLock::new(|| {
+    let edits = [
+        ("revive(KEYS[1], KEYS[2])\n", ARCHIVE_HOLD),
+        ("for i = 6, #ARGV do", "for i = 7, #ARGV do"),
+        ("local topics = KEYS[6]\n", "local topics = KEYS[7]\n"),
+        (
+            "return {first, last, redis.call('XLEN', KEYS[5])}\n",
+            ARCHIVE_MARK,
+        ),
+    ];
+    let mut script = APPEND_LOGGED.clone();
+    for (was, now) in edits {
+        assert_eq!(script.matches(was).count(), 1, "{was}");
+        script = script.replacen(was, now, 1);
+    }
+    assert_eq!(script.matches("#ARGV - 5").count(), 2);
+    script.replace("#ARGV - 5", "#ARGV - 6")
+});
+
+pub(crate) static APPEND_ARCHIVED_SCRIPT: LazyLock<Script> =
+    LazyLock::new(|| Script::new(&APPEND_ARCHIVED));
+
+/// Moves the archive's hold forward and keeps the position as the meta's `archived`. When the
+/// archive holds the topic's last record, the topic leaves the slot's set to archive.
+pub(crate) static ADVANCE_SCRIPT: LazyLock<Script> = LazyLock::new(|| {
+    Script::new(concat!(
+        include_str!("../../lua/floor.lua"),
+        include_str!("../../lua/advance.lua")
+    ))
+});
 // Marks the topic closed and keeps its first close's outcome in one step, so two closes can't both
 // find no outcome and the second overwrite the first.
 pub(crate) static CLOSE_SCRIPT: LazyLock<Script> =
@@ -143,6 +196,25 @@ end
         assert_eq!(
             APPEND_LOGGED_SCRIPT.get_hash(),
             "49820889a3c7680122a0b43ed0946c4b4cb0286e"
+        );
+    }
+
+    #[test]
+    fn the_archived_append_differs_from_the_logged_one_in_its_hold_and_mark_only() {
+        let mut was = APPEND_ARCHIVED
+            .replacen(ARCHIVE_HOLD, "revive(KEYS[1], KEYS[2])\n", 1)
+            .replacen(
+                ARCHIVE_MARK,
+                "return {first, last, redis.call('XLEN', KEYS[5])}\n",
+                1,
+            )
+            .replacen("local topics = KEYS[7]\n", "local topics = KEYS[6]\n", 1)
+            .replacen("for i = 7, #ARGV do", "for i = 6, #ARGV do", 1);
+        was = was.replace("#ARGV - 6", "#ARGV - 5");
+        assert_eq!(was, *APPEND_LOGGED);
+        assert_eq!(
+            APPEND_ARCHIVED_SCRIPT.get_hash(),
+            "98302a233c87f8a10303d4ca17b418cb51fe2799"
         );
     }
 

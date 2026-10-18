@@ -1943,6 +1943,205 @@ async fn a_chains_notification_entry_lands_in_the_chains_own_slot() {
     }
 }
 
+/// A store with the notification log and an archive hold of `lease`, with `retention`.
+async fn archiving(retention: Duration, lease: Duration) -> Option<Setup> {
+    let url = url()?;
+    Some(
+        setup_with(&url, &url, &unique("archive"), |options| {
+            options.retention = retention;
+            options.notification_log = true;
+            options.archive_lease = Some(lease);
+        })
+        .await,
+    )
+}
+
+/// The slot's set of topics to archive that `log` is in.
+fn archive_pending(prefix: &str, log: &str) -> String {
+    let tags: Vec<String> =
+        serde_json::from_str(include_str!("../testdata/redis/notify_slots.json")).unwrap();
+    let tag = &log[log.find('{').unwrap() + 1..log.find('}').unwrap()];
+    let slot = crc16::State::<crc16::XMODEM>::calculate(tag.as_bytes()) % 16384;
+    format!("{}:{{{}}}:a", part(prefix), tags[usize::from(slot)])
+}
+
+#[tokio::test]
+async fn an_archive_needs_the_notification_log() {
+    let mut options = RedisStoreOptions::new("redis://localhost:1");
+    options.archive_lease = Some(Duration::from_secs(1));
+    let error = RedisStore::connect(options).await.unwrap_err();
+    assert_eq!(error.kind, StreamFailureKind::Refused);
+    assert!(error.message.contains("notification log"), "{error}");
+}
+
+#[tokio::test]
+async fn the_archive_hold_keeps_records_past_retention_until_the_archive_moves_it() {
+    let Some(mut setup) = archiving(Duration::from_millis(200), Duration::from_secs(60)).await
+    else {
+        return;
+    };
+    let chain = chain();
+    let log = log_key(&setup.prefix, &chain, "events");
+    let pending = archive_pending(&setup.prefix, &log);
+    let first = setup
+        .store
+        .append(append(&chain, "p", 1, 2, b"\x01"))
+        .await
+        .unwrap();
+    assert_eq!(
+        setup.store.archived(&chain, "events").await.unwrap(),
+        Some(String::new())
+    );
+    let score: Option<f64> = setup.raw.zscore(&pending, &log).await.unwrap();
+    assert!(score.is_some_and(|score| score > 0.0), "{score:?}");
+    tokio::time::sleep(Duration::from_millis(400)).await;
+    setup
+        .store
+        .append(append(&chain, "p", 3, 1, b"\x02"))
+        .await
+        .unwrap();
+    // Retention would have dropped the first batch, and the hold from the start kept it.
+    assert_eq!(sequences(&mut setup, &chain).await, [1, 2, 3]);
+    setup
+        .store
+        .advance_archive(&chain, "events", &first.last_position)
+        .await
+        .unwrap();
+    assert_eq!(
+        setup.store.archived(&chain, "events").await.unwrap(),
+        Some(first.last_position.clone())
+    );
+    // The archive doesn't hold the newest record yet, so the topic stays in the set.
+    let score: Option<f64> = setup.raw.zscore(&pending, &log).await.unwrap();
+    assert!(score.is_some());
+    tokio::time::sleep(Duration::from_millis(400)).await;
+    let last = setup
+        .store
+        .append(append(&chain, "p", 4, 1, b"\x03"))
+        .await
+        .unwrap();
+    // The trim keeps the held record and what follows it.
+    assert_eq!(sequences(&mut setup, &chain).await, [2, 3, 4]);
+    setup
+        .store
+        .advance_archive(&chain, "events", &last.last_position)
+        .await
+        .unwrap();
+    let score: Option<f64> = setup.raw.zscore(&pending, &log).await.unwrap();
+    assert_eq!(score, None);
+    // The hold never keeps the log alive for less than its lease.
+    let ttl: i64 = setup.raw.pttl(&log).await.unwrap();
+    assert!(ttl > 50_000, "{ttl}");
+}
+
+#[tokio::test]
+async fn a_lapsed_archive_hold_lets_retention_go_on() {
+    let Some(mut setup) = archiving(Duration::from_millis(200), Duration::from_millis(300)).await
+    else {
+        return;
+    };
+    let chain = chain();
+    setup
+        .store
+        .append(append(&chain, "p", 1, 2, b"\x01"))
+        .await
+        .unwrap();
+    tokio::time::sleep(Duration::from_millis(500)).await;
+    setup
+        .store
+        .append(append(&chain, "p", 3, 1, b"\x02"))
+        .await
+        .unwrap();
+    assert_eq!(sequences(&mut setup, &chain).await, [3]);
+}
+
+#[tokio::test]
+async fn a_close_puts_the_topic_first_and_the_archives_release_takes_it_out() {
+    let Some(mut setup) = archiving(Duration::from_secs(60), Duration::from_secs(60)).await else {
+        return;
+    };
+    let chain = chain();
+    let log = log_key(&setup.prefix, &chain, "events");
+    let pending = archive_pending(&setup.prefix, &log);
+    setup
+        .store
+        .append(append(&chain, "p", 1, 1, b"\x01"))
+        .await
+        .unwrap();
+    setup.store.close_topic(&chain, "events").await.unwrap();
+    let score: Option<f64> = setup.raw.zscore(&pending, &log).await.unwrap();
+    assert_eq!(score, Some(0.0));
+    // A reader's release leaves the topic in the set.
+    setup
+        .store
+        .release_floor(&chain, "events", "reader-run/1")
+        .await
+        .unwrap();
+    let score: Option<f64> = setup.raw.zscore(&pending, &log).await.unwrap();
+    assert_eq!(score, Some(0.0));
+    setup
+        .store
+        .release_floor(&chain, "events", temporalio_streams::ARCHIVE_HOLDER)
+        .await
+        .unwrap();
+    let score: Option<f64> = setup.raw.zscore(&pending, &log).await.unwrap();
+    assert_eq!(score, None);
+}
+
+#[tokio::test]
+async fn a_store_without_an_archive_refuses_to_move_its_hold() {
+    let Some(setup) = setup().await else {
+        return;
+    };
+    let chain = chain();
+    let error = setup
+        .store
+        .advance_archive(&chain, "events", "1-0")
+        .await
+        .unwrap_err();
+    assert_eq!(error.kind, StreamFailureKind::Unsupported);
+    assert_eq!(setup.store.archived(&chain, "events").await.unwrap(), None);
+}
+
+#[tokio::test]
+async fn a_readers_short_hold_never_ends_the_archives_hold() {
+    let Some(url) = url() else {
+        return;
+    };
+    let mut setup = setup_with(&url, &url, &unique("archive-reader"), |options| {
+        options.retention = Duration::from_millis(200);
+        options.notification_log = true;
+        options.archive_lease = Some(Duration::from_secs(60));
+        options.floor_lease = Some(Duration::from_millis(100));
+        options.floor_release_grace = Duration::from_millis(100);
+    })
+    .await;
+    let chain = chain();
+    let first = setup
+        .store
+        .append(append(&chain, "p", 1, 2, b"\x01"))
+        .await
+        .unwrap();
+    // A positions-only reader holds with a lease far shorter than the archive's, and the archive
+    // lags behind it.
+    setup
+        .store
+        .hold_floor(&chain, "events", "reader-run/1", &first.first_position)
+        .await
+        .unwrap();
+    let floors = format!("{}:floors", log_key(&setup.prefix, &chain, "events"));
+    let ttl: i64 = setup.raw.pttl(&floors).await.unwrap();
+    assert!(ttl > 50_000, "{ttl}");
+    tokio::time::sleep(Duration::from_millis(400)).await;
+    setup
+        .store
+        .append(append(&chain, "p", 3, 1, b"\x02"))
+        .await
+        .unwrap();
+    // The reader's lease ended, and the records the archive has not taken stay.
+    assert_eq!(sequences(&mut setup, &chain).await, [1, 2, 3]);
+}
+
 /// The median time of `n` single-record appends to `chain`'s topic, from sequence `first`.
 async fn median_append(store: &RedisStore, chain: &ChainId, first: i64, n: i64) -> Duration {
     let mut times = vec![];
@@ -2190,6 +2389,95 @@ async fn a_replay_whose_end_record_the_store_lost_is_a_lost_range() {
         .await
         .unwrap_err();
     assert_eq!(error.kind, StreamFailureKind::ReplayRangeLost, "{error}");
+}
+
+#[tokio::test]
+async fn two_archive_advances_out_of_order_keep_the_higher() {
+    let Some(mut setup) = archiving(Duration::from_secs(60), Duration::from_secs(60)).await else {
+        return;
+    };
+    let chain = chain();
+    let lower = setup
+        .store
+        .append(append(&chain, "p", 1, 1, b"\x01"))
+        .await
+        .unwrap();
+    let higher = setup
+        .store
+        .append(append(&chain, "p", 2, 1, b"\x02"))
+        .await
+        .unwrap();
+    setup
+        .store
+        .advance_archive(&chain, "events", &higher.last_position)
+        .await
+        .unwrap();
+    setup
+        .store
+        .advance_archive(&chain, "events", &lower.last_position)
+        .await
+        .unwrap();
+    assert_eq!(
+        setup.store.archived(&chain, "events").await.unwrap(),
+        Some(higher.last_position.clone())
+    );
+    let log = log_key(&setup.prefix, &chain, "events");
+    let hold: String = setup
+        .raw
+        .hget(format!("{log}:floors"), temporalio_streams::ARCHIVE_HOLDER)
+        .await
+        .unwrap();
+    assert!(
+        hold.starts_with(&format!("{}|", higher.last_position)),
+        "{hold}"
+    );
+}
+
+#[tokio::test]
+async fn a_deleted_topics_archive_mark_is_dropped() {
+    let Some(mut setup) = archiving(Duration::from_secs(60), Duration::from_secs(60)).await else {
+        return;
+    };
+    let (gone, deleted) = (chain(), chain());
+    for chain in [&gone, &deleted] {
+        setup
+            .store
+            .append(append(chain, "p", 1, 1, b"\x01"))
+            .await
+            .unwrap();
+    }
+    let marked = |chain: &ChainId| {
+        let log = log_key(&setup.prefix, chain, "events");
+        (archive_pending(&setup.prefix, &log), log)
+    };
+    // A topic whose keys expired, then a late advance.
+    let (pending, log) = marked(&gone);
+    let _: () = setup
+        .raw
+        .del(&[format!("{log}:meta"), log.clone()])
+        .await
+        .unwrap();
+    setup
+        .store
+        .advance_archive(&gone, "events", "1-1")
+        .await
+        .unwrap();
+    let score: Option<f64> = setup.raw.zscore(&pending, &log).await.unwrap();
+    assert_eq!(score, None);
+    // An owner delete.
+    let (pending, log) = marked(&deleted);
+    setup
+        .store
+        .delete_owner(temporalio_streams::proto::DeleteOwnerRequest {
+            namespace: deleted.namespace.clone(),
+            owner_kind: temporalio_streams::proto::StreamOwnerKind::Workflow as i32,
+            workflow_id: deleted.workflow_id.clone(),
+            ..Default::default()
+        })
+        .await
+        .unwrap();
+    let score: Option<f64> = setup.raw.zscore(&pending, &log).await.unwrap();
+    assert_eq!(score, None);
 }
 
 #[tokio::test]

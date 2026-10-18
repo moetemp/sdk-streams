@@ -25,7 +25,7 @@ jobs:
       - run: cargo clippy --workspace --all-features --tests -- -D warnings
       - run: >-
           cargo clippy --workspace --no-default-features
-          --features tls-aws-lc,redis --tests -- -D warnings
+          --features tls-aws-lc,redis,archive --tests -- -D warnings
       - name: The API proto copy matches the pinned sdk-rust
         run: scripts/sync-api-protos.sh && git diff --exit-code
       - name: The stream API copy matches its moetemp/api commit
@@ -58,11 +58,11 @@ jobs:
           repo-token: ${{ secrets.GITHUB_TOKEN }}
       - uses: Swatinem/rust-cache@v2
       - run: >-
-          cargo build --workspace --no-default-features --features fips,redis
+          cargo build --workspace --no-default-features --features fips,redis,archive
       # Normal and build edges only, since the tests' own dependencies may take `ring`.
       - run: |
           tree=$(cargo tree -e normal,build --no-default-features \
-            --features fips,redis -i ring --target all 2>/dev/null || true)
+            --features fips,redis,archive -i ring --target all 2>/dev/null || true)
           if [ -n "$tree" ]; then echo "$tree"; exit 1; fi
 
   redis:
@@ -77,6 +77,34 @@ jobs:
       - uses: Swatinem/rust-cache@v2
       - run: sudo apt-get update && sudo apt-get install -y redis-server
       - run: crates/streams/scripts/redis-test-servers.sh >> "$GITHUB_ENV"
+      - run: cargo test -p temporalio-streams --all-features -- --test-threads=8
+
+  archive:
+    name: S3 archive tests on MinIO
+    runs-on: ubuntu-latest
+    env:
+      AWS_ENDPOINT_URL: http://127.0.0.1:9000
+      AWS_ALLOW_HTTP: "true"
+      AWS_ACCESS_KEY_ID: streams
+      AWS_SECRET_ACCESS_KEY: streams-secret
+      AWS_REGION: us-east-1
+      STREAMS_S3_URL: s3://streams-archive/ci
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: arduino/setup-protoc@v3
+        with:
+          repo-token: ${{ secrets.GITHUB_TOKEN }}
+      - uses: Swatinem/rust-cache@v2
+      - run: |
+          docker run -d --name minio -p 127.0.0.1:9000:9000 \
+            -e MINIO_ROOT_USER="$AWS_ACCESS_KEY_ID" \
+            -e MINIO_ROOT_PASSWORD="$AWS_SECRET_ACCESS_KEY" cgr.dev/chainguard/minio server /data
+          for _ in $(seq 50); do
+            curl -fs http://127.0.0.1:9000/minio/health/ready && break
+            sleep 0.2
+          done
+          aws s3 mb s3://streams-archive
       - run: cargo test -p temporalio-streams --all-features -- --test-threads=8
 
   optional-restore:

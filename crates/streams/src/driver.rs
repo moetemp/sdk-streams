@@ -8,11 +8,15 @@
 //! server refuses goes again one stream at a time, so one bad entry holds back no other stream.
 //! The log keeps a capped backlog. When drivers fall behind by more than the cap, the oldest
 //! entries go before any driver takes them, and those readers wake at the server's next Recheck.
+//!
+//! With an archive, a driver also copies the topics that the store marked into the archive, at
+//! each sweep. It takes a topic's tail once the topic is closed or idle, and at least once per
+//! idle time while it keeps taking writes.
 
 use crate::{
-    NotificationEntry, NotificationLog, NotifierClient, NotifyError, StreamError,
-    StreamNotification, StreamResult, StreamStore, chain_owner, mint_cursor, progress_counter,
-    proto::ChainId, stream_hash,
+    NotificationEntry, NotificationLog, NotifierClient, NotifyError, SegmentLimits, StreamArchive,
+    StreamError, StreamNotification, StreamResult, StreamStore, archive_topic, chain_owner,
+    mint_cursor, progress_counter, proto::ChainId, stream_hash,
 };
 use std::{
     collections::{BTreeMap, HashMap},
@@ -20,7 +24,7 @@ use std::{
         Arc, Mutex,
         atomic::{AtomicBool, Ordering},
     },
-    time::Duration,
+    time::{Duration, Instant},
 };
 use tokio::task::JoinSet;
 
@@ -59,6 +63,24 @@ impl Default for StreamDriverOptions {
 /// Waits before a slot whose notify call failed is drained again.
 const RETRY_WAIT: Duration = Duration::from_secs(1);
 
+/// The most marked topics one sweep reads per partition.
+const ARCHIVE_MARKS: usize = 100;
+
+/// What a driver archives into, and from where.
+#[derive(Clone)]
+pub struct ArchiveSink {
+    /// The hot store itself, not a [crate::TieredStore] over it, since a tiered read could
+    /// answer from the archive.
+    pub hot: Arc<dyn StreamStore>,
+    /// The archive.
+    pub archive: Arc<dyn StreamArchive>,
+    /// When a segment ends.
+    pub limits: SegmentLimits,
+    /// How long a topic goes without a write before the archive takes its tail. A topic that
+    /// keeps taking writes has its tail taken this often too.
+    pub segment_idle: Duration,
+}
+
 /// How many times one entry's call may fail while the server takes other streams' calls before
 /// the entry is dropped.
 const MAX_ENTRY_FAILURES: u32 = 10;
@@ -92,6 +114,7 @@ pub struct StreamDriver {
     /// The slots a drain runs on now, so the doorbells and the sweep don't drain one twice. Set
     /// when another task wanted to drain the slot meanwhile, so the drain looks once more.
     draining: Mutex<HashMap<u32, bool>>,
+    archive: Option<ArchiveSink>,
     /// Whether any call landed, so a server with no notifiers at all is told from one namespace
     /// without them.
     delivered: AtomicBool,
@@ -123,9 +146,16 @@ impl StreamDriver {
             client,
             options,
             draining: Mutex::default(),
+            archive: None,
             delivered: AtomicBool::new(false),
             failures: Mutex::default(),
         })
+    }
+
+    /// This driver, archiving the topics the store marks into `sink`.
+    pub fn with_archive(mut self, sink: ArchiveSink) -> Self {
+        self.archive = Some(sink);
+        self
     }
 
     /// Runs until the returned future is dropped. It only ends early when the server can't take
@@ -138,6 +168,10 @@ impl StreamDriver {
         }
         let driver = self.clone();
         tasks.spawn(async move { driver.sweep().await });
+        if let Some(sink) = self.archive.clone() {
+            let driver = self.clone();
+            tasks.spawn(async move { driver.archive(sink).await });
+        }
         // Dropping the set aborts every task, so a caller stops the driver by dropping this.
         match tasks.join_next().await {
             Some(Ok(result)) => result,
@@ -178,6 +212,63 @@ impl StreamDriver {
                 }
                 Err(error) => {
                     tracing::warn!(%error, "A stream driver could not sweep the notification log");
+                }
+            }
+            tokio::time::sleep(self.options.sweep_interval).await;
+        }
+    }
+
+    /// Archives the marked topics at each sweep. A failure on one topic is logged, and the next
+    /// sweep tries it again.
+    async fn archive(&self, sink: ArchiveSink) -> StreamResult<()> {
+        let mut taken: HashMap<(ChainKey, String), Instant> = HashMap::new();
+        loop {
+            match self.log.archive_marks(ARCHIVE_MARKS).await {
+                Ok(marks) => {
+                    let idle_ms = sink.segment_idle.as_millis() as u64;
+                    let mut seen = HashMap::with_capacity(marks.len());
+                    for mark in marks {
+                        let key = (ChainKey::of(&mark.chain), mark.topic.clone());
+                        let last = taken.get(&key).copied();
+                        let due = mark.written_ms == 0
+                            || mark.idle_ms >= idle_ms
+                            || last.is_none_or(|last| last.elapsed() >= sink.segment_idle);
+                        if !due {
+                            seen.insert(key, last.unwrap_or_else(Instant::now));
+                            continue;
+                        }
+                        let archived = archive_topic(
+                            &*sink.hot,
+                            &*sink.archive,
+                            &mark.chain,
+                            &mark.topic,
+                            sink.limits,
+                            true,
+                        )
+                        .await;
+                        match archived {
+                            Ok(_) => {
+                                seen.insert(key, Instant::now());
+                            }
+                            Err(error) => {
+                                tracing::warn!(
+                                    workflow_id = %mark.chain.workflow_id,
+                                    activity_id = %mark.chain.activity_id,
+                                    topic = %mark.topic,
+                                    %error,
+                                    "A stream driver could not archive a topic"
+                                );
+                                if let Some(last) = last {
+                                    seen.insert(key, last);
+                                }
+                            }
+                        }
+                    }
+                    // Only marked topics stay, so the map stays as small as the marks.
+                    taken = seen;
+                }
+                Err(error) => {
+                    tracing::warn!(%error, "A stream driver could not read the topics to archive");
                 }
             }
             tokio::time::sleep(self.options.sweep_interval).await;
