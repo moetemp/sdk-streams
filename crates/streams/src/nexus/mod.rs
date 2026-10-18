@@ -897,7 +897,8 @@ fn finish_read(
     }
     let (next_token, done) = if cut {
         // A supersession belongs to the record after it, so it goes into the next answer too.
-        if wires.last().is_some_and(|wire| wire.superseded.is_some()) {
+        // One record can follow several, one per producer it withdraws.
+        while wires.last().is_some_and(|wire| wire.superseded.is_some()) {
             wires.pop();
             kept.pop();
         }

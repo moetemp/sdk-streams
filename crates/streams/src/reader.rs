@@ -295,7 +295,9 @@ impl ReadState {
             ..self.clone()
         };
         for record in kept {
-            state.observe(record);
+            if matches!(state.observe(record), Observed::Known | Observed::Newer(_)) {
+                state.withdraw_failed_calls(record);
+            }
         }
         state
     }
@@ -1605,6 +1607,27 @@ mod tests {
                 case["label"]
             );
         }
+    }
+
+    #[test]
+    fn a_state_at_a_cut_keeps_the_calls_its_records_withdrew() {
+        let call = |producer: &str, attempt: i64, started: i64| StreamRecord {
+            task_started_event_id: started,
+            completed_tasks: vec![3, 0],
+            ..data_record(producer, attempt, b"")
+        };
+        let (failed, rerun) = ((3 << 16) | 1, (3 << 16) | 2);
+        let kept = [
+            call("__temporal_local_1@run", (failed << 14) | 1, 5),
+            call("@run", rerun, 8),
+        ];
+        let state = ReadState::default();
+        let mut cut = state.at_cut(&state.attempts(), kept.iter());
+        // The withdrawal went out before the cut, so the call's rerun reports none.
+        assert_eq!(
+            cut.observe(&call("__temporal_local_1@run", (rerun << 14) | 1, 8)),
+            Observed::Newer(None)
+        );
     }
 
     #[test]
