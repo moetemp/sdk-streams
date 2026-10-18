@@ -97,8 +97,10 @@ pub async fn archive_topic(
     flush_tail: bool,
 ) -> StreamResult<ArchiveProgress> {
     let prefix = topic_prefix(chain, topic);
+    let archived = hot.archived(chain, topic).await?;
+    let gone = archived.is_none();
     let mut progress = ArchiveProgress {
-        archived: hot.archived(chain, topic).await?.unwrap_or_default(),
+        archived: archived.unwrap_or_default(),
         ..Default::default()
     };
     let mut segment = Segment {
@@ -159,6 +161,12 @@ pub async fn archive_topic(
             break (page.closed, page.close);
         }
     };
+    if gone && segment.records.is_empty() && !closed {
+        // Retention dropped the topic before the archive took it. Nothing else takes its mark
+        // out, and a slot's oldest marks are the ones a driver reads.
+        hot.release_floor(chain, topic, ARCHIVE_HOLDER).await?;
+        return Ok(progress);
+    }
     if !segment.records.is_empty() && (flush_tail || closed) {
         write_segment(hot, archive, chain, topic, &prefix, &mut segment).await?;
         progress.segments += 1;
