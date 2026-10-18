@@ -1878,8 +1878,7 @@ async fn a_replay_read_from_a_trimmed_start_on_redis_is_a_lost_range() {
 
 #[tokio::test]
 async fn a_chains_notification_entry_lands_in_the_chains_own_slot() {
-    let Ok(url) = std::env::var("STREAMS_REDIS_CLUSTER_URL") else {
-        eprintln!("set STREAMS_REDIS_CLUSTER_URL to run the Redis cluster tests");
+    let Some(url) = server::server_url("STREAMS_REDIS_CLUSTER_URL") else {
         return;
     };
     let prefix = unique("cluster-slots");
