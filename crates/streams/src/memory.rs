@@ -9,8 +9,8 @@
 
 use crate::{
     ACTIVITY_OWNER_KIND, Capabilities, ConditionForms, MAX_BATCH_BYTES, MAX_RECORD_BYTES,
-    StreamError, StreamResult, StreamStore, WORKFLOW_ACTIVITY_OWNER_KIND, WORKFLOW_OWNER_KIND,
-    chain_owner,
+    NotificationEntry, NotificationLog, StreamError, StreamResult, StreamStore,
+    WORKFLOW_ACTIVITY_OWNER_KIND, WORKFLOW_OWNER_KIND, chain_owner,
     proto::{
         ChainId, DeleteOwnerRequest, DeleteOwnerResponse, StoreAppendRequest, StoreAppendResponse,
         StoreLatestRequest, StoreLatestResponse, StoreReadRequest, StoreReadResponse, StoredClose,
@@ -20,7 +20,7 @@ use crate::{
 };
 use std::{
     collections::{BTreeSet, HashMap, VecDeque},
-    sync::Mutex,
+    sync::{Arc, Mutex},
     time::Duration,
 };
 use tokio::{sync::watch, time::Instant};
@@ -36,7 +36,7 @@ const FULL: Capabilities = Capabilities {
     },
     kept_last: true,
     holds: true,
-    change_feed: false,
+    change_feed: true,
     cheap_logs: true,
     delete_owner: true,
     topic_listing: true,
@@ -118,6 +118,7 @@ pub struct MemoryStore {
     chains: Mutex<HashMap<ChainKey, Chain>>,
     /// Bumped on every write, so a waiting read checks again.
     written: watch::Sender<u64>,
+    log: Option<Arc<MemoryLog>>,
     capabilities: Capabilities,
 }
 
@@ -126,8 +127,125 @@ impl Default for MemoryStore {
         Self {
             chains: Mutex::default(),
             written: watch::Sender::new(0),
+            log: None,
             capabilities: FULL,
         }
+    }
+}
+
+/// A notification log in memory: one partition and one doorbell.
+#[derive(Debug)]
+struct MemoryLog {
+    state: Mutex<LogState>,
+    /// Bumped on every entry, so a waiting driver looks again.
+    rung: watch::Sender<u64>,
+}
+
+#[derive(Debug, Default)]
+struct LogState {
+    next_id: u64,
+    items: VecDeque<LogItem>,
+}
+
+#[derive(Debug)]
+struct LogItem {
+    entry: NotificationEntry,
+    /// The consumer that took the entry and when, until an ack drops it.
+    taken: Option<(String, Instant)>,
+}
+
+impl MemoryLog {
+    fn push(&self, chain: &ChainId, topic: &str, position: String) {
+        let mut state = self.state.lock().unwrap();
+        state.next_id += 1;
+        let id = state.next_id.to_string();
+        state.items.push_back(LogItem {
+            entry: NotificationEntry {
+                id,
+                chain: chain.clone(),
+                topic: topic.to_string(),
+                position,
+            },
+            taken: None,
+        });
+        drop(state);
+        self.rung.send_modify(|rung| *rung += 1);
+    }
+
+    fn holds_entries(&self) -> bool {
+        !self.state.lock().unwrap().items.is_empty()
+    }
+}
+
+#[async_trait::async_trait]
+impl NotificationLog for MemoryLog {
+    fn partitions(&self) -> u32 {
+        1
+    }
+
+    fn doorbells(&self) -> u32 {
+        1
+    }
+
+    async fn wait_doorbell(
+        &self,
+        _doorbell: u32,
+        _consumer: &str,
+        block: Duration,
+    ) -> StreamResult<Vec<u32>> {
+        let mut rung = self.rung.subscribe();
+        if !self.holds_entries() {
+            let _ = tokio::time::timeout(block, rung.changed()).await;
+        }
+        Ok(if self.holds_entries() {
+            vec![0]
+        } else {
+            vec![]
+        })
+    }
+
+    async fn take(
+        &self,
+        _partition: u32,
+        consumer: &str,
+        claim_idle: Duration,
+        max: usize,
+    ) -> StreamResult<Vec<NotificationEntry>> {
+        let now = Instant::now();
+        let mut state = self.state.lock().unwrap();
+        let mut taken = vec![];
+        for item in state.items.iter_mut() {
+            if taken.len() >= max {
+                break;
+            }
+            let free = match &item.taken {
+                None => true,
+                Some((owner, _)) if owner == consumer => true,
+                Some((_, at)) => now.duration_since(*at) >= claim_idle,
+            };
+            if free {
+                item.taken = Some((consumer.to_string(), now));
+                taken.push(item.entry.clone());
+            }
+        }
+        Ok(taken)
+    }
+
+    async fn ack(&self, _partition: u32, ids: &[String]) -> StreamResult<()> {
+        self.state
+            .lock()
+            .unwrap()
+            .items
+            .retain(|item| !ids.contains(&item.entry.id));
+        Ok(())
+    }
+
+    async fn busy(&self) -> StreamResult<Vec<u32>> {
+        Ok(if self.holds_entries() {
+            vec![0]
+        } else {
+            vec![]
+        })
     }
 }
 
@@ -135,6 +253,17 @@ impl MemoryStore {
     /// An empty store.
     pub fn new() -> Self {
         Self::default()
+    }
+
+    /// An empty store whose appends write a notification log in the same step.
+    pub fn with_notification_log() -> Self {
+        Self {
+            log: Some(Arc::new(MemoryLog {
+                state: Mutex::default(),
+                rung: watch::Sender::new(0),
+            })),
+            ..Self::default()
+        }
     }
 
     /// Forgets a topic and its holds, as a store does when the topic's last key expired.
@@ -290,8 +419,15 @@ impl StreamStore for MemoryStore {
         NAME
     }
 
+    fn notification_log(&self) -> Option<Arc<dyn NotificationLog>> {
+        self.log.clone().map(|log| log as Arc<dyn NotificationLog>)
+    }
+
     fn capabilities(&self) -> Capabilities {
-        self.capabilities
+        Capabilities {
+            change_feed: self.capabilities.change_feed && self.log.is_some(),
+            ..self.capabilities
+        }
     }
 
     async fn append(&self, request: StoreAppendRequest) -> StreamResult<StoreAppendResponse> {
@@ -367,6 +503,10 @@ impl StreamStore for MemoryStore {
                     digest: request.digest,
                 },
             );
+        }
+        // Under the store's lock, so the entry lands in the same step as the records.
+        if let (Some(log), Some(chain)) = (&self.log, &request.chain) {
+            log.push(chain, &request.topic, last.to_string());
         }
         drop(chains);
         self.wrote();
@@ -705,13 +845,19 @@ mod tests {
 
     #[test]
     fn a_mask_only_takes_capabilities_away() {
-        assert_eq!(MemoryStore::new().capabilities(), FULL);
+        // The change feed comes with a notification log.
+        let no_log = Capabilities {
+            change_feed: false,
+            ..FULL
+        };
+        assert_eq!(MemoryStore::new().capabilities(), no_log);
+        assert_eq!(MemoryStore::with_notification_log().capabilities(), FULL);
         let masked = log_only().capabilities();
         assert!(!masked.producer_state && !masked.kept_last && !masked.long_poll);
         // Positions stay offsets whatever the mask, and the limits stay the store's.
         assert!(masked.dense_positions);
         assert_eq!(masked.max_record_bytes, MAX_RECORD_BYTES);
-        assert_eq!(MemoryStore::with_capabilities(FULL).capabilities(), FULL);
+        assert_eq!(MemoryStore::with_capabilities(FULL).capabilities(), no_log);
     }
 
     #[tokio::test]

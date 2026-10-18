@@ -10,8 +10,9 @@ use crate::{
         FlushNotificationsResponse, FollowRangeRequest, FollowRequest, LatestRequest, NexusCall,
         NexusResumeRequest, PublishWorkflowTaskRequest, ReadRangeRequest, ReadRequest,
         ReleaseFloorRequest, RetireProducerRequest, RunEvictedRequest, RunEvictedResponse,
-        ShutdownWorkerRequest, ShutdownWorkerResponse, StreamFailure, StreamStoreConfig,
-        SubscribeRequest, UnsubscribeRequest, WaitForNotificationRequest, stream_store_config,
+        RunStreamDriverRequest, RunStreamDriverResponse, ShutdownWorkerRequest,
+        ShutdownWorkerResponse, StreamFailure, StreamStoreConfig, SubscribeRequest,
+        UnsubscribeRequest, WaitForNotificationRequest, stream_store_config,
     },
     subscribe::Subscriptions,
     workflow::WorkflowOutput,
@@ -77,17 +78,26 @@ impl StreamService {
             Some(stream_store_config::Store::Memory(memory)) => {
                 let store = match &memory.capabilities {
                     Some(mask) => crate::MemoryStore::with_capabilities(mask.into()),
+                    None if config.notification_log => crate::MemoryStore::with_notification_log(),
                     None => crate::MemoryStore::new(),
                 };
                 (Arc::new(store), DEFAULT_RETENTION)
             }
-            Some(stream_store_config::Store::Redis(redis)) => connect_redis(redis).await?,
+            Some(stream_store_config::Store::Redis(redis)) => {
+                connect_redis(redis, config.notification_log).await?
+            }
             None => {
                 return Err(StreamError::refused(
                     "the stream store config names no store",
                 ));
             }
         };
+        if config.notification_log && store.notification_log().is_none() {
+            return Err(StreamError::refused(format!(
+                "the {} store keeps no notification log",
+                store.name()
+            )));
+        }
         if config.notify_on_append && notifier.is_none() {
             return Err(StreamError::refused(
                 "stream notifications need a client to send them with",
@@ -234,6 +244,16 @@ impl StreamService {
                 .retire_producer(decode::<RetireProducerRequest>(rpc, request)?)
                 .await
                 .map(|r| r.encode_to_vec()),
+            "RunStreamDriver" => {
+                let request = decode::<RunStreamDriverRequest>(rpc, request)?;
+                let driver = crate::StreamDriver::new(
+                    self.store.clone(),
+                    self.subscriptions.client()?.clone(),
+                    driver_options(request)?,
+                )?;
+                Arc::new(driver).run().await?;
+                Ok(RunStreamDriverResponse {}.encode_to_vec())
+            }
             "FlushNotifications" => {
                 decode::<FlushNotificationsRequest>(rpc, request)?;
                 // A close retries until the server takes it, so a stopping process waits only
@@ -401,11 +421,37 @@ fn decode<T: Message + Default>(rpc: &str, request: &[u8]) -> Result<T, StreamFa
     })
 }
 
+fn driver_options(request: RunStreamDriverRequest) -> StreamResult<crate::StreamDriverOptions> {
+    let mut options = crate::StreamDriverOptions {
+        consumer: request.consumer,
+        ..Default::default()
+    };
+    if let Some(interval) = request.sweep_interval {
+        options.sweep_interval = Duration::try_from(interval)
+            .ok()
+            .filter(|interval| !interval.is_zero())
+            .ok_or_else(|| StreamError::invalid_argument("a sweep interval must be positive"))?;
+    }
+    if let Some(idle) = request.claim_idle {
+        options.claim_idle = Duration::try_from(idle)
+            .map_err(|_| StreamError::invalid_argument("a claim idle time must not be negative"))?;
+    }
+    if request.batch > 0 {
+        options.batch = request.batch as usize;
+    }
+    Ok(options)
+}
+
 #[cfg(feature = "redis")]
 async fn connect_redis(
     config: crate::proto::RedisStoreConfig,
+    notification_log: bool,
 ) -> StreamResult<(Arc<dyn StreamStore>, Duration)> {
     let mut options = crate::RedisStoreOptions::new(String::new());
+    options.notification_log = notification_log;
+    if config.notify_doorbells > 0 {
+        options.notify_doorbells = config.notify_doorbells;
+    }
     options.urls = config.urls;
     options.cluster = config.cluster;
     if !config.key_prefix.is_empty() {
@@ -435,6 +481,7 @@ async fn connect_redis(
 #[cfg(not(feature = "redis"))]
 async fn connect_redis(
     _: crate::proto::RedisStoreConfig,
+    _: bool,
 ) -> StreamResult<(Arc<dyn StreamStore>, Duration)> {
     Err(StreamError::unsupported(
         "this build has no Redis store; build temporalio-streams with its redis feature",
@@ -896,6 +943,123 @@ mod tests {
             .map(|n| n.counter)
             .collect();
         assert_eq!(counters.last(), Some(&2), "{counters:?}");
+    }
+
+    #[tokio::test]
+    async fn with_a_notification_log_an_append_writes_an_entry_and_sends_nothing() {
+        let recorder = Arc::new(Recorder::default());
+        let service = StreamService::connect_with_notifier(
+            StreamStoreConfig {
+                store: Some(stream_store_config::Store::Memory(
+                    MemoryStoreConfig::default(),
+                )),
+                notify_on_append: true,
+                notification_log: true,
+                ..Default::default()
+            },
+            Arc::new(Running),
+            Some(recorder.clone()),
+        )
+        .await
+        .unwrap();
+        service.call("Append", &append(1, &["a"])).await.unwrap();
+        flush(&service).await;
+        assert!(recorder.0.lock().unwrap().is_empty(), "the driver notifies");
+        let log = service.store().notification_log().unwrap();
+        assert_eq!(log.busy().await.unwrap(), [0]);
+    }
+
+    #[cfg(feature = "redis")]
+    #[tokio::test]
+    async fn the_redis_store_keeps_a_notification_log_when_asked() {
+        let Ok(url) = std::env::var("STREAMS_REDIS_URL") else {
+            return;
+        };
+        for notification_log in [false, true] {
+            let service = StreamService::connect(
+                StreamStoreConfig {
+                    store: Some(stream_store_config::Store::Redis(
+                        crate::proto::RedisStoreConfig {
+                            urls: vec![url.clone()],
+                            notify_doorbells: 4,
+                            ..Default::default()
+                        },
+                    )),
+                    notification_log,
+                    ..Default::default()
+                },
+                Arc::new(Running),
+            )
+            .await
+            .unwrap();
+            let log = service.store().notification_log();
+            assert_eq!(log.is_some(), notification_log);
+            if let Some(log) = log {
+                assert_eq!((log.partitions(), log.doorbells()), (16_384, 4));
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn a_driver_runs_as_a_call_until_its_caller_drops_it() {
+        let recorder = Arc::new(Recorder::default());
+        let service = Arc::new(
+            StreamService::connect_with_notifier(
+                StreamStoreConfig {
+                    store: Some(stream_store_config::Store::Memory(
+                        MemoryStoreConfig::default(),
+                    )),
+                    notify_on_append: true,
+                    notification_log: true,
+                    ..Default::default()
+                },
+                Arc::new(Running),
+                Some(recorder.clone()),
+            )
+            .await
+            .unwrap(),
+        );
+        let driving = service.clone();
+        let driver = tokio::spawn(async move {
+            driving
+                .call(
+                    "RunStreamDriver",
+                    &RunStreamDriverRequest {
+                        consumer: "d1".to_string(),
+                        ..Default::default()
+                    }
+                    .encode_to_vec(),
+                )
+                .await
+        });
+        service.call("Append", &append(1, &["a"])).await.unwrap();
+        tokio::time::timeout(Duration::from_secs(5), async {
+            while recorder.0.lock().unwrap().is_empty() {
+                tokio::time::sleep(Duration::from_millis(5)).await;
+            }
+        })
+        .await
+        .expect("the driver notified the append");
+        assert_eq!(recorder.0.lock().unwrap()[0].counter, 1);
+        assert!(!driver.is_finished(), "a driver runs until it is dropped");
+        driver.abort();
+    }
+
+    #[tokio::test]
+    async fn a_driver_needs_a_store_with_a_log() {
+        let service = service_notifying(true, Arc::new(Recorder::default())).await;
+        let failure = service
+            .call(
+                "RunStreamDriver",
+                &RunStreamDriverRequest {
+                    consumer: "d1".to_string(),
+                    ..Default::default()
+                }
+                .encode_to_vec(),
+            )
+            .await
+            .unwrap_err();
+        assert_eq!(failure.kind, StreamFailureKind::Refused as i32);
     }
 
     #[tokio::test]

@@ -13,6 +13,7 @@ mod close;
 mod connection;
 mod conventions;
 mod cursor;
+mod driver;
 mod error;
 mod follow;
 mod handle;
@@ -35,7 +36,7 @@ mod wake;
 mod workflow;
 
 #[cfg(feature = "redis")]
-pub use self::redis::{RedisStore, RedisStoreOptions};
+pub use self::redis::{DEFAULT_NOTIFY_DOORBELLS, RedisStore, RedisStoreOptions};
 pub use close::{CHAIN_LOG, append_batch, close_chain, close_topic};
 pub use connection::{connect_stream_service, execute_sync_nexus_operation};
 pub use conventions::{
@@ -43,6 +44,7 @@ pub use conventions::{
     check_topic, content_hash_text,
 };
 pub use cursor::{BEGINNING, END, cursor_position, mint_cursor, stream_hash};
+pub use driver::{StreamDriver, StreamDriverOptions};
 pub use error::{StreamError, StreamResult};
 pub use handle::{OWNER_RECHECK, OWNER_START_GRACE, Streams, StreamsOptions};
 pub use memory::MemoryStore;

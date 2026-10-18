@@ -1879,6 +1879,70 @@ async fn a_replay_read_from_a_trimmed_start_on_redis_is_a_lost_range() {
     assert_eq!(error.kind, StreamFailureKind::ReplayRangeLost, "{error}");
 }
 
+#[tokio::test]
+async fn a_chains_notification_entry_lands_in_the_chains_own_slot() {
+    let Ok(url) = std::env::var("STREAMS_REDIS_CLUSTER_URL") else {
+        eprintln!("set STREAMS_REDIS_CLUSTER_URL to run the Redis cluster tests");
+        return;
+    };
+    let prefix = unique("cluster-slots");
+    let mut options = RedisStoreOptions::new(url.clone());
+    options.cluster = true;
+    options.key_prefix = prefix.clone();
+    options.notification_log = true;
+    let store = RedisStore::connect(options).await.unwrap();
+    let tags: Vec<String> =
+        serde_json::from_str(include_str!("../testdata/redis/notify_slots.json")).unwrap();
+    let mut raw = redis::cluster::ClusterClient::new(vec![url.as_str()])
+        .unwrap()
+        .get_async_connection()
+        .await
+        .unwrap();
+    let keyslot = async |raw: &mut redis::cluster_async::ClusterConnection, key: &str| -> u16 {
+        redis::cmd("CLUSTER")
+            .arg("KEYSLOT")
+            .arg(key)
+            .query_async(raw)
+            .await
+            .unwrap()
+    };
+    for _ in 0..20 {
+        let chain = ChainId {
+            namespace: unique("ns:with{braces}"),
+            workflow_id: unique("wf"),
+            first_run_id: unique("run"),
+            ..Default::default()
+        };
+        let landed = store
+            .append(append(&chain, "p", 1, 1, b"\x01"))
+            .await
+            .unwrap();
+        let log = format!(
+            "{}:{{{}:{}:{}}}:t:events",
+            part(&prefix),
+            part(&chain.namespace),
+            part(&chain.workflow_id),
+            part(&chain.first_run_id)
+        );
+        let slot = keyslot(&mut raw, &log).await;
+        let notifications = format!("{}:{{{}}}:n", part(&prefix), tags[usize::from(slot)]);
+        assert_eq!(keyslot(&mut raw, &notifications).await, slot);
+        let entries: Vec<(String, HashMap<String, String>)> = redis::cmd("XRANGE")
+            .arg(&notifications)
+            .arg("-")
+            .arg("+")
+            .query_async(&mut raw)
+            .await
+            .unwrap();
+        assert!(
+            entries
+                .iter()
+                .any(|(_, fields)| fields["k"] == log && fields["p"] == landed.last_position),
+            "{entries:?}"
+        );
+    }
+}
+
 /// The median time of `n` single-record appends to `chain`'s topic, from sequence `first`.
 async fn median_append(store: &RedisStore, chain: &ChainId, first: i64, n: i64) -> Duration {
     let mut times = vec![];

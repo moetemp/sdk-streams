@@ -15,10 +15,10 @@ use std::{
 };
 use temporalio_common::protos::temporal::api::common::v1::Payload;
 use temporalio_streams::{
-    BEGINNING, CHAIN_LOG, Capabilities, END, MemoryStore, Notifier, NotifierClient, NotifyError,
-    NotifyingStore, ReadTarget, StreamNotification, StreamResult, StreamStore, append_batch,
-    chain_owner, close_chain, close_topic, mint_cursor, proto::*, read_page, stored_append_record,
-    stream_hash,
+    BEGINNING, CHAIN_LOG, Capabilities, END, MemoryStore, NotificationEntry, NotificationLog,
+    Notifier, NotifierClient, NotifyError, NotifyingStore, ReadTarget, StreamNotification,
+    StreamResult, StreamStore, append_batch, chain_owner, close_chain, close_topic, mint_cursor,
+    proto::*, read_page, stored_append_record, stream_hash,
 };
 
 #[async_trait::async_trait]
@@ -74,6 +74,10 @@ impl Case for Memory {
 
 async fn memory() -> Option<Memory> {
     Some(Memory(Arc::new(MemoryStore::new())))
+}
+
+async fn memory_with_log() -> Option<Memory> {
+    Some(Memory(Arc::new(MemoryStore::with_notification_log())))
 }
 
 /// Takes every notification and sends nothing.
@@ -467,15 +471,42 @@ mod on_redis {
         cluster: bool,
         extra: &[&str],
     ) -> Option<Redis> {
+        redis_as_documented_user_with(variable, cluster, extra, false).await
+    }
+
+    /// [redis_as_documented_user] with the notification log on, and the documented rules for
+    /// its keys.
+    pub(crate) async fn redis_as_documented_user_with_log(
+        variable: &str,
+        cluster: bool,
+    ) -> Option<Redis> {
+        redis_as_documented_user_with(variable, cluster, &[], true).await
+    }
+
+    async fn redis_as_documented_user_with(
+        variable: &str,
+        cluster: bool,
+        extra: &[&str],
+        notification_log: bool,
+    ) -> Option<Redis> {
         let Ok(url) = std::env::var(variable) else {
             eprintln!("set {variable} to run the Redis store cases");
             return None;
         };
         let prefix = unique("conformance-acl");
-        let user = DocumentedUser::create(&url, &prefix, "default", extra).await;
+        let log_rules = [
+            format!("~{}:{{*}}:n", part(&prefix)),
+            format!("%W~{}:{{*}}:bell", part(&prefix)),
+        ];
+        let mut rules: Vec<&str> = extra.to_vec();
+        if notification_log {
+            rules.extend(log_rules.iter().map(String::as_str));
+        }
+        let user = DocumentedUser::create(&url, &prefix, "default", &rules).await;
         let mut options = RedisStoreOptions::new(user.url.clone());
         options.key_prefix = prefix.clone();
         options.cluster = cluster;
+        options.notification_log = notification_log;
         Some(Redis {
             store: Arc::new(RedisStore::connect(options).await.unwrap()),
             raw: Raw::connect(&url, cluster).await,
@@ -484,7 +515,7 @@ mod on_redis {
         })
     }
 
-    /// A store as a user with exactly the MemoryDB access string.
+    /// A store with the notification log on, as a user with exactly the MemoryDB access string.
     pub(crate) async fn redis_as_memorydb_user(variable: &str, cluster: bool) -> Option<Redis> {
         let Ok(url) = std::env::var(variable) else {
             eprintln!("set {variable} to run the Redis store cases");
@@ -495,6 +526,7 @@ mod on_redis {
         let mut options = RedisStoreOptions::new(user.url.clone());
         options.key_prefix = prefix.clone();
         options.cluster = cluster;
+        options.notification_log = true;
         Some(Redis {
             store: Arc::new(RedisStore::connect(options).await.unwrap()),
             raw: Raw::connect(&url, cluster).await,
@@ -504,24 +536,35 @@ mod on_redis {
     }
 
     pub(crate) async fn redis(variable: &str, cluster: bool) -> Option<Redis> {
-        redis_with(variable, cluster, false).await
+        redis_with(variable, cluster, false, false).await
+    }
+
+    /// [redis] with a notification log.
+    pub(crate) async fn redis_with_log(variable: &str, cluster: bool) -> Option<Redis> {
+        redis_with(variable, cluster, true, false).await
     }
 
     /// Redis with no Lua, so the store keeps no producer state and no last position.
     pub(crate) async fn plain_redis(variable: &str, cluster: bool) -> Option<Redis> {
-        redis_with(variable, cluster, true).await
+        redis_with(variable, cluster, false, true).await
     }
 
-    async fn redis_with(variable: &str, cluster: bool, plain: bool) -> Option<Redis> {
+    async fn redis_with(
+        variable: &str,
+        cluster: bool,
+        notification_log: bool,
+        plain: bool,
+    ) -> Option<Redis> {
         let Ok(url) = std::env::var(variable) else {
             eprintln!("set {variable} to run the Redis store cases");
             return None;
         };
-        // A prefix per case keeps cases apart in one Redis.
+        // A prefix per case keeps cases apart in one Redis, its notification streams too.
         let prefix = unique("conformance");
         let mut options = RedisStoreOptions::new(url.clone());
         options.cluster = cluster;
         options.key_prefix = prefix.clone();
+        options.notification_log = notification_log;
         options.plain = plain;
         Some(Redis {
             store: Arc::new(RedisStore::connect(options).await.unwrap()),
@@ -1814,6 +1857,124 @@ mod cases {
         }
     }
 
+    /// The store's log. A case runs only on a store that keeps one.
+    fn log_of(case: &dyn Case) -> Arc<dyn NotificationLog> {
+        case.store()
+            .notification_log()
+            .expect("the notification log cases run on stores that keep a log")
+    }
+
+    /// Takes the entries of `chain` from every busy partition, as `consumer`.
+    async fn entries_of(
+        log: &dyn NotificationLog,
+        chain: &ChainId,
+        consumer: &str,
+        claim_idle: Duration,
+    ) -> Vec<(u32, NotificationEntry)> {
+        let mut found = vec![];
+        for partition in log.busy().await.unwrap() {
+            for entry in log
+                .take(partition, consumer, claim_idle, 1000)
+                .await
+                .unwrap()
+            {
+                if &entry.chain == chain {
+                    found.push((partition, entry));
+                }
+            }
+        }
+        found
+    }
+
+    pub(crate) async fn an_append_writes_one_entry_with_its_last_position(case: &dyn Case) {
+        let log = log_of(case);
+        let chain = case.chain();
+        let mut producer = Producer::new(case, &chain, OUT, "p", 1);
+        let landed = producer.append(&["1", "2"]).await;
+        // A repeat of the newest batch writes nothing again.
+        producer.sequence = 1;
+        assert_eq!(producer.append(&["1", "2"]).await, landed);
+        let entries = entries_of(log.as_ref(), &chain, "a", Duration::ZERO).await;
+        let [(partition, entry)] = entries.as_slice() else {
+            panic!("one append gives one entry: {entries:?}");
+        };
+        assert!(*partition < log.partitions());
+        assert_eq!(
+            (entry.topic.as_str(), entry.position.as_str()),
+            (OUT, landed.last_position.as_str())
+        );
+    }
+
+    pub(crate) async fn an_entry_stays_until_its_ack(case: &dyn Case) {
+        let log = log_of(case);
+        let chain = case.chain();
+        Producer::new(case, &chain, OUT, "p", 1)
+            .append(&["1"])
+            .await;
+        let first = entries_of(log.as_ref(), &chain, "a", Duration::ZERO).await;
+        assert_eq!(first.len(), 1);
+        // A consumer that took an entry and didn't ack it gets it again.
+        let again = entries_of(log.as_ref(), &chain, "a", Duration::ZERO).await;
+        assert_eq!(again, first);
+        let (partition, entry) = &first[0];
+        log.ack(*partition, std::slice::from_ref(&entry.id))
+            .await
+            .unwrap();
+        assert!(
+            entries_of(log.as_ref(), &chain, "a", Duration::ZERO)
+                .await
+                .is_empty()
+        );
+    }
+
+    pub(crate) async fn another_consumer_claims_an_entry_only_after_claim_idle(case: &dyn Case) {
+        let log = log_of(case);
+        let chain = case.chain();
+        Producer::new(case, &chain, OUT, "p", 1)
+            .append(&["1"])
+            .await;
+        let hour = Duration::from_secs(3600);
+        assert_eq!(entries_of(log.as_ref(), &chain, "a", hour).await.len(), 1);
+        assert!(
+            entries_of(log.as_ref(), &chain, "b", hour).await.is_empty(),
+            "a live consumer keeps what it took"
+        );
+        tokio::time::sleep(Duration::from_millis(20)).await;
+        let claimed = entries_of(log.as_ref(), &chain, "b", Duration::from_millis(10)).await;
+        assert_eq!(claimed.len(), 1, "a stopped consumer's entry moves on");
+    }
+
+    pub(crate) async fn a_refused_append_writes_no_entry(case: &dyn Case) {
+        let log = log_of(case);
+        let store = case.store();
+        let chain = case.chain();
+        store.close_topic(&chain, OUT).await.unwrap();
+        let refused = Producer::new(case, &chain, OUT, "p", 1)
+            .send(&[data("1")])
+            .await;
+        assert!(refused.is_err());
+        assert!(
+            entries_of(log.as_ref(), &chain, "a", Duration::ZERO)
+                .await
+                .is_empty()
+        );
+    }
+
+    pub(crate) async fn the_doorbell_of_a_partition_with_entries_rings(case: &dyn Case) {
+        let log = log_of(case);
+        let chain = case.chain();
+        Producer::new(case, &chain, OUT, "p", 1)
+            .append(&["1"])
+            .await;
+        let entries = entries_of(log.as_ref(), &chain, "a", Duration::ZERO).await;
+        let partition = entries[0].0;
+        let rung = log
+            .wait_doorbell(partition % log.doorbells(), "a", Duration::from_millis(100))
+            .await
+            .unwrap();
+        assert!(rung.contains(&partition), "{rung:?}");
+    }
+
     /// What a store declares agrees with the calls it answers.
     pub(crate) async fn the_declared_capabilities_match_the_calls(case: &dyn Case) {
         let store = case.store();
@@ -2021,18 +2182,38 @@ macro_rules! store_cases {
     };
 }
 
+/// The notification log, for a store that keeps one.
+macro_rules! log_cases {
+    ($case:expr) => {
+        conformance!($case;
+            an_append_writes_one_entry_with_its_last_position,
+            an_entry_stays_until_its_ack,
+            another_consumer_claims_an_entry_only_after_claim_idle,
+            a_refused_append_writes_no_entry,
+            the_doorbell_of_a_partition_with_entries_rings,
+        );
+    };
+}
+
 mod memory {
     store_cases!(super::memory());
     conformance!(super::memory(); deleting_an_owner_drops_every_chain_of_it);
 }
 
+mod memory_with_log {
+    store_cases!(super::memory_with_log());
+    log_cases!(super::memory_with_log());
+}
+
 mod activity_memory {
     store_cases!(super::activity(super::memory()));
+    log_cases!(super::activity(super::memory_with_log()));
     conformance!(super::activity(super::memory()); deleting_an_owner_drops_every_chain_of_it);
 }
 
 mod workflow_activity_memory {
     store_cases!(super::workflow_activity(super::memory()));
+    log_cases!(super::workflow_activity(super::memory_with_log()));
     conformance!(super::workflow_activity(super::memory());
         deleting_a_workflow_drops_its_workflow_activities,
     );
@@ -2040,6 +2221,7 @@ mod workflow_activity_memory {
 
 mod notifying_memory {
     store_cases!(super::notifying(super::memory()));
+    log_cases!(super::notifying(super::memory_with_log()));
     conformance!(super::notifying(super::memory());
         deleting_an_owner_drops_every_chain_of_it,
     );
@@ -2065,6 +2247,10 @@ mod cluster_redis {
 #[cfg(feature = "redis")]
 mod activity_standalone_redis {
     store_cases!(super::activity(super::on_redis::redis(
+        "STREAMS_REDIS_URL",
+        false
+    )));
+    log_cases!(super::activity(super::on_redis::redis_with_log(
         "STREAMS_REDIS_URL",
         false
     )));
@@ -2096,6 +2282,10 @@ mod activity_cluster_redis {
         "STREAMS_REDIS_CLUSTER_URL",
         true
     )));
+    log_cases!(super::activity(super::on_redis::redis_with_log(
+        "STREAMS_REDIS_CLUSTER_URL",
+        true
+    )));
     conformance!(super::activity(super::on_redis::redis("STREAMS_REDIS_CLUSTER_URL", true));
         deleting_an_owner_drops_every_chain_of_it,
     );
@@ -2104,6 +2294,10 @@ mod activity_cluster_redis {
 #[cfg(feature = "redis")]
 mod workflow_activity_standalone_redis {
     store_cases!(super::workflow_activity(super::on_redis::redis(
+        "STREAMS_REDIS_URL",
+        false
+    )));
+    log_cases!(super::workflow_activity(super::on_redis::redis_with_log(
         "STREAMS_REDIS_URL",
         false
     )));
@@ -2128,15 +2322,19 @@ mod workflow_activity_documented_acl_redis {
 }
 
 #[cfg(feature = "redis")]
-mod workflow_activity_documented_acl_cluster_redis {
+mod workflow_activity_documented_acl_cluster_redis_with_log {
     store_cases!(super::workflow_activity(
-        super::on_redis::redis_as_documented_user("STREAMS_REDIS_CLUSTER_URL", true, &[])
+        super::on_redis::redis_as_documented_user_with_log("STREAMS_REDIS_CLUSTER_URL", true)
     ));
 }
 
 #[cfg(feature = "redis")]
 mod workflow_activity_cluster_redis {
     store_cases!(super::workflow_activity(super::on_redis::redis(
+        "STREAMS_REDIS_CLUSTER_URL",
+        true
+    )));
+    log_cases!(super::workflow_activity(super::on_redis::redis_with_log(
         "STREAMS_REDIS_CLUSTER_URL",
         true
     )));
@@ -2147,6 +2345,24 @@ mod workflow_activity_cluster_redis {
     ));
         deleting_a_workflow_drops_its_workflow_activities,
     );
+}
+
+#[cfg(feature = "redis")]
+mod standalone_redis_with_log {
+    store_cases!(super::on_redis::redis_with_log("STREAMS_REDIS_URL", false));
+    log_cases!(super::on_redis::redis_with_log("STREAMS_REDIS_URL", false));
+}
+
+#[cfg(feature = "redis")]
+mod cluster_redis_with_log {
+    store_cases!(super::on_redis::redis_with_log(
+        "STREAMS_REDIS_CLUSTER_URL",
+        true
+    ));
+    log_cases!(super::on_redis::redis_with_log(
+        "STREAMS_REDIS_CLUSTER_URL",
+        true
+    ));
 }
 
 #[cfg(feature = "redis")]
@@ -2168,6 +2384,22 @@ mod documented_acl_redis {
     conformance!(super::on_redis::redis_as_documented_user("STREAMS_REDIS_URL", false, &["+scan"]);
         deleting_an_owner_drops_every_chain_of_it,
     );
+}
+
+#[cfg(feature = "redis")]
+mod documented_acl_redis_with_log {
+    store_cases!(super::on_redis::redis_as_documented_user_with_log(
+        "STREAMS_REDIS_URL",
+        false
+    ));
+}
+
+#[cfg(feature = "redis")]
+mod documented_acl_cluster_redis_with_log {
+    store_cases!(super::on_redis::redis_as_documented_user_with_log(
+        "STREAMS_REDIS_CLUSTER_URL",
+        true
+    ));
 }
 
 #[cfg(feature = "redis")]
@@ -2216,6 +2448,14 @@ mod kvrocks {
     store_cases!(super::on_redis::redis("STREAMS_KVROCKS_URL", false));
     conformance!(super::on_redis::redis("STREAMS_KVROCKS_URL", false);
         deleting_an_owner_drops_every_chain_of_it,
+    );
+    // Kvrocks answers an empty `XREADGROUP` for a missing group where Redis fails with
+    // `NOGROUP`, so the doorbell's group is never made and its case can't pass.
+    conformance!(super::on_redis::redis_with_log("STREAMS_KVROCKS_URL", false);
+        an_append_writes_one_entry_with_its_last_position,
+        an_entry_stays_until_its_ack,
+        another_consumer_claims_an_entry_only_after_claim_idle,
+        a_refused_append_writes_no_entry,
     );
 }
 

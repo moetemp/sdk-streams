@@ -3,11 +3,13 @@
 mod conn;
 mod errors;
 mod keys;
+mod log;
 mod scripts;
+mod slots;
 
 use crate::{
-    Capabilities, ConditionForms, MAX_BATCH_BYTES, MAX_RECORD_BYTES, StreamError, StreamResult,
-    StreamStore,
+    Capabilities, ConditionForms, MAX_BATCH_BYTES, MAX_RECORD_BYTES, NotificationLog, StreamError,
+    StreamResult, StreamStore,
     proto::{
         ChainId, DeleteOwnerRequest, DeleteOwnerResponse, StoreAppendRequest, StoreAppendResponse,
         StoreLatestRequest, StoreLatestResponse, StoreReadRequest, StoreReadResponse, StoredClose,
@@ -23,7 +25,7 @@ use prost::Message;
 use redis::{Cmd, Script, Value, streams::StreamReadReply};
 use std::{
     collections::HashMap,
-    sync::LazyLock,
+    sync::{Arc, LazyLock},
     time::{Duration, SystemTime, UNIX_EPOCH},
 };
 use tokio::time::Instant;
@@ -44,7 +46,7 @@ const CAPABILITIES: Capabilities = Capabilities {
     },
     kept_last: true,
     holds: true,
-    change_feed: false,
+    change_feed: true,
     cheap_logs: true,
     delete_owner: true,
     topic_listing: true,
@@ -77,6 +79,10 @@ pub struct RedisStoreOptions {
     pub floor_lease: Option<Duration>,
     /// How long a hold lasts after its reader released it.
     pub floor_release_grace: Duration,
+    /// Each append also writes an entry to its slot's notification stream, which a driver reads.
+    pub notification_log: bool,
+    /// How many doorbells the notification log rings, each a stream that a driver blocks on.
+    pub notify_doorbells: u32,
     /// Runs with no Lua: no dedupe entries, no close flags and no topic meta. The service then
     /// takes the fallbacks of producer state and the kept last position, as on a store that has
     /// only a log. For tests of those fallbacks on a real store.
@@ -95,10 +101,15 @@ impl RedisStoreOptions {
             response_timeout: Duration::from_secs(5),
             floor_lease: None,
             floor_release_grace: Duration::from_secs(24 * 60 * 60),
+            notification_log: false,
+            notify_doorbells: DEFAULT_NOTIFY_DOORBELLS,
             plain: false,
         }
     }
 }
+
+/// How many doorbells a notification log rings when the options don't say.
+pub const DEFAULT_NOTIFY_DOORBELLS: u32 = 16;
 
 /// A [StreamStore] on Redis.
 pub struct RedisStore {
@@ -109,6 +120,7 @@ pub struct RedisStore {
     grace_ms: u64,
     floor_lease_ms: u64,
     floor_release_grace_ms: u64,
+    log: Option<Arc<log::RedisLog>>,
     plain: bool,
 }
 
@@ -141,6 +153,11 @@ impl RedisStore {
                 options.retention
             )));
         }
+        if options.plain && options.notification_log {
+            return Err(StreamError::refused(
+                "the Redis store in plain mode runs no script, so it keeps no notification log",
+            ));
+        }
         // The scripts trim below `now - retention` as a stream id, which can't be negative.
         let now_ms = SystemTime::now()
             .duration_since(UNIX_EPOCH)
@@ -162,7 +179,27 @@ impl RedisStore {
             options.response_timeout,
         )
         .mapped(Call::Read)?;
+        let log = if options.notification_log {
+            // Doorbell reads block, so they get connections of their own.
+            let doorbell_reads = BlockingPool::new(
+                seed,
+                options.notify_doorbells.max(1) as usize,
+                options.cluster,
+                options.response_timeout,
+            )
+            .mapped(Call::Read)?;
+            Some(Arc::new(log::RedisLog::new(
+                shared.clone(),
+                doorbell_reads,
+                options.key_prefix.clone(),
+                options.notify_doorbells,
+                false,
+            )))
+        } else {
+            None
+        };
         Ok(Self {
+            log,
             shared,
             blocking,
             prefix: options.key_prefix,
@@ -610,6 +647,10 @@ impl StreamStore for RedisStore {
         NAME
     }
 
+    fn notification_log(&self) -> Option<Arc<dyn NotificationLog>> {
+        self.log.clone().map(|log| log as Arc<dyn NotificationLog>)
+    }
+
     fn capabilities(&self) -> Capabilities {
         if self.plain {
             return Capabilities {
@@ -620,7 +661,10 @@ impl StreamStore for RedisStore {
                 ..CAPABILITIES
             };
         }
-        CAPABILITIES
+        Capabilities {
+            change_feed: self.log.is_some(),
+            ..CAPABILITIES
+        }
     }
 
     async fn append(&self, request: StoreAppendRequest) -> StreamResult<StoreAppendResponse> {
@@ -634,12 +678,18 @@ impl StreamStore for RedisStore {
             return self.append_plain(&request).await;
         }
         let keys = self.keys(request.chain.as_ref())?;
-        let mut script = scripts::APPEND_SCRIPT.prepare_invoke();
+        let mut script = match &self.log {
+            Some(_) => scripts::APPEND_LOGGED_SCRIPT.prepare_invoke(),
+            None => scripts::APPEND_SCRIPT.prepare_invoke(),
+        };
         script
             .key(keys.log(&request.topic))
             .key(keys.meta(&request.topic))
             .key(keys.chain())
             .key(keys.floors(&request.topic));
+        if self.log.is_some() {
+            script.key(keys::notifications(&self.prefix, keys.slot()));
+        }
         if request.chain.as_ref().is_some_and(ChainKeys::keeps_topics) {
             script.key(keys.topics());
         }
@@ -662,11 +712,17 @@ impl StreamStore for RedisStore {
             }
             appended => appended?,
         };
-        let [first_position, last_position] = answer.as_slice() else {
+        let [first_position, last_position, rest @ ..] = answer.as_slice() else {
             return Err(StreamError::storage(format!(
                 "Redis answered the append with {answer:?}"
             )));
         };
+        // The entry made a slot's stream non-empty, so a driver may be asleep on its doorbell.
+        if let (Some(log), [length]) = (&self.log, rest)
+            && length == "1"
+        {
+            log.ring(keys.slot()).await;
+        }
         let (first_position, last_position) = (first_position.clone(), last_position.clone());
         Ok(StoreAppendResponse {
             first_position,

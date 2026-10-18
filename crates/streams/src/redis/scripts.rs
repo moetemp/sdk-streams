@@ -19,6 +19,33 @@ pub(crate) const APPEND: &str = concat!(
 
 pub(crate) static APPEND_SCRIPT: LazyLock<Script> = LazyLock::new(|| Script::new(APPEND));
 
+/// The line that names the key of a Workflow Activity's topic set, which only its appends pass.
+/// It is the key after the notification stream when the store keeps a notification log.
+const TOPICS_KEY: &str = "local topics = KEYS[5]\n";
+
+/// What a store with a notification log writes after the batch, in place of the append's last
+/// answer: an entry in the chain's notification stream (`KEYS[5]`), and the stream's length, so
+/// The store rings the doorbell when the entry is the stream's only one. A repeat writes no entry.
+const LOGGED_ANSWER: &str = "redis.call('XADD', KEYS[5], 'MAXLEN', '~', 10000, '*', \
+'k', KEYS[1], 'p', last)
+return {first, last, redis.call('XLEN', KEYS[5])}
+";
+
+/// [APPEND] with its last answer replaced by [LOGGED_ANSWER], and the topic set as `KEYS[6]`.
+pub(crate) static APPEND_LOGGED: LazyLock<String> = LazyLock::new(|| {
+    let (body, last) = APPEND
+        .trim_end()
+        .rsplit_once('\n')
+        .expect("the append script has a last line");
+    assert_eq!(last, "return {first, last}");
+    assert_eq!(body.matches(TOPICS_KEY).count(), 1);
+    let body = body.replacen(TOPICS_KEY, "local topics = KEYS[6]\n", 1);
+    format!("{body}\n{LOGGED_ANSWER}")
+});
+
+pub(crate) static APPEND_LOGGED_SCRIPT: LazyLock<Script> =
+    LazyLock::new(|| Script::new(&APPEND_LOGGED));
+
 // Marks the topic closed and keeps its first close's outcome in one step, so two closes can't both
 // find no outcome and the second overwrite the first.
 pub(crate) static CLOSE_SCRIPT: LazyLock<Script> =
@@ -103,6 +130,21 @@ end
             "keep(KEYS[1], KEYS[2], #ARGV - 5, last, retention, grace, floor_ms)",
         ),
     ];
+
+    #[test]
+    fn the_logged_append_differs_in_its_topic_set_key_and_last_answer_only() {
+        assert_eq!(
+            APPEND_LOGGED
+                .replacen(LOGGED_ANSWER, "return {first, last}\n", 1)
+                .replacen("local topics = KEYS[6]\n", TOPICS_KEY, 1),
+            APPEND
+        );
+        assert_eq!(APPEND_LOGGED.matches("XADD', KEYS[5]").count(), 1);
+        assert_eq!(
+            APPEND_LOGGED_SCRIPT.get_hash(),
+            "49820889a3c7680122a0b43ed0946c4b4cb0286e"
+        );
+    }
 
     #[test]
     fn the_append_script_is_the_one_before_the_floor_with_the_floor_edits_only() {
