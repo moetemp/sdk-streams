@@ -2670,7 +2670,7 @@ dependencies = [
 [[package]]
 name = "temporalio-macros"
 version = "1.1.0"
-source = "git+https://github.com/moetemp/sdk-rust?rev=4ebdacab5d78dfaf13cfdb1f340ba96b6ad7f6c0#4ebdacab5d78dfaf13cfdb1f340ba96b6ad7f6c0"
+source = "git+https://github.com/moetemp/sdk-rust?rev=5dd6f0ec32f5f1f951c0ef8faa38ade5808cef0b#5dd6f0ec32f5f1f951c0ef8faa38ade5808cef0b"
 dependencies = [
  "proc-macro2",
  "quote",
@@ -2701,7 +2701,7 @@ dependencies = [
 [[package]]
 name = "temporalio-sdk-core"
 version = "0.10.0"
-source = "git+https://github.com/moetemp/sdk-rust?rev=4ebdacab5d78dfaf13cfdb1f340ba96b6ad7f6c0#4ebdacab5d78dfaf13cfdb1f340ba96b6ad7f6c0"
+source = "git+https://github.com/moetemp/sdk-rust?rev=5dd6f0ec32f5f1f951c0ef8faa38ade5808cef0b#5dd6f0ec32f5f1f951c0ef8faa38ade5808cef0b"
 dependencies = [
  "anyhow",
  "assert_matches",
