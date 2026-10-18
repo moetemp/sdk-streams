@@ -74,10 +74,16 @@ async fn attach(
     // A retried start goes to the chain its first try attached to, so it mints the same token and
     // the server keeps one attach. Otherwise fresh for the latest run, since the Workflow id may
     // have moved on to a new chain since a read warmed the cache, and an attach to the ended
-    // chain would never hear the new stream.
+    // chain would never hear the new stream. An Activity owner has no Workflow id, so the kind and
+    // the Activity id keep two Activities' streams apart.
     let key = format!(
-        "{}\0{}\0{}\0{}",
-        stream.namespace, stream.workflow_id, stream.topic, request.request_id
+        "{}\0{}\0{}\0{}\0{}\0{}",
+        stream.namespace,
+        stream.owner_kind,
+        stream.workflow_id,
+        stream.activity_id,
+        stream.topic,
+        request.request_id
     );
     let chain = match chains.get(&key) {
         Some(attached) => chain_of(stream, &attached.first_run_id),
