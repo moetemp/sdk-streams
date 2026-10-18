@@ -487,10 +487,7 @@ mod on_redis {
 
     /// A store as a user with exactly the MemoryDB access string.
     pub(crate) async fn redis_as_memorydb_user(variable: &str, cluster: bool) -> Option<Redis> {
-        let Ok(url) = std::env::var(variable) else {
-            eprintln!("set {variable} to run the Redis store cases");
-            return None;
-        };
+        let url = crate::server::server_url(variable)?;
         let prefix = unique("conformance-memorydb");
         let user = DocumentedUser::create_memorydb(&url, &prefix, "default").await;
         let mut options = RedisStoreOptions::new(user.url.clone());
