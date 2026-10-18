@@ -332,9 +332,12 @@ impl NexusCalls {
             work.decoded.insert(*index, body);
         }
         work.next += 1;
-        let bytes = work.groups.get(work.next).map_or(0, |group| {
-            group.payloads.iter().map(Message::encoded_len).sum()
-        });
+        // The continuation holds every group still to decode, so all of them count.
+        let bytes = work.groups[work.next..]
+            .iter()
+            .flat_map(|group| &group.payloads)
+            .map(Message::encoded_len)
+            .sum();
         self.next_follow_step(work, bytes)
     }
 }
