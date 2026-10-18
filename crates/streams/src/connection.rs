@@ -1411,6 +1411,7 @@ mod tests {
                     proto::NamedProducer {
                         producer_id: "producer".to_string(),
                         attempt: 1,
+                        ..Default::default()
                     },
                 )),
                 sequence: 1,
@@ -1555,6 +1556,7 @@ mod tests {
                 proto::NamedProducer {
                     producer_id: "producer".to_string(),
                     attempt: 1,
+                    ..Default::default()
                 },
             )),
             sequence,

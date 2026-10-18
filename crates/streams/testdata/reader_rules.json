@@ -1,5 +1,5 @@
 {
-  "comment": "The rules a reader applies on every store. Each case lists the stored records of one topic in log order, and the indexes of the records a read from the start delivers (or a read that resumes after the record at index resume_after, with no state). kind defaults to 1 (DATA), 5 is CLOSE and 6 is TOPIC. topic defaults to \"out\". closed says whether the read ended at a CLOSE. superseded lists the records a supersession mark comes right before, and defaults to none.",
+  "comment": "The rules a reader applies on every store. Each case lists the stored records of one topic in log order, and the indexes of the records a read from the start delivers (or a read that resumes after the record at index resume_after, with no state). kind defaults to 1 (DATA), 5 is CLOSE and 6 is TOPIC. topic defaults to \"out\". closed says whether the read ended at a CLOSE. superseded lists the records a supersession mark comes right before, and defaults to none. task_started_event_id defaults to 0 and completed_tasks to none.",
   "cases": [
     {
       "label": "a copy after a lost answer is dropped",
@@ -330,6 +330,173 @@
         0
       ],
       "closed": true
+    },
+    {
+      "label": "a Local Activity call in a failed task with no rerun is withdrawn by the run's next record",
+      "records": [
+        {
+          "producer": "__temporal_local_1@run",
+          "attempt": 3221241857,
+          "sequence": 1,
+          "task_started_event_id": 5,
+          "completed_tasks": [
+            3,
+            0
+          ]
+        },
+        {
+          "producer": "__temporal_local_1@run",
+          "attempt": 3221241857,
+          "sequence": 2,
+          "task_started_event_id": 5
+        },
+        {
+          "producer": "@run",
+          "attempt": 524289,
+          "sequence": 1,
+          "task_started_event_id": 10,
+          "completed_tasks": [
+            8,
+            3,
+            0
+          ]
+        }
+      ],
+      "delivered": [
+        0,
+        1,
+        2
+      ],
+      "superseded": [
+        2
+      ]
+    },
+    {
+      "label": "a Local Activity call rerun in the retried task supersedes through its higher attempt",
+      "records": [
+        {
+          "producer": "__temporal_local_1@run",
+          "attempt": 3221241857,
+          "sequence": 1,
+          "task_started_event_id": 5,
+          "completed_tasks": [
+            3,
+            0
+          ]
+        },
+        {
+          "producer": "__temporal_local_1@run",
+          "attempt": 3221258241,
+          "sequence": 1,
+          "task_started_event_id": 8,
+          "completed_tasks": [
+            3,
+            0
+          ]
+        }
+      ],
+      "delivered": [
+        0,
+        1
+      ],
+      "superseded": [
+        1
+      ]
+    },
+    {
+      "label": "a Local Activity call in a completed task is not withdrawn",
+      "records": [
+        {
+          "producer": "__temporal_local_1@run",
+          "attempt": 3221241857,
+          "sequence": 1,
+          "task_started_event_id": 5,
+          "completed_tasks": [
+            3,
+            0
+          ]
+        },
+        {
+          "producer": "@run",
+          "attempt": 327681,
+          "sequence": 1,
+          "task_started_event_id": 7,
+          "completed_tasks": [
+            5,
+            3,
+            0
+          ]
+        },
+        {
+          "producer": "__temporal_local_2@run",
+          "attempt": 5368725505,
+          "sequence": 1,
+          "task_started_event_id": 7,
+          "completed_tasks": [
+            5,
+            3,
+            0
+          ]
+        }
+      ],
+      "delivered": [
+        0,
+        1,
+        2
+      ]
+    },
+    {
+      "label": "a withdrawn Local Activity call is withdrawn once and its late record is stale",
+      "records": [
+        {
+          "producer": "__temporal_local_1@run",
+          "attempt": 3221241857,
+          "sequence": 1,
+          "task_started_event_id": 5,
+          "completed_tasks": [
+            3,
+            0
+          ]
+        },
+        {
+          "producer": "@run",
+          "attempt": 196610,
+          "sequence": 1,
+          "task_started_event_id": 8,
+          "completed_tasks": [
+            3,
+            0
+          ]
+        },
+        {
+          "producer": "__temporal_local_1@run",
+          "attempt": 3221258241,
+          "sequence": 1,
+          "task_started_event_id": 8,
+          "completed_tasks": [
+            3,
+            0
+          ]
+        },
+        {
+          "producer": "__temporal_local_1@run",
+          "attempt": 3221241857,
+          "sequence": 2,
+          "task_started_event_id": 5
+        }
+      ],
+      "delivered": [
+        0,
+        1,
+        2,
+        3
+      ],
+      "stale": [
+        3
+      ],
+      "superseded": [
+        1
+      ]
     }
   ]
 }
