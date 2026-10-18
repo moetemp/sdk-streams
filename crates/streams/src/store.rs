@@ -27,8 +27,6 @@ pub struct Capabilities {
     /// [StreamStore::retire_producer] work. Without it, a close is a `CLOSE` record and readers
     /// drop copies.
     pub producer_state: bool,
-    /// C2. The forms of conditional append the store has.
-    pub conditional: ConditionForms,
     /// C3. The store knows a topic's newest position also after retention dropped every record,
     /// and [StreamStore::newest_ever] and [StreamStore::dropped_after] answer it. Without it,
     /// the service decides expiry from the record at the read's position.
@@ -57,24 +55,11 @@ pub struct Capabilities {
     pub max_batch_bytes: usize,
 }
 
-/// The conditional appends a store has (C2).
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
-pub struct ConditionForms {
-    /// The append fails unless the log's next position is the expected one.
-    pub tail: bool,
-    /// The append fails unless the stream's fence token is the expected one.
-    pub fence: bool,
-}
-
 impl Capabilities {
     /// A store that gives only the log, so the service takes every fallback.
     pub const fn log_only() -> Self {
         Self {
             producer_state: false,
-            conditional: ConditionForms {
-                tail: false,
-                fence: false,
-            },
             kept_last: false,
             holds: false,
             change_feed: false,
@@ -93,10 +78,6 @@ impl Capabilities {
     pub fn masked(self, mask: &Capabilities) -> Self {
         Self {
             producer_state: self.producer_state && mask.producer_state,
-            conditional: ConditionForms {
-                tail: self.conditional.tail && mask.conditional.tail,
-                fence: self.conditional.fence && mask.conditional.fence,
-            },
             kept_last: self.kept_last && mask.kept_last,
             holds: self.holds && mask.holds,
             change_feed: self.change_feed && mask.change_feed,
@@ -113,8 +94,6 @@ impl From<Capabilities> for crate::proto::StoreCapabilities {
     fn from(capabilities: Capabilities) -> Self {
         Self {
             producer_state: capabilities.producer_state,
-            conditional_tail: capabilities.conditional.tail,
-            conditional_fence: capabilities.conditional.fence,
             kept_last: capabilities.kept_last,
             holds: capabilities.holds,
             change_feed: capabilities.change_feed,
@@ -141,10 +120,6 @@ impl From<&crate::proto::StoreCapabilities> for Capabilities {
         };
         Self {
             producer_state: mask.producer_state,
-            conditional: ConditionForms {
-                tail: mask.conditional_tail,
-                fence: mask.conditional_fence,
-            },
             kept_last: mask.kept_last,
             holds: mask.holds,
             change_feed: mask.change_feed,

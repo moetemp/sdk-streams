@@ -1,5 +1,5 @@
 {
-  "comment": "The rules a reader applies on every store. Each case lists the stored records of one topic in log order, and the indexes of the records a read from the start delivers (or a read that resumes after the record at index resume_after, with no state). kind defaults to 1 (DATA), 5 is CLOSE and 6 is TOPIC. topic defaults to \"out\". closed says whether the read ended at a CLOSE.",
+  "comment": "The rules a reader applies on every store. Each case lists the stored records of one topic in log order, and the indexes of the records a read from the start delivers (or a read that resumes after the record at index resume_after, with no state). kind defaults to 1 (DATA), 5 is CLOSE and 6 is TOPIC. topic defaults to \"out\". closed says whether the read ended at a CLOSE. superseded lists the records a supersession mark comes right before, and defaults to none.",
   "cases": [
     {
       "label": "a copy after a lost answer is dropped",
@@ -135,6 +135,9 @@
       ],
       "stale": [
         2
+      ],
+      "superseded": [
+        1
       ]
     },
     {
