@@ -1,7 +1,7 @@
-//! The Lua scripts, on the stored format the SDKs used before the store moved into Core.
+//! The Lua scripts, on the stored format every SDK must read and write the same.
 //!
-//! The append script is the one the SDKs sent, with one more check, the topic's close flag, so a
-//! batch can't land after the topic's close returned (DD-16). Redis doesn't roll a script back,
+//! The append script checks the topic's close flag too, so a batch can't land after the topic's
+//! close returned. Redis doesn't roll a script back,
 //! so it also runs every step that can fail before its first record lands. `keep.lua` is the
 //! prelude of every script that writes a log.
 

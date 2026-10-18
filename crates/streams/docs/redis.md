@@ -3,8 +3,8 @@
 The store on the application's Redis.
 
 Records live in Redis and never pass through Temporal. The key layout, the stored values and
-the Lua scripts are the ones the SDKs used before the store moved into Core, apart from the
-append's topic check, so a stream one wrote stays readable and writable by the other.
+the Lua scripts are the same in every SDK, so a stream one wrote stays readable and writable
+by another.
 
 **Appends.** One script writes a whole batch, so a reader never sees part of one. The topic's
 meta hash keeps one field per producer attempt: the newest batch's first sequence, its record
@@ -49,7 +49,7 @@ so on a cluster the user must exist on every node. Deleting an owner's streams a
 
 **Plain mode.** `RedisStoreOptions::plain` runs the store with no Lua. An append is a
 `MULTI` of `XADD`s that trim by age, a read is `XREAD` alone, and no meta and no close flag is
-kept. So the store declares neither producer state nor a kept last position, and Core takes
+kept. So the store declares neither producer state nor a kept last position, and the crate takes
 their fallbacks: readers drop copies and end at the first `CLOSE` record, and a read decides
 expiry from the record at its cursor. It exists so tests run those fallbacks on a real store.
 Listing a chain's topics scans every primary, as a delete does, and needs `+scan`.
@@ -58,5 +58,5 @@ Listing a chain's topics scans every primary, as a delete does, and needs `+scan
 `STREAMS_REDIS_CLUSTER_URL` a cluster seed. `scripts/redis-test-servers.sh` starts both. The
 conformance suite runs on each, once more as a user with exactly the ACL above, and once in
 plain mode with the cases of the fallbacks. `tests/fallbacks.rs` adds faults on plain Redis
-too. The cross-implementation test also needs `STREAMS_BROOK_PY`, a Python SDK checkout whose
-provider predates the move.
+too. The cross-implementation test also needs `STREAMS_BROOK_PY`, a Python SDK checkout with
+its own Redis provider.
