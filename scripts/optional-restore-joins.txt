@@ -23,3 +23,13 @@ pub use driver::{StreamDriver, StreamDriverOptions};
 //! The stream driver over a Redis notification log, on a standalone server and on a cluster.
 //! Set `STREAMS_REDIS_URL` and `STREAMS_REDIS_CLUSTER_URL` to run these.
 #![cfg(feature = "redis")]
+          --features tls-aws-lc,redis,archive --tests -- -D warnings
+          cargo build --workspace --no-default-features --features fips,redis,archive
+            --features fips,redis,archive -i ring --target all 2>/dev/null || true)
+features = ["redis", "archive"]
+- FIPS: `cargo tree -e normal,build --no-default-features --features fips,redis,archive -i ring`
+  prints nothing.
+`tests/archive_sink.rs` runs the driver's sink on memory, on Redis with `STREAMS_REDIS_URL`, and
+on S3 with `STREAMS_S3_URL`. The conformance suite runs
+//! The memory cases always run. Set `STREAMS_REDIS_URL` for the Redis case, and `STREAMS_S3_URL`
+//! with the `AWS_*` variables for the S3 case.

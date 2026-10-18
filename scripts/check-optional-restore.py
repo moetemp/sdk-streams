@@ -32,6 +32,22 @@ LAYERS = [
             "crates/streams/testdata/redis/notify_slots.json",
         ],
     ),
+    (
+        "so2",
+        "34b84590f4102d144695020aa35fd2203de5863d",
+        [
+            "crates/streams/lua/advance.lua",
+            "crates/streams/src/archive/format.rs",
+            "crates/streams/src/archive/local.rs",
+            "crates/streams/src/archive/mod.rs",
+            "crates/streams/src/archive/object.rs",
+            "crates/streams/src/handle.rs",
+            "crates/streams/src/redis/mod.rs",
+            "crates/streams/src/tiered.rs",
+            "crates/streams/testdata/archive/names.json",
+            "crates/streams/testdata/archive/objects.json",
+        ],
+    ),
 ]
 
 
