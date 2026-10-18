@@ -777,6 +777,7 @@ impl NexusCalls {
             producer: Some(Producer::Named(NamedProducer {
                 producer_id,
                 attempt,
+                ..Default::default()
             })),
             sequence,
             digest: digest(&records, &plaintext),
