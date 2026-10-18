@@ -94,7 +94,8 @@ ACL SETUSER streams-app on >secret resetkeys ~temporal-streams:{my-ns:* resetcha
 
 A cluster client reads the topology with `CLUSTER SLOTS` first. An ACL user lives on one node,
 so on a cluster the user must exist on every node. Deleting an owner's streams also needs
-`+scan`. `+config|get` only reads `maxmemory-policy`, and the store goes on when a server refuses it.
+`+scan`. `+config|get` only reads `maxmemory-policy`, and the store goes on when a server
+refuses it.
 
 **Plain mode.** `RedisStoreOptions::plain` runs the store with no Lua. An append is a
 `MULTI` of `XADD`s that trim by age, a read is `XREAD` alone, and no meta and no close flag is
@@ -106,9 +107,9 @@ there is no floor hold, so plain mode declares no holds.
 
 **Tests.** The Redis tests run when `STREAMS_REDIS_URL` names a standalone server and
 `STREAMS_REDIS_CLUSTER_URL` a cluster seed. `scripts/redis-test-servers.sh` starts both, the
-cluster with one replica per primary. The conformance suite runs on each, once more as a user with exactly the ACL above, and once in
-plain mode with the cases of the fallbacks. `tests/fallbacks.rs` adds faults on plain Redis
-too. The cross-implementation test also needs `STREAMS_BROOK_PY`, a Python SDK checkout with
+cluster with one replica per primary. The conformance suite runs on each, once more as a user
+with exactly the ACL above, and once in plain mode with the cases of the fallbacks.
+`tests/fallbacks.rs` adds faults on plain Redis too. The cross-implementation test also needs `STREAMS_BROOK_PY`, a Python SDK checkout with
 its own Redis provider. When `STREAMS_REQUIRE` names `redis`, a Redis test with no URL set
 fails and does not skip.
 
@@ -118,4 +119,5 @@ with the access string that those services take in place of `ACL SETUSER`.
 **Kvrocks lane.** `STREAMS_KVROCKS_URL` names an Apache Kvrocks server, which keeps its data on
 disk. The script starts one when it finds a `kvrocks` binary or Docker. The conformance suite runs
 on it standalone, with the store cases and owner deletes. This lane is a test only. We make no
-support claim for Kvrocks. Kvrocks has no ACL users and runs no Redis Cluster, so those lanes do not run.
+support claim for Kvrocks. Kvrocks has no ACL users and runs no Redis Cluster, so those lanes do
+not run.
