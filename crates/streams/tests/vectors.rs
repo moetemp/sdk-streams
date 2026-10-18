@@ -1,12 +1,12 @@
-//! Values the Python SDK produced before the store moved into this crate, which the crate must
-//! reproduce, and the rules every lang must follow the same way.
+//! Values every SDK must produce the same, so a stream one SDK wrote stays readable by another,
+//! and the rules every lang must follow the same way.
 
 use serde_json::Value;
 use temporalio_streams::{cursor_position, mint_cursor, stream_hash};
 
 #[test]
 fn cursors_match_the_python_sdk() {
-    // A cursor a reader kept from before the move must resume on the same record.
+    // A cursor another SDK minted must resume on the same record.
     let cases: Vec<Value> = serde_json::from_str(include_str!("../testdata/cursors.json")).unwrap();
     assert!(!cases.is_empty());
     for case in &cases {
