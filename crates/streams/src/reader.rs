@@ -1071,6 +1071,22 @@ mod tests {
                 .map(|indexes| indexes.iter().map(|i| i.as_u64().unwrap()).collect())
                 .unwrap_or_default();
             assert_eq!(stale, expected_stale, "{label}");
+            let mut superseded = vec![];
+            for pair in page.records.windows(2) {
+                if let (
+                    Some(read_record::Record::Superseded(_)),
+                    Some(read_record::Record::Stored(next)),
+                ) = (&pair[0].record, &pair[1].record)
+                {
+                    let index = String::from_utf8(next.body.clone().unwrap().data);
+                    superseded.push(index.unwrap().parse::<u64>().unwrap());
+                }
+            }
+            let expected_superseded: Vec<u64> = case["superseded"]
+                .as_array()
+                .map(|indexes| indexes.iter().map(|i| i.as_u64().unwrap()).collect())
+                .unwrap_or_default();
+            assert_eq!(superseded, expected_superseded, "{label}");
         }
     }
 
