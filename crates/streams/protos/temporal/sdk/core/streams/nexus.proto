@@ -9,7 +9,7 @@ import "temporal/api/failure/v1/message.proto";
 import "temporal/sdk/core/streams/streams.proto";
 
 // The stream service's Nexus operations, served in process. Lang forwards each call's input in the
-// N0a contract's JSON transfer form, runs its payload codec when the service asks for it, and hands
+// contract's JSON transfer form, runs its payload codec when the service asks for it, and hands
 // the failure the service answers with to its Nexus handler. The contract is
 // `crates/streams/nexus/temporal_streams.nexusrpc.yaml`.
 
@@ -39,7 +39,7 @@ service StreamNexusService {
 
 // One Nexus operation call.
 message NexusCall {
-  // The operation's input, the N0a model in its JSON transfer form.
+  // The operation's input, the contract's model in its JSON transfer form.
   bytes input = 1;
   // When the Nexus request times out. The service answers a read in time for its answer to travel
   // back.
@@ -62,7 +62,7 @@ message NexusLimits {
 // whose bodies need lang's payload codec, and lang resumes it with the results.
 message NexusStep {
   oneof step {
-    // The operation's output, the N0a model in its JSON transfer form.
+    // The operation's output, the contract's model in its JSON transfer form.
     bytes output = 1;
     CodecWork codec = 2;
     NexusFailure failure = 3;

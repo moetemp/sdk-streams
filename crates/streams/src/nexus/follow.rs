@@ -1,6 +1,6 @@
 //! The `follow` and `follow_range` operations: the follower behind the stream service.
 //!
-//! The owner's Worker has the store, so one call expands every link that store holds (DD-209).
+//! The owner's Worker has the store, so one call expands every link that store holds.
 //! Each record's body crosses decoded with its own owner's codec context, so an answer asks lang
 //! for codec work once per owner whose records it holds.
 
@@ -29,7 +29,7 @@ use std::{
 use temporalio_common::protos::temporal::api::common::v1::Payload;
 
 /// The most bytes a follow's state may take. It holds every open stream's read state, so it is
-/// larger than a read's, and the limits keep it below this (DD-206).
+/// larger than a read's, and the limits keep it below this.
 const MAX_FOLLOW_STATE_BYTES: usize = 64 << 10;
 /// The longest `floor_holder` a follow takes. Each stream holds as `<floor_holder>/<source>`, which
 /// must fit the store's 512 bytes.
@@ -121,24 +121,7 @@ impl NexusCalls {
             && answer.records.is_empty()
             && !answer.done
         {
-            let linked = crate::links::FollowState::decode_from(&answer.state)
-                .is_ok_and(|state| state.has_linked());
-            let again = if linked {
-                // The caller's operation hears only the root's notifier, and an agent's root is
-                // often idle while a tool it links is busy. So the call waits on every open
-                // stream itself, for up to half its deadline. When nothing came, the root's
-                // wait still goes out, so a later root record wakes the caller.
-                match self
-                    .follow_longer(request.clone(), deadline, wait, limits)
-                    .await
-                {
-                    Ok(None) => self.wake_on_root(token, &root, request).await,
-                    other => other,
-                }
-            } else {
-                self.wake_on_root(token, &root, request).await
-            };
-            match again {
+            match self.wake_on_root(token, &root, request, limits).await {
                 Ok(Some(again)) => answer = again,
                 Ok(None) => {}
                 Err(error) => return failed(failure::of_stream(&error)),
@@ -216,30 +199,6 @@ impl NexusCalls {
         crate::follow::follow(&self.streams, &subscriptions, request).await
     }
 
-    /// Follows once more, waiting on every open stream for up to `asked`, the caller's wait, and
-    /// at most half of what is left of the deadline. Answers that follow when it found something.
-    async fn follow_longer(
-        &self,
-        mut request: FollowRequest,
-        deadline: Option<SystemTime>,
-        asked: Duration,
-        limits: Limits,
-    ) -> Result<Option<FollowResponse>, StreamError> {
-        let left = deadline.map_or(asked, |deadline| {
-            deadline
-                .duration_since(SystemTime::now())
-                .unwrap_or_default()
-                / 2
-        });
-        let wait = left.min(asked);
-        if wait.is_zero() {
-            return Ok(None);
-        }
-        request.wait = wait.try_into().ok();
-        let again = self.follow_within(request, limits).await?;
-        Ok((!again.records.is_empty() || again.done).then_some(again))
-    }
-
     /// Asks the root's notifier to wake the caller's operation once the root moves, then follows
     /// once more, as read does. Answers the second follow when it found something.
     async fn wake_on_root(
@@ -247,6 +206,7 @@ impl NexusCalls {
         token: &operation::OperationToken,
         root: &StreamAddress,
         mut request: FollowRequest,
+        limits: Limits,
     ) -> Result<Option<FollowResponse>, StreamError> {
         let client = self.callers.as_ref().ok_or_else(|| {
             StreamError::unsupported("waking a caller needs a client connected to the server")
@@ -276,8 +236,7 @@ impl NexusCalls {
             Err(error) => return Err(operation::caller_error(error)),
         }
         request.wait = None;
-        let again =
-            crate::follow::follow(&self.streams, &Subscriptions::default(), request).await?;
+        let again = self.follow_within(request, limits).await?;
         Ok((!again.records.is_empty() || again.done).then_some(again))
     }
 
@@ -373,9 +332,12 @@ impl NexusCalls {
             work.decoded.insert(*index, body);
         }
         work.next += 1;
-        let bytes = work.groups.get(work.next).map_or(0, |group| {
-            group.payloads.iter().map(Message::encoded_len).sum()
-        });
+        // The continuation holds every group still to decode, so all of them count.
+        let bytes = work.groups[work.next..]
+            .iter()
+            .flat_map(|group| &group.payloads)
+            .map(Message::encoded_len)
+            .sum();
         self.next_follow_step(work, bytes)
     }
 }

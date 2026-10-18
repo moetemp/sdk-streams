@@ -100,7 +100,7 @@ fn is_contract_mistake(failure: &temporalio_streams::proto::NexusFailure) -> boo
 }
 
 #[test]
-fn the_contract_names_the_operations_core_serves() {
+fn the_contract_names_the_operations_the_service_serves() {
     let contract = contract();
     let operations = &contract["services"]["TemporalStreams"]["operations"];
     assert_eq!(operations["append"]["input"]["$ref"], "#/$defs/AppendInput");
