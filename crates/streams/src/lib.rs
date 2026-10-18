@@ -26,6 +26,10 @@ mod reader;
 mod record;
 #[cfg(feature = "redis")]
 mod redis;
+#[cfg(all(test, feature = "redis"))]
+mod server {
+    include!("../tests/support/server.rs");
+}
 mod service;
 mod store;
 mod subscribe;
@@ -62,13 +66,12 @@ pub use record::{
 };
 pub use service::StreamService;
 pub use store::{
-    ARCHIVE_HOLDER, Capabilities, CloseOutcome, ConditionForms, MAX_BATCH_BYTES, MAX_CLOSE_BYTES,
+    ARCHIVE_HOLDER, Capabilities, CloseOutcome, MAX_BATCH_BYTES, MAX_CLOSE_BYTES,
     MAX_FLOOR_HOLDERS, MAX_RECORD_BYTES, StreamStore, empty_close_result,
 };
 pub use wake::{STREAM_WAKE_TYPE_URL, fold_stream_wake, fold_stream_wakes};
 pub use workflow::{
-    MAX_APPEND_BYTES, STREAM_COMPLETED_TASKS, STREAM_OWNER_HEADER, STREAM_RETRY_BITS,
-    stream_attempt,
+    STREAM_COMPLETED_TASKS, STREAM_OWNER_HEADER, STREAM_RETRY_BITS, stream_attempt,
 };
 
 /// The protos stores and lang exchange.

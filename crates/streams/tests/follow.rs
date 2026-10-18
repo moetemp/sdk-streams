@@ -1,6 +1,10 @@
 //! `Follow` and `FollowRange` through the stream service, on memory, and on Redis when
 //! `STREAMS_REDIS_URL` and `STREAMS_REDIS_CLUSTER_URL` name servers.
 
+#[cfg(feature = "redis")]
+#[path = "support/server.rs"]
+mod server;
+
 use prost::Message;
 use std::{
     sync::{
@@ -68,10 +72,7 @@ async fn on_memory() -> Option<Streams> {
 
 #[cfg(feature = "redis")]
 async fn on_redis(variable: &str, cluster: bool) -> Option<Streams> {
-    let Ok(url) = std::env::var(variable) else {
-        eprintln!("set {variable} to run the follow on Redis");
-        return None;
-    };
+    let url = server::server_url(variable)?;
     let mut options = temporalio_streams::RedisStoreOptions::new(url);
     options.cluster = cluster;
     options.key_prefix = format!("follow-{}", std::process::id());
