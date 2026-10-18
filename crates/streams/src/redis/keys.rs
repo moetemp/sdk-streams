@@ -24,21 +24,9 @@
 //! <prefix>:{<namespace>:!wa:<workflow id>:<run id>:<activity id>}:topics
 //! ```
 //!
-//! The notification log lives apart from the chains, one stream per Cluster slot and a few
-//! doorbells, each under the hash tag of a slot (see `slots.rs`). A chain's appends go to the
-//! stream of the chain's own slot, so the append script writes both:
-//!
-//! ```text
-//! <prefix>:{<tag of slot s>}:n      slot s's notification entries
-//! <prefix>:{<tag of slot d * 16384 / doorbells>}:bell
-//!                                    doorbell d, which slots s with s % doorbells == d ring
-//! <prefix>:{<tag of slot s>}:a      slot s's topics with records to archive, with an archive
-//! ```
-//!
 //! Each part, the prefix included, is percent-encoded, so a `:` or a brace in an id cannot make
 //! two streams share a key.
 
-use super::{conn::slot, slots};
 use crate::proto::{ChainId, StreamOwnerKind};
 pub(crate) use crate::record::part;
 
@@ -115,28 +103,6 @@ impl ChainKeys {
         }
         unpart(part)
     }
-
-    /// The Cluster slot every key of the chain lands in.
-    pub(crate) fn slot(&self) -> u16 {
-        slot(&self.base)
-    }
-}
-
-/// Slot `slot`'s notification stream.
-pub(crate) fn notifications(prefix: &str, slot: u16) -> String {
-    format!("{}:{{{}}}:n", part(prefix), slots::tag(slot))
-}
-
-/// Slot `slot`'s set of log keys with records to archive, scored by their newest write.
-pub(crate) fn archive_pending(prefix: &str, slot: u16) -> String {
-    format!("{}:{{{}}}:a", part(prefix), slots::tag(slot))
-}
-
-/// Doorbell `doorbell`'s stream, of `doorbells`. The doorbells spread over the slot range, so
-/// a cluster's primaries share them.
-pub(crate) fn doorbell(prefix: &str, doorbell: u32, doorbells: u32) -> String {
-    let slot = u64::from(doorbell) * slots::SLOTS as u64 / u64::from(doorbells.max(1));
-    format!("{}:{{{}}}:bell", part(prefix), slots::tag(slot as u16))
 }
 
 /// The chain and topic of a log key that a notification entry names, or `None` when the key is
@@ -318,7 +284,7 @@ mod tests {
     }
 
     #[test]
-    fn a_chains_notification_stream_shares_its_slot() {
+    fn a_log_key_names_its_chain_and_topic() {
         let cases: Vec<Value> =
             serde_json::from_str(include_str!("../../testdata/redis/keys.json")).unwrap();
         for case in &cases {
@@ -326,10 +292,6 @@ mod tests {
             let prefix = text(case, "prefix");
             let keys = ChainKeys::new(prefix, &chain);
             let topic = text(case, "topic");
-            let notifications = notifications(prefix, keys.slot());
-            assert_eq!(slot(&notifications), slot(&keys.log(topic)));
-            assert_eq!(slot(&notifications), slot(&keys.meta(topic)));
-            assert_eq!(slot(&notifications), slot(&keys.topics()));
             assert_eq!(
                 chain_of_log(prefix, &keys.log(topic)),
                 Some((chain, topic.to_string()))
@@ -458,13 +420,5 @@ mod tests {
             workflow_activity_pattern("p", "ns", "a*b"),
             "p:{ns:!wa:a%2Ab:*"
         );
-    }
-
-    #[test]
-    fn the_doorbells_spread_over_the_slot_range() {
-        let slots: Vec<u16> = (0..16)
-            .map(|d| super::super::conn::slot(&doorbell("p", d, 16)))
-            .collect();
-        assert_eq!(slots, (0..16).map(|d| d * 1024).collect::<Vec<u16>>());
     }
 }
