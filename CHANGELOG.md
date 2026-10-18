@@ -28,12 +28,10 @@
   the stream wakes on a Workflow Task's attachments, with the shared vectors
   `testdata/wake_folds.json` and the codec notes in `docs/wakes.md`.
 - `PublishWorkflowTask` takes `resolved_owner_activities`, the owner Activities an activation
-  resolves. The service closes each one's streams after the records land, and `ShutdownWorker`
-  waits for the closes. `STREAM_OWNER_HEADER` names the header lang marks an owner with.
-- Ported Jetty's Core tests onto Core's mock Worker with the test as lang: owner Activity closes,
-  LINK records in the publish, and the stream wakes on a task's attachments.
   resolves. The service closes each one's streams after the records land, before the publish
   answers. `STREAM_OWNER_HEADER` names the header lang marks an owner with.
+- Ported Jetty's Core tests onto Core's mock Worker with the test as lang: owner Activity closes,
+  LINK records in the publish, and the stream wakes on a task's attachments.
 - The crate generates the stream API from its own copy in `protos/api_stream`, taken from
   `moetemp/api` `c1a8d975`, since sdk-rust no longer vendors it. It builds on sdk-rust kj5.
 - The notifier client calls the stream notifier RPCs by method path through
