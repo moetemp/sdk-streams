@@ -1,17 +1,16 @@
 //! The stream calls lang makes, served in process.
 
 use crate::{
-    ArchiveSink, DEFAULT_MAX_NOTIFIERS, LocalFileArchive, Notifier, NotifierClient, NotifyingStore,
-    OwnerClient, SegmentLimits, StreamArchive, StreamError, StreamResult, StreamStore, Streams,
-    StreamsOptions, TieredStore,
+    DEFAULT_MAX_NOTIFIERS, Notifier, NotifierClient, NotifyingStore, OwnerClient, StreamError,
+    StreamResult, StreamStore, Streams, StreamsOptions,
     proto::{
-        AppendRequest, ArchiveConfig, CloseRequest, DeleteOwnerRequest, DescribeStoreRequest,
+        AppendRequest, CloseRequest, DeleteOwnerRequest, DescribeStoreRequest,
         DescribeStoreResponse, FlushNotificationsRequest, FlushNotificationsResponse,
         FollowRangeRequest, FollowRequest, LatestRequest, PublishWorkflowTaskRequest,
         ReadRangeRequest, ReadRequest, ReleaseFloorRequest, RetireProducerRequest,
-        RunEvictedRequest, RunEvictedResponse, RunStreamDriverRequest, RunStreamDriverResponse,
-        ShutdownWorkerRequest, ShutdownWorkerResponse, StreamFailure, StreamStoreConfig,
-        SubscribeRequest, UnsubscribeRequest, WaitForNotificationRequest, stream_store_config,
+        RunEvictedRequest, RunEvictedResponse, ShutdownWorkerRequest, ShutdownWorkerResponse,
+        StreamFailure, StreamStoreConfig, SubscribeRequest, UnsubscribeRequest,
+        WaitForNotificationRequest, stream_store_config,
     },
     subscribe::Subscriptions,
     workflow::WorkflowOutput,
@@ -24,10 +23,6 @@ use temporalio_common::telemetry::metrics::TemporalMeter;
 const DEFAULT_RETENTION: Duration = Duration::from_secs(7 * 24 * 60 * 60);
 /// The most records one read answers with, as the stream service contract allows.
 const MAX_READ_RECORDS: u32 = 1000;
-/// How long a stream goes without a write before the driver archives its tail, by default.
-const DEFAULT_SEGMENT_IDLE: Duration = Duration::from_secs(5 * 60);
-/// How long the store holds records the archive doesn't hold yet, by default.
-const DEFAULT_STALL_LIMIT: Duration = Duration::from_secs(7 * 24 * 60 * 60);
 /// The longest one read waits, as the stream service contract allows. A longer wait would hold a
 /// store connection that other reads need.
 const MAX_READ_WAIT: Duration = Duration::from_secs(60);
@@ -44,8 +39,6 @@ pub struct StreamService {
     workflows: WorkflowOutput,
     meter: TemporalMeter,
     subscriptions: Subscriptions,
-    /// What a driver archives into, when the config names an archive.
-    archive: Option<ArchiveSink>,
 }
 
 impl std::fmt::Debug for StreamService {
@@ -74,57 +67,20 @@ impl StreamService {
         owner: Arc<dyn OwnerClient>,
         notifier: Option<Arc<dyn NotifierClient>>,
     ) -> StreamResult<Self> {
-        let stall_limit = match &config.archive {
-            Some(_) if !config.notification_log => {
-                return Err(StreamError::refused(
-                    "a stream archive needs the notification log, since a driver archives",
-                ));
-            }
-            Some(archive) => Some(positive_or(
-                archive.stall_limit,
-                DEFAULT_STALL_LIMIT,
-                "archive stall limit",
-            )?),
-            None => None,
-        };
         let (store, retention): (Arc<dyn StreamStore>, Duration) = match config.store {
             Some(stream_store_config::Store::Memory(memory)) => {
-                let mut store = match &memory.capabilities {
+                let store = match &memory.capabilities {
                     Some(mask) => crate::MemoryStore::with_capabilities(mask.into()),
-                    None if config.notification_log => crate::MemoryStore::with_notification_log(),
                     None => crate::MemoryStore::new(),
                 };
-                if stall_limit.is_some() {
-                    store = store.holding_for_archive();
-                }
                 (Arc::new(store), DEFAULT_RETENTION)
             }
-            Some(stream_store_config::Store::Redis(redis)) => {
-                connect_redis(redis, config.notification_log, stall_limit).await?
-            }
-            Some(stream_store_config::Store::Postgres(postgres)) => {
-                connect_postgres(postgres, config.notification_log, stall_limit).await?
-            }
+            Some(stream_store_config::Store::Redis(redis)) => connect_redis(redis).await?,
             None => {
                 return Err(StreamError::refused(
                     "the stream store config names no store",
                 ));
             }
-        };
-        if config.notification_log && store.notification_log().is_none() {
-            return Err(StreamError::refused(format!(
-                "the {} store keeps no notification log",
-                store.name()
-            )));
-        }
-        let (store, archive) = match &config.archive {
-            Some(archive) => {
-                let sink = archive_sink(archive, store.clone()).await?;
-                let tiered: Arc<dyn StreamStore> =
-                    Arc::new(TieredStore::new(store, sink.archive.clone()));
-                (tiered, Some(sink))
-            }
-            None => (store, None),
         };
         if config.notify_on_append && notifier.is_none() {
             return Err(StreamError::refused(
@@ -150,8 +106,7 @@ impl StreamService {
                 StreamError::refused("the stream store's owner start grace must not be negative")
             })?;
         }
-        let mut service = Self::new(store, owner, options);
-        service.archive = archive;
+        let service = Self::new(store, owner, options);
         Ok(match notifier {
             Some(client) => service.with_subscriptions(client),
             None => service,
@@ -174,7 +129,6 @@ impl StreamService {
             workflows,
             meter,
             subscriptions: Subscriptions::default(),
-            archive: None,
         }
     }
 
@@ -260,19 +214,6 @@ impl StreamService {
                 .retire_producer(decode::<RetireProducerRequest>(rpc, request)?)
                 .await
                 .map(|r| r.encode_to_vec()),
-            "RunStreamDriver" => {
-                let request = decode::<RunStreamDriverRequest>(rpc, request)?;
-                let mut driver = crate::StreamDriver::new(
-                    self.store.clone(),
-                    self.subscriptions.client()?.clone(),
-                    driver_options(request)?,
-                )?;
-                if let Some(sink) = self.archive.clone() {
-                    driver = driver.with_archive(sink);
-                }
-                Arc::new(driver).run().await?;
-                Ok(RunStreamDriverResponse {}.encode_to_vec())
-            }
             "FlushNotifications" => {
                 decode::<FlushNotificationsRequest>(rpc, request)?;
                 // A close retries until the server takes it, so a stopping process waits only
@@ -388,96 +329,11 @@ fn decode<T: Message + Default>(rpc: &str, request: &[u8]) -> Result<T, StreamFa
     })
 }
 
-fn driver_options(request: RunStreamDriverRequest) -> StreamResult<crate::StreamDriverOptions> {
-    let mut options = crate::StreamDriverOptions {
-        consumer: request.consumer,
-        ..Default::default()
-    };
-    if let Some(interval) = request.sweep_interval {
-        options.sweep_interval = Duration::try_from(interval)
-            .ok()
-            .filter(|interval| !interval.is_zero())
-            .ok_or_else(|| StreamError::invalid_argument("a sweep interval must be positive"))?;
-    }
-    if let Some(idle) = request.claim_idle {
-        options.claim_idle = Duration::try_from(idle)
-            .map_err(|_| StreamError::invalid_argument("a claim idle time must not be negative"))?;
-    }
-    if request.batch > 0 {
-        options.batch = request.batch as usize;
-    }
-    Ok(options)
-}
-
-/// A positive duration from the config, or `default` when it's unset.
-fn positive_or<D>(value: Option<D>, default: Duration, name: &str) -> StreamResult<Duration>
-where
-    Duration: TryFrom<D>,
-{
-    let Some(value) = value else {
-        return Ok(default);
-    };
-    Duration::try_from(value)
-        .ok()
-        .filter(|value| !value.is_zero())
-        .ok_or_else(|| StreamError::refused(format!("the {name} must be positive")))
-}
-
-/// The archive at the config's URL, with the hot store it archives from.
-async fn archive_sink(
-    config: &ArchiveConfig,
-    hot: Arc<dyn StreamStore>,
-) -> StreamResult<ArchiveSink> {
-    let archive: Arc<dyn StreamArchive> = if let Some(path) = config.url.strip_prefix("file://") {
-        Arc::new(LocalFileArchive::new(path))
-    } else if config.url.starts_with("s3://") {
-        s3_archive(&config.url)?
-    } else {
-        return Err(StreamError::refused(format!(
-            "the archive URL {:?} is neither s3:// nor file://",
-            config.url
-        )));
-    };
-    let mut limits = SegmentLimits::default();
-    if config.segment_bytes > 0 {
-        limits.bytes = usize::try_from(config.segment_bytes).unwrap_or(usize::MAX);
-    }
-    Ok(ArchiveSink {
-        hot,
-        archive,
-        limits,
-        segment_idle: positive_or(
-            config.segment_idle,
-            DEFAULT_SEGMENT_IDLE,
-            "segment idle time",
-        )?,
-    })
-}
-
-#[cfg(feature = "archive")]
-fn s3_archive(url: &str) -> StreamResult<Arc<dyn StreamArchive>> {
-    Ok(Arc::new(crate::ObjectStoreArchive::from_s3_url(url)?))
-}
-
-#[cfg(not(feature = "archive"))]
-fn s3_archive(_: &str) -> StreamResult<Arc<dyn StreamArchive>> {
-    Err(StreamError::unsupported(
-        "this build has no S3 archive; build temporalio-streams with its archive feature",
-    ))
-}
-
 #[cfg(feature = "redis")]
 async fn connect_redis(
     config: crate::proto::RedisStoreConfig,
-    notification_log: bool,
-    archive_lease: Option<Duration>,
 ) -> StreamResult<(Arc<dyn StreamStore>, Duration)> {
     let mut options = crate::RedisStoreOptions::new(String::new());
-    options.notification_log = notification_log;
-    options.archive_lease = archive_lease;
-    if config.notify_doorbells > 0 {
-        options.notify_doorbells = config.notify_doorbells;
-    }
     options.urls = config.urls;
     options.cluster = config.cluster;
     if !config.key_prefix.is_empty() {
@@ -507,77 +363,9 @@ async fn connect_redis(
 #[cfg(not(feature = "redis"))]
 async fn connect_redis(
     _: crate::proto::RedisStoreConfig,
-    _: bool,
-    _: Option<Duration>,
 ) -> StreamResult<(Arc<dyn StreamStore>, Duration)> {
     Err(StreamError::unsupported(
         "this build has no Redis store; build temporalio-streams with its redis feature",
-    ))
-}
-
-#[cfg(feature = "postgres")]
-async fn connect_postgres(
-    config: crate::proto::PostgresStoreConfig,
-    notification_log: bool,
-    archive_lease: Option<Duration>,
-) -> StreamResult<(Arc<dyn StreamStore>, Duration)> {
-    let mut options = crate::PostgresStoreOptions::new(config.url);
-    options.notification_log = notification_log;
-    options.archive_lease = archive_lease;
-    if config.notify_doorbells > 0 {
-        options.notify_doorbells = config.notify_doorbells;
-    }
-    options.listen_url = Some(config.listen_url).filter(|url| !url.is_empty());
-    options.notify_reads = config.notify_reads;
-    if !config.schema.is_empty() {
-        options.schema = config.schema;
-    }
-    let name = |field: &str| format!("Postgres store's {field}");
-    options.retention = positive_or(config.retention, options.retention, &name("retention"))?;
-    if config.max_connections > 0 {
-        options.max_connections = config.max_connections as usize;
-    }
-    options.response_timeout = positive_or(
-        config.response_timeout,
-        options.response_timeout,
-        &name("response timeout"),
-    )?;
-    if let Some(lease) = config.floor_lease {
-        options.floor_lease = Some(positive_or(
-            Some(lease),
-            Duration::ZERO,
-            &name("floor lease"),
-        )?);
-    }
-    options.floor_release_grace = positive_or(
-        config.floor_release_grace,
-        options.floor_release_grace,
-        &name("floor release grace"),
-    )?;
-    options.poll_interval = positive_or(
-        config.poll_interval,
-        options.poll_interval,
-        &name("poll interval"),
-    )?;
-    options.skip_migrations = config.skip_migrations;
-    options.janitor_interval = positive_or(
-        config.janitor_interval,
-        options.janitor_interval,
-        &name("janitor interval"),
-    )?;
-    let retention = options.retention;
-    let store = crate::PostgresStore::connect(options).await?;
-    Ok((Arc::new(store), retention))
-}
-
-#[cfg(not(feature = "postgres"))]
-async fn connect_postgres(
-    _: crate::proto::PostgresStoreConfig,
-    _: bool,
-    _: Option<Duration>,
-) -> StreamResult<(Arc<dyn StreamStore>, Duration)> {
-    Err(StreamError::unsupported(
-        "this build has no PostgreSQL store; build temporalio-streams with its postgres feature",
     ))
 }
 
@@ -952,55 +740,6 @@ mod tests {
         assert_eq!(error.kind, StreamFailureKind::Unsupported);
     }
 
-    #[cfg(not(feature = "postgres"))]
-    #[tokio::test]
-    async fn postgres_needs_the_postgres_feature() {
-        let error = StreamService::connect(
-            StreamStoreConfig {
-                store: Some(stream_store_config::Store::Postgres(Default::default())),
-                ..Default::default()
-            },
-            Arc::new(Running),
-        )
-        .await
-        .unwrap_err();
-        assert_eq!(error.kind, StreamFailureKind::Unsupported);
-    }
-
-    #[cfg(feature = "postgres")]
-    #[tokio::test]
-    async fn a_postgres_config_with_a_bad_value_is_refused() {
-        let config = |postgres: crate::proto::PostgresStoreConfig| StreamStoreConfig {
-            store: Some(stream_store_config::Store::Postgres(postgres)),
-            ..Default::default()
-        };
-        for (postgres, text) in [
-            (Default::default(), "postgres://"),
-            (
-                crate::proto::PostgresStoreConfig {
-                    url: "postgres://localhost/db".to_string(),
-                    retention: Some(Default::default()),
-                    ..Default::default()
-                },
-                "retention",
-            ),
-            (
-                crate::proto::PostgresStoreConfig {
-                    url: "postgres://localhost/db".to_string(),
-                    schema: "Bad-Schema".to_string(),
-                    ..Default::default()
-                },
-                "schema",
-            ),
-        ] {
-            let error = StreamService::connect(config(postgres), Arc::new(Running))
-                .await
-                .unwrap_err();
-            assert_eq!(error.kind, StreamFailureKind::Refused, "{error}");
-            assert!(error.message.contains(text), "{error}");
-        }
-    }
-
     /// Records the notifications it was sent.
     #[derive(Default)]
     struct Recorder(std::sync::Mutex<Vec<crate::StreamNotification>>);
@@ -1082,196 +821,6 @@ mod tests {
             .map(|n| n.counter)
             .collect();
         assert_eq!(counters.last(), Some(&2), "{counters:?}");
-    }
-
-    #[tokio::test]
-    async fn with_a_notification_log_an_append_writes_an_entry_and_sends_nothing() {
-        let recorder = Arc::new(Recorder::default());
-        let service = StreamService::connect_with_notifier(
-            StreamStoreConfig {
-                store: Some(stream_store_config::Store::Memory(
-                    MemoryStoreConfig::default(),
-                )),
-                notify_on_append: true,
-                notification_log: true,
-                ..Default::default()
-            },
-            Arc::new(Running),
-            Some(recorder.clone()),
-        )
-        .await
-        .unwrap();
-        service.call("Append", &append(1, &["a"])).await.unwrap();
-        flush(&service).await;
-        assert!(recorder.0.lock().unwrap().is_empty(), "the driver notifies");
-        let log = service.store().notification_log().unwrap();
-        assert_eq!(log.busy().await.unwrap(), [0]);
-    }
-
-    #[cfg(feature = "redis")]
-    #[tokio::test]
-    async fn the_redis_store_keeps_a_notification_log_when_asked() {
-        let Ok(url) = std::env::var("STREAMS_REDIS_URL") else {
-            return;
-        };
-        for notification_log in [false, true] {
-            let service = StreamService::connect(
-                StreamStoreConfig {
-                    store: Some(stream_store_config::Store::Redis(
-                        crate::proto::RedisStoreConfig {
-                            urls: vec![url.clone()],
-                            notify_doorbells: 4,
-                            ..Default::default()
-                        },
-                    )),
-                    notification_log,
-                    ..Default::default()
-                },
-                Arc::new(Running),
-            )
-            .await
-            .unwrap();
-            let log = service.store().notification_log();
-            assert_eq!(log.is_some(), notification_log);
-            if let Some(log) = log {
-                assert_eq!((log.partitions(), log.doorbells()), (16_384, 4));
-            }
-        }
-    }
-
-    #[tokio::test]
-    async fn a_driver_runs_as_a_call_until_its_caller_drops_it() {
-        let recorder = Arc::new(Recorder::default());
-        let service = Arc::new(
-            StreamService::connect_with_notifier(
-                StreamStoreConfig {
-                    store: Some(stream_store_config::Store::Memory(
-                        MemoryStoreConfig::default(),
-                    )),
-                    notify_on_append: true,
-                    notification_log: true,
-                    ..Default::default()
-                },
-                Arc::new(Running),
-                Some(recorder.clone()),
-            )
-            .await
-            .unwrap(),
-        );
-        let driving = service.clone();
-        let driver = tokio::spawn(async move {
-            driving
-                .call(
-                    "RunStreamDriver",
-                    &RunStreamDriverRequest {
-                        consumer: "d1".to_string(),
-                        ..Default::default()
-                    }
-                    .encode_to_vec(),
-                )
-                .await
-        });
-        service.call("Append", &append(1, &["a"])).await.unwrap();
-        tokio::time::timeout(Duration::from_secs(5), async {
-            while recorder.0.lock().unwrap().is_empty() {
-                tokio::time::sleep(Duration::from_millis(5)).await;
-            }
-        })
-        .await
-        .expect("the driver notified the append");
-        assert_eq!(recorder.0.lock().unwrap()[0].counter, 1);
-        assert!(!driver.is_finished(), "a driver runs until it is dropped");
-        driver.abort();
-    }
-
-    fn archived_memory(url: &str, notification_log: bool) -> StreamStoreConfig {
-        StreamStoreConfig {
-            store: Some(stream_store_config::Store::Memory(
-                MemoryStoreConfig::default(),
-            )),
-            notification_log,
-            archive: Some(ArchiveConfig {
-                url: url.to_string(),
-                ..Default::default()
-            }),
-            ..Default::default()
-        }
-    }
-
-    #[tokio::test]
-    async fn an_archive_needs_the_notification_log_and_a_known_url() {
-        for (config, why) in [
-            (archived_memory("file:///tmp/x", false), "notification log"),
-            (
-                archived_memory("gs://bucket", true),
-                "neither s3:// nor file://",
-            ),
-        ] {
-            let error = StreamService::connect(config, Arc::new(Running))
-                .await
-                .unwrap_err();
-            assert_eq!(error.kind, StreamFailureKind::Refused);
-            assert!(error.message.contains(why), "{error}");
-        }
-    }
-
-    #[tokio::test]
-    async fn a_driver_call_archives_into_the_configured_archive() {
-        let root =
-            std::env::temp_dir().join(format!("streams-service-archive-{}", std::process::id()));
-        let service = Arc::new(
-            StreamService::connect_with_notifier(
-                archived_memory(&format!("file://{}", root.display()), true),
-                Arc::new(Running),
-                Some(Arc::new(Recorder::default())),
-            )
-            .await
-            .unwrap(),
-        );
-        let driving = service.clone();
-        let driver = tokio::spawn(async move {
-            driving
-                .call(
-                    "RunStreamDriver",
-                    &RunStreamDriverRequest {
-                        consumer: "d1".to_string(),
-                        sweep_interval: Some(Duration::from_millis(20).try_into().unwrap()),
-                        ..Default::default()
-                    }
-                    .encode_to_vec(),
-                )
-                .await
-        });
-        service.call("Append", &append(1, &["a"])).await.unwrap();
-        // The store is the tiered one, under the memory store's name.
-        assert_eq!(service.store().name(), "memory");
-        let topic = root.join("v1/ns/w/wf/run-1/out");
-        tokio::time::timeout(Duration::from_secs(5), async {
-            while std::fs::read_dir(&topic).map_or(true, |mut names| names.next().is_none()) {
-                tokio::time::sleep(Duration::from_millis(5)).await;
-            }
-        })
-        .await
-        .expect("the driver archived the topic");
-        driver.abort();
-        std::fs::remove_dir_all(root).unwrap();
-    }
-
-    #[tokio::test]
-    async fn a_driver_needs_a_store_with_a_log() {
-        let service = service_notifying(true, Arc::new(Recorder::default())).await;
-        let failure = service
-            .call(
-                "RunStreamDriver",
-                &RunStreamDriverRequest {
-                    consumer: "d1".to_string(),
-                    ..Default::default()
-                }
-                .encode_to_vec(),
-            )
-            .await
-            .unwrap_err();
-        assert_eq!(failure.kind, StreamFailureKind::Refused as i32);
     }
 
     #[tokio::test]

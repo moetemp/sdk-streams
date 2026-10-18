@@ -24,3 +24,6 @@
   `moetemp/api` `c1a8d975`, since sdk-rust no longer vendors it. It builds on sdk-rust kj5.
 - The stream API copy is a plain copy of `moetemp/api` `9d888ec4`, where the notifier RPC
   messages have their own `stream_request_response.proto`.
+- Took the notification log, the stream driver, the archive tier and the PostgreSQL store out of
+  the main chain. Producers notify per append through `NotifyingStore`. The parts come back as an
+  optional layer.

@@ -43,40 +43,6 @@ doesn't read the floors hash, so its appends can trim records that a positions-o
 topic that a positions-only reader reads must take its appends only through this crate's store.
 Other providers on such a topic are unsupported.
 
-**Notification log.** With `notification_log` on, the append script also adds an entry to the
-notification stream of the chain's Cluster slot, `<prefix>:{<tag>}:n`, where the tag is the one
-`testdata/redis/notify_slots.json` pins for that slot. So the log, the meta and the entry share a
-slot, one script writes them, and a reshard moves them together. A standalone server uses the same
-keys. An entry holds `k`, the log key, and `p`, the append's last entry id. The stream keeps about
-the newest 10,000 entries, also ones a driver took and has not acked. So a driver that falls more
-than 10,000 appends behind on a slot loses the oldest entries, and a quiet stream that shares the
-slot with a busy one can lose its only entry. Its readers then wake on their recheck. A repeat of
-the newest batch adds none. The script answers the stream's length too, and when it is 1, the store
-adds the slot to doorbell `d = s % doorbells`, at
-`<prefix>:{<tag of slot d * 16384 / doorbells>}:bell`, apart from the script, so a lost ring is
-possible. The doorbells spread over the slot range, so a cluster's primaries share them, and an
-application and its drivers must agree on the number of doorbells. Drivers read the slot streams
-and the doorbells as the consumer group `streams-driver` (`XREADGROUP`, `XAUTOCLAIM`, `XACK`,
-`XDEL`, `XGROUP CREATE`), and sweep with `XLEN` over each primary's slots from `CLUSTER SLOTS`. The
-slot streams have no expiry, and a driver empties them. The logged append script has its own hash.
-The plain one is unchanged, and an SDK's provider writes no entries.
-
-**Archive hold.** With `archive_lease` set, a driver copies each topic into an archive, and the
-store holds what the archive doesn't hold yet. The floors hash keeps the holder `archive`. The
-append script makes it at a topic's first write as `0-1|<now + lease>`, so it holds the whole
-topic. `advance.lua` moves it to the archive's newest position with no minimum, renews the lease,
-extends the keys' expiry to it, and keeps the position in the meta's `archived` field. The trim
-reads the hold as it reads a reader's, so retention drops only what the archive holds. When the
-archive stops for longer than the lease, the hold ends and the trim goes on, and nothing blocks
-appends. The append script also adds the log key to `<prefix>:{<tag of slot s>}:a`, a sorted set
-in the slot of the chain's notification stream, scored by the time of the write. A close adds it
-with score `0`, so the archive takes closed topics first. `advance.lua` takes it out once the
-archive holds the meta's `last`, and the archive's release takes it out after a closed topic's
-end. The archive needs the notification log. The archived append script has its own hash. With an
-archive, an application also needs `~temporal-streams:{*}:a +zadd +hexists`, and a driver also
-needs `+zrange +zrem` on those keys. A delete takes a deleted topic's mark out of the set, so it
-also needs `+zrem` there.
-
 **Retired producers.** A field stays until a write's trim finds it older than the retention, so
 a topic written by many short-lived producers holds one field per producer attempt of the last
 retention window, about 235 bytes each. `RetireProducer` deletes one attempt's field with
@@ -128,11 +94,7 @@ ACL SETUSER streams-app on >secret resetkeys ~temporal-streams:{my-ns:* resetcha
 
 A cluster client reads the topology with `CLUSTER SLOTS` first. An ACL user lives on one node,
 so on a cluster the user must exist on every node. Deleting an owner's streams also needs
-`+scan`. With the notification log on, an application also needs `~temporal-streams:{*}:n
-%W~temporal-streams:{*}:bell`, since its appends write the slot streams. Those entries name
-other namespaces' streams and positions, never records. A driver needs those keys with read and
-write, and `+xreadgroup +xautoclaim +xack +xdel +xgroup|create +xlen +xadd +cluster|slots`.
-`+config|get` only reads `maxmemory-policy`, and the store goes on when a server refuses it.
+`+scan`. `+config|get` only reads `maxmemory-policy`, and the store goes on when a server refuses it.
 
 **Plain mode.** `RedisStoreOptions::plain` runs the store with no Lua. An append is a
 `MULTI` of `XADD`s that trim by age, a read is `XREAD` alone, and no meta and no close flag is
@@ -140,14 +102,11 @@ kept. So the store declares neither producer state nor a kept last position, and
 their fallbacks: readers drop copies and end at the first `CLOSE` record, and a read decides
 expiry from the record at its cursor. It exists so tests run those fallbacks on a real store.
 Listing a chain's topics scans every primary, as a delete does, and needs `+scan`. With no script
-there is no notification log, no floor hold and no archive hold, so plain mode declares neither
-holds nor a change feed, and a config that asks for a log or an archive is refused.
+there is no floor hold, so plain mode declares no holds.
 
 **Tests.** The Redis tests run when `STREAMS_REDIS_URL` names a standalone server and
 `STREAMS_REDIS_CLUSTER_URL` a cluster seed. `scripts/redis-test-servers.sh` starts both, the
-cluster with one replica per primary. `STREAMS_REDIS_CLUSTER_ADMIN=1` lets the driver tests move
-a slot and fail a primary over, so set it only for a cluster of the tests' own. The
-conformance suite runs on each, once more as a user with exactly the ACL above, and once in
+cluster with one replica per primary. The conformance suite runs on each, once more as a user with exactly the ACL above, and once in
 plain mode with the cases of the fallbacks. `tests/fallbacks.rs` adds faults on plain Redis
 too. The cross-implementation test also needs `STREAMS_BROOK_PY`, a Python SDK checkout whose
 provider predates the move.
@@ -157,7 +116,5 @@ with the access string that those services take in place of `ACL SETUSER`.
 
 **Kvrocks lane.** `STREAMS_KVROCKS_URL` names an Apache Kvrocks server, which keeps its data on
 disk. The script starts one when it finds a `kvrocks` binary or Docker. The conformance suite runs
-on it standalone, with the store cases, owner deletes and the notification log. This lane is a
-test only. We make no support claim for Kvrocks. Its doorbell case does not run, since Kvrocks
-answers an empty `XREADGROUP` where Redis fails with `NOGROUP`, so a driver never makes the
-doorbell's group. Kvrocks has no ACL users and runs no Redis Cluster, so those lanes do not run.
+on it standalone, with the store cases and owner deletes. This lane is a test only. We make no
+support claim for Kvrocks. Kvrocks has no ACL users and runs no Redis Cluster, so those lanes do not run.
