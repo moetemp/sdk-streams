@@ -41,6 +41,10 @@ pub const CLOSE_RETRY_LIMIT: Duration = Duration::from_secs(10 * 60);
 const NOTIFY_RETRIES: u32 = 2;
 const NOTIFY_RETRY_FIRST: Duration = Duration::from_millis(250);
 
+// An append waits at most this long for its notification. Past it the server is likely down, and
+// the reader's recheck finds the record.
+const NOTIFY_WAIT_LIMIT: Duration = Duration::from_secs(5);
+
 // Redis entry ids are `<ms>-<seq>`. Twenty bits hold the sequence, far more entries than one
 // stream takes in a millisecond, and the milliseconds stay below 2^43 until the year 2248, so the
 // packed value fits a positive i64.
@@ -273,12 +277,23 @@ struct SlotState {
     closed: bool,
 }
 
+/// How one send of a notification ended.
+enum Sent {
+    Landed,
+    /// Every try failed, or the server refused it.
+    GaveUp,
+    /// A newer notification or the close goes instead.
+    Superseded,
+}
+
 /// One stream's notifications: folded, with one call in flight per slot.
 #[derive(Debug)]
 struct Slot {
     key: StreamKey,
     state: Mutex<SlotState>,
     idle: watch::Sender<bool>,
+    /// The highest counter whose send ended, landed or given up. The close sets it to the most.
+    delivered: watch::Sender<i64>,
 }
 
 impl Slot {
@@ -287,7 +302,16 @@ impl Slot {
             key,
             state: Mutex::default(),
             idle: watch::Sender::new(true),
+            delivered: watch::Sender::new(i64::MIN),
         })
+    }
+
+    /// Waits until a send at or above `counter` ended. A call in flight below it doesn't count,
+    /// so the wait goes on to the next send, which carries the newest position.
+    async fn wait_delivered(&self, counter: i64) {
+        let mut delivered = self.delivered.subscribe();
+        // The sender lives as long as the slot, so the wait can't fail.
+        let _ = delivered.wait_for(|delivered| *delivered >= counter).await;
     }
 
     /// Records the newest position and returns at once. While a call is out, later
@@ -347,22 +371,27 @@ impl Slot {
                 counter,
                 close: None,
             };
-            self.send(&client, notification).await;
+            match self.send(&client, notification).await {
+                Sent::Landed | Sent::GaveUp => self
+                    .delivered
+                    .send_modify(|delivered| *delivered = (*delivered).max(counter)),
+                Sent::Superseded => {}
+            }
         }
     }
 
-    /// Sends one notification, trying a failed one again. Answers whether it landed.
+    /// Sends one notification, trying a failed one again.
     async fn send(
         &self,
         client: &Arc<dyn NotifierClient>,
         notification: StreamNotification,
-    ) -> bool {
+    ) -> Sent {
         let mut delay = NOTIFY_RETRY_FIRST;
         for tries_left in (0..=NOTIFY_RETRIES).rev() {
             // A notification is only a hint, and the reader reads from its own cursor, so a
             // notification that can't go never fails the write.
             match client.notify(notification.clone()).await {
-                Ok(()) => return true,
+                Ok(()) => return Sent::Landed,
                 Err(NotifyError::Failed(error)) if tries_left > 0 && !self.superseded() => {
                     tracing::debug!(
                         workflow_id = %self.key.workflow_id,
@@ -378,18 +407,18 @@ impl Slot {
                         activity_id = %self.key.activity_id,
                         topic = %self.key.topic,
                         %error,
-                        "A stream notification failed. The next write tells the reader again"
+                        "A stream notification failed. The reader's recheck finds the record"
                     );
-                    return false;
+                    return Sent::GaveUp;
                 }
             }
             tokio::time::sleep(delay).await;
             delay *= 2;
             if self.superseded() {
-                return false;
+                return Sent::Superseded;
             }
         }
-        false
+        Sent::GaveUp
     }
 
     /// Whether something newer will reach the notifier anyway: a later notification, or the
@@ -403,6 +432,8 @@ impl Slot {
     /// notifier hears from this process.
     async fn close(&self) {
         self.state.lock().unwrap().closed = true;
+        // The close outranks every notification, so no append waits past it.
+        self.delivered.send_replace(i64::MAX);
         self.wait_idle().await;
     }
 
@@ -516,6 +547,32 @@ impl Notifier {
     pub fn notify(&self, chain: &ChainId, topic: &str, position: String, counter: i64) {
         self.slot(StreamKey::new(chain, topic))
             .notify(&self.client, position, counter);
+    }
+
+    /// [Notifier::notify], then waits until a send that covers `counter` ended. A failed send is
+    /// tried again a few times and then logged, and the wait ends after [NOTIFY_WAIT_LIMIT] in
+    /// any case, so it never fails and never hangs on a server that is down.
+    pub async fn notify_and_wait(
+        &self,
+        chain: &ChainId,
+        topic: &str,
+        position: String,
+        counter: i64,
+    ) {
+        let slot = self.slot(StreamKey::new(chain, topic));
+        slot.notify(&self.client, position, counter);
+        if tokio::time::timeout(NOTIFY_WAIT_LIMIT, slot.wait_delivered(counter))
+            .await
+            .is_err()
+        {
+            tracing::warn!(
+                workflow_id = %chain.workflow_id,
+                activity_id = %chain.activity_id,
+                topic,
+                "A stream notification did not go within {NOTIFY_WAIT_LIMIT:?}. The reader's \
+                 recheck finds the record"
+            );
+        }
     }
 
     /// Closes the stream on the server with `outcome`, after the notification in flight, and
@@ -662,7 +719,8 @@ impl NotifierClient for UnlessUnsupported {
 }
 
 /// A store that closes each stream's notifier after the store closes the stream, and with
-/// progress on, notifies it after every append that lands. A store with a notification log
+/// progress on, notifies it after every append that lands and before the append answers. A store
+/// with a notification log
 /// notifies through its driver, so its appends send nothing here.
 ///
 /// Wraps the store a process hands to its stream calls, so every write path notifies without
@@ -702,11 +760,16 @@ impl NotifyingStore {
         close_notifier_in_background(&self.inner, &self.notifier, chain, topic, outcome);
     }
 
-    fn notify_at(&self, chain: &ChainId, topic: &str, position: &str) {
+    /// Waits for the notification, so a caller that answers after the append, such as the
+    /// Workflow publish, answers only once the reader was told. A process that stops before then
+    /// never answers, and the caller's retry writes and notifies again.
+    async fn notify_at(&self, chain: &ChainId, topic: &str, position: &str) {
         if let Some((cursor, counter)) =
             notification_at(self.inner.as_ref(), chain, topic, position)
         {
-            self.notifier.notify(chain, topic, cursor, counter);
+            self.notifier
+                .notify_and_wait(chain, topic, cursor, counter)
+                .await;
         }
     }
 }
@@ -760,7 +823,7 @@ impl StreamStore for NotifyingStore {
             && self.inner.notification_log().is_none()
             && let Some(chain) = &chain
         {
-            self.notify_at(chain, &topic, &landed.last_position);
+            self.notify_at(chain, &topic, &landed.last_position).await;
         }
         Ok(landed)
     }
@@ -1260,6 +1323,66 @@ mod tests {
             ),
             "the position is the cursor a reader resumes from"
         );
+    }
+
+    #[tokio::test]
+    async fn an_append_answers_only_once_its_notification_went() {
+        let recorder = Recorder::holding();
+        let (_, store) = notifying_store(&recorder);
+        let store = Arc::new(store);
+        let appending = tokio::spawn({
+            let store = store.clone();
+            async move { store.append(append_request(&chain("run-1"), "t", 1)).await }
+        });
+        settle().await;
+        assert_eq!(recorder.sent().len(), 1, "the notification is out");
+        assert!(!appending.is_finished(), "the append waits for it");
+        recorder.release(1);
+        appending.await.unwrap().unwrap();
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn an_append_whose_notification_keeps_failing_still_lands() {
+        let recorder = Arc::new(Recorder::default());
+        recorder.fail.store(true, Ordering::SeqCst);
+        let (_, store) = notifying_store(&recorder);
+        store
+            .append(append_request(&chain("run-1"), "t", 1))
+            .await
+            .unwrap();
+        assert_eq!(recorder.sent().len(), 1 + NOTIFY_RETRIES as usize);
+    }
+
+    #[tokio::test]
+    async fn a_producer_that_stops_before_its_notification_notifies_on_the_retry() {
+        let inner = Arc::new(MemoryStore::new());
+        let held = Recorder::holding();
+        let first = Arc::new(NotifyingStore::new(
+            inner.clone(),
+            Arc::new(Notifier::new(held.clone(), 10)),
+        ));
+        let appending = tokio::spawn({
+            let first = first.clone();
+            async move { first.append(append_request(&chain("run-1"), "t", 1)).await }
+        });
+        settle().await;
+        // The record landed and the notification never got through, as when the process stops.
+        assert_eq!(held.sent().len(), 1);
+        appending.abort();
+        assert!(appending.await.unwrap_err().is_cancelled());
+        // The caller never got an answer, so its retry sends the same batch from a new process.
+        let recorder = Arc::new(Recorder::default());
+        let retry = NotifyingStore::new(inner, Arc::new(Notifier::new(recorder.clone(), 10)));
+        let landed = retry
+            .append(append_request(&chain("run-1"), "t", 1))
+            .await
+            .unwrap();
+        assert_eq!(
+            recorder.sent().last().map(|(_, counter)| *counter),
+            progress_counter(&landed.last_position),
+            "the retry's dedupe answers the first positions and notifies them"
+        );
+        assert_eq!(held.sent()[0].1, recorder.sent()[0].1);
     }
 
     #[tokio::test]
