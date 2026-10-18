@@ -229,6 +229,22 @@ async fn an_append_that_may_not_have_landed_is_sent_again_and_a_refusal_is_not()
 }
 
 #[tokio::test]
+async fn a_failed_publish_leaves_the_sequences_where_they_were() {
+    let store = Arc::new(RecordingStore::failing_first([StreamError::refused(
+        "the ACL denies the key",
+    )]));
+    let service = service_on(&store, &Owner::with(WorkflowExecutionStatus::Running));
+    send(&service, publish(3, 0, &[], &["a"]))
+        .await
+        .unwrap_err();
+    send(&service, publish(3, 0, &[], &["a"])).await.unwrap();
+    assert_eq!(
+        store.append_log(),
+        [(TOPIC.to_string(), "@run-1".to_string(), 1, 1, 1)]
+    );
+}
+
+#[tokio::test]
 async fn a_record_no_writer_stores_is_refused_before_any_store_call() {
     let store = Arc::new(RecordingStore::default());
     let service = service_on(&store, &Owner::with(WorkflowExecutionStatus::Running));

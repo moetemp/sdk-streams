@@ -326,11 +326,10 @@ impl WorkflowOutput {
                 task_started: request.task_started_event_id,
             });
         let max_batch_bytes = self.store.capabilities().max_batch_bytes;
-        let topics = output_by_topic(
-            request.records,
-            &mut run.committed_by_topic,
-            max_batch_bytes,
-        )?;
+        // The counts move only once every append landed, so a failed publish leaves no gap in
+        // the attempt's sequences.
+        let mut committed = run.committed_by_topic.clone();
+        let topics = output_by_topic(request.records, &mut committed, max_batch_bytes)?;
         run.sessions
             .entry(attempt)
             .or_default()
@@ -361,6 +360,7 @@ impl WorkflowOutput {
                 dropped_topics.push(topic.topic.clone());
             }
         }
+        run.committed_by_topic = committed;
         Ok(PublishWorkflowTaskResponse { dropped_topics })
     }
 
