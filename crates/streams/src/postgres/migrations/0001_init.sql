@@ -525,12 +525,13 @@ DECLARE
   v_archived bigint;
   v_closed boolean;
 BEGIN
-  -- The key share lock keeps the janitor from deleting the topic under the insert.
+  -- The row lock keeps the janitor from deleting the topic under the insert. It also makes two
+  -- advances wait for each other, so the guard below reads the other's `archived`.
   SELECT t.topic_id, t.archived, t.closed INTO v_topic, v_archived, v_closed FROM chains c
     JOIN topics t ON t.chain_id = c.chain_id AND t.topic = p_topic
    WHERE (c.namespace, c.owner_kind, c.owner_id, c.first_run_id, c.activity_id)
        = (p_namespace, p_kind, p_owner, p_run, p_activity)
-     FOR KEY SHARE OF t;
+     FOR NO KEY UPDATE OF t;
   IF NOT FOUND THEN
     RETURN;
   END IF;
