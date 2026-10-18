@@ -159,6 +159,18 @@ mod tests {
             (InvalidArgument, "ValueError", BAD_REQUEST, false),
             (Cursor, "StreamCursorError", BAD_REQUEST, false),
             (Expired, "StreamExpiredError", BAD_REQUEST, false),
+            (
+                ReplayMismatch,
+                "StreamReplayMismatchError",
+                BAD_REQUEST,
+                false,
+            ),
+            (
+                ReplayRangeLost,
+                "StreamReplayRangeLostError",
+                BAD_REQUEST,
+                false,
+            ),
             (ProducerDivergent, "StreamProducerError", BAD_REQUEST, false),
             (ProducerStale, "StreamProducerError", BAD_REQUEST, false),
             (Closed, "StreamClosedError", BAD_REQUEST, false),
