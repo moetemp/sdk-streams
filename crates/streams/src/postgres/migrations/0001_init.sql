@@ -75,6 +75,19 @@ CREATE TABLE floors (                      -- positions-only readers and the arc
 
 CREATE TABLE purge (topic_id bigint PRIMARY KEY);  -- deleted topics whose rows remain
 
+-- The notification log: one entry per append, in one of 64 partitions fixed here, so a topic's
+-- partition stays valid for ever. Drivers take entries with `FOR UPDATE SKIP LOCKED` and ack
+-- them with a delete.
+CREATE TABLE notifications (
+  partition smallint NOT NULL,
+  id        bigint GENERATED ALWAYS AS IDENTITY,
+  topic_id  bigint NOT NULL,
+  position  bigint NOT NULL,
+  taken_by  text,
+  taken_at  timestamptz,
+  PRIMARY KEY (partition, id)
+) WITH (fillfactor = 70, autovacuum_vacuum_scale_factor = 0.01);
+
 CREATE FUNCTION chain_id_v1(p_namespace text, p_kind smallint, p_owner text, p_run text,
   p_activity text) RETURNS bigint
 LANGUAGE plpgsql SET search_path FROM CURRENT AS $$
@@ -130,8 +143,11 @@ BEGIN
   RETURN v_topic;
 END $$;
 
--- Status 0 appended, 1 repeat, 2 divergent, 3 stale, 4 closed. The log and archive arguments
--- take effect from later migrations, so the signature stays the same.
+-- Status 0 appended, 1 repeat, 2 divergent, 3 stale, 4 closed. The log entry and its doorbell go
+-- in the append's transaction. The archive's hold is made at a topic's first record, so retention
+-- can't drop a record before the archive's first pass. Every batch puts a Workflow Activity's
+-- topic in its set, since a first batch can be lost. The doorbell rings unless the partition
+-- holds an entry no driver took.
 CREATE FUNCTION append_v1(
   p_namespace text, p_kind smallint, p_owner text, p_run text, p_activity text,
   p_topic text, p_partition smallint, p_producer text, p_attempt bigint, p_sequence bigint,
@@ -187,6 +203,11 @@ BEGIN
     close := v_topic.close;
     RETURN;
   END IF;
+  IF p_archive_lease_ms IS NOT NULL AND v_topic.last_position IS NULL THEN
+    INSERT INTO floors
+    VALUES (v_topic.topic_id, 'archive', 0, now() + p_archive_lease_ms * interval '1 millisecond')
+    ON CONFLICT DO NOTHING;
+  END IF;
   -- Taken under the row lock, so the times grow with the positions.
   v_now := clock_timestamp();
   v_last := coalesce(v_topic.last_position, v_topic.base);
@@ -202,9 +223,21 @@ BEGIN
   UPDATE topics t SET
     last_position = v_last + v_count,
     written_at = v_now,
-    written = t.written OR (p_keeps_topics AND p_sequence = 1),
+    written = t.written OR p_keeps_topics,
+    archive_pending = t.archive_pending OR p_archive_lease_ms IS NOT NULL,
     trim_at = coalesce(t.trim_at, v_now + p_retention_ms * interval '1 millisecond')
   WHERE t.topic_id = v_topic.topic_id;
+  IF p_log THEN
+    -- A partition with entries no driver took yet rings no more, so rings stay rare under load.
+    -- An entry a driver took doesn't count, since the driver may have finished its drain.
+    IF NOT EXISTS (SELECT 1 FROM notifications n
+                    WHERE n.partition = v_topic.partition AND n.taken_by IS NULL) THEN
+      PERFORM pg_notify(current_schema() || '_bell_' || (v_topic.partition % p_doorbells),
+                        v_topic.partition::text);
+    END IF;
+    INSERT INTO notifications (partition, topic_id, position)
+    VALUES (v_topic.partition, v_topic.topic_id, v_last + v_count);
+  END IF;
   IF p_notify_reads THEN
     PERFORM pg_notify(current_schema() || '_read_' || (v_topic.topic_id % 64),
                       v_topic.topic_id::text);
@@ -229,10 +262,11 @@ BEGIN
   END LOOP;
 END $$;
 
--- Answers the close the topic keeps, which is the first one. `p_archive` takes effect from a
--- later migration.
-CREATE FUNCTION close_topic_v1(p_namespace text, p_kind smallint, p_owner text, p_run text,
-  p_activity text, p_topic text, p_partition smallint, p_close bytea, p_archive boolean)
+-- Answers the close the topic keeps, which is the first one. A close with `p_archive` puts the
+-- topic on the archive's work list first, since a closed topic gets nothing new.
+CREATE FUNCTION close_topic_v1(p_namespace text, p_kind smallint, p_owner text,
+  p_run text, p_activity text, p_topic text, p_partition smallint, p_close bytea,
+  p_archive boolean)
 RETURNS bytea
 LANGUAGE plpgsql SET search_path FROM CURRENT AS $$
 DECLARE
@@ -244,7 +278,8 @@ BEGIN
     FROM live_chain_v1(p_namespace, p_kind, p_owner, p_run, p_activity) l;
   LOOP
     v_topic := topic_id_v1(v_chain, p_topic, p_partition);
-    UPDATE topics t SET closed = true, close = coalesce(t.close, p_close)
+    UPDATE topics t SET closed = true, close = coalesce(t.close, p_close),
+           archive_pending = t.archive_pending OR p_archive
      WHERE t.topic_id = v_topic
     RETURNING t.close INTO v_close;
     EXIT WHEN FOUND;
@@ -252,9 +287,9 @@ BEGIN
   RETURN v_close;
 END $$;
 
-CREATE FUNCTION hold_floor_v1(p_namespace text, p_kind smallint, p_owner text, p_run text,
-  p_activity text, p_topic text, p_partition smallint, p_holder text, p_position bigint,
-  p_lease_ms bigint) RETURNS void
+CREATE FUNCTION hold_floor_v1(p_namespace text, p_kind smallint, p_owner text,
+  p_run text, p_activity text, p_topic text, p_partition smallint, p_holder text,
+  p_position bigint, p_lease_ms bigint) RETURNS void
 LANGUAGE plpgsql SET search_path FROM CURRENT AS $$
 DECLARE
   v_chain bigint;
@@ -268,6 +303,14 @@ BEGIN
     PERFORM 1 FROM topics t WHERE t.topic_id = v_topic FOR KEY SHARE;
     EXIT WHEN FOUND;
   END LOOP;
+  -- Every trim reads the holds, and each one pins records, so a topic takes at most 1,000 live
+  -- holders, as `MAX_FLOOR_HOLDERS` says. A holder already on the topic renews.
+  IF NOT EXISTS (SELECT 1 FROM floors f WHERE f.topic_id = v_topic AND f.holder = p_holder)
+     AND (SELECT count(*) FROM floors f WHERE f.topic_id = v_topic AND f.until > now()) >= 1000
+  THEN
+    RAISE EXCEPTION 'topic % already has 1000 floor holders, so a positions-only reader can not '
+                    'start on it', p_topic USING ERRCODE = 'P0001';
+  END IF;
   -- Position 0 holds the whole topic. The lowest position a holder held wins.
   INSERT INTO floors AS f
   VALUES (v_topic, p_holder, p_position, now() + p_lease_ms * interval '1 millisecond')
@@ -275,15 +318,25 @@ BEGIN
     SET position = least(f.position, excluded.position), until = excluded.until;
 END $$;
 
-CREATE FUNCTION release_floor_v1(p_namespace text, p_kind smallint, p_owner text, p_run text,
-  p_activity text, p_topic text, p_holder text, p_grace_ms bigint) RETURNS void
+-- The archive releases once it holds a closed topic to its end, so the topic also leaves the
+-- archive's work list. The topic is due when the released hold ends.
+CREATE FUNCTION release_floor_v1(p_namespace text, p_kind smallint, p_owner text,
+  p_run text, p_activity text, p_topic text, p_holder text, p_grace_ms bigint) RETURNS void
 LANGUAGE plpgsql SET search_path FROM CURRENT AS $$
+DECLARE
+  v_until timestamptz := now() + p_grace_ms * interval '1 millisecond';
 BEGIN
-  UPDATE floors f SET until = least(f.until, now() + p_grace_ms * interval '1 millisecond')
+  UPDATE floors f SET until = least(f.until, v_until)
     FROM chains c JOIN topics t ON t.chain_id = c.chain_id AND t.topic = p_topic
    WHERE (c.namespace, c.owner_kind, c.owner_id, c.first_run_id, c.activity_id)
        = (p_namespace, p_kind, p_owner, p_run, p_activity)
      AND f.topic_id = t.topic_id AND f.holder = p_holder;
+  UPDATE topics t SET trim_at = least(t.trim_at, v_until),
+         archive_pending = t.archive_pending AND p_holder <> 'archive'
+    FROM chains c
+   WHERE (c.namespace, c.owner_kind, c.owner_id, c.first_run_id, c.activity_id)
+       = (p_namespace, p_kind, p_owner, p_run, p_activity)
+     AND t.chain_id = c.chain_id AND t.topic = p_topic;
 END $$;
 
 -- Deletes an owner's chains. Kind 1 (Workflow) also takes its Workflow Activities, kind 3.
@@ -340,6 +393,8 @@ BEGIN
 END $$;
 
 -- One janitor step on one topic. `done` is false when a batch limit or a busy row cut it short.
+-- A topic whose hold keeps its oldest record is due again when a hold ends, not at once, so held
+-- topics don't take every janitor pass.
 CREATE FUNCTION trim_topic_v1(p_topic bigint, p_retention_ms bigint, p_grace_ms bigint,
   p_batch int, OUT deleted bigint, OUT done boolean)
 LANGUAGE plpgsql SET search_path FROM CURRENT AS $$
@@ -354,6 +409,7 @@ DECLARE
   v_floor_until timestamptz;
   v_limit bigint;
   v_oldest timestamptz;
+  v_held boolean;
 BEGIN
   deleted := 0;
   SELECT * INTO t FROM topics WHERE topic_id = p_topic FOR UPDATE SKIP LOCKED;
@@ -365,7 +421,8 @@ BEGIN
   SELECT r.position INTO v_keep FROM records r
    WHERE r.topic_id = p_topic AND r.written_at >= v_expired ORDER BY r.position LIMIT 1;
   v_cut := coalesce(v_keep - 1, t.last_position);
-  IF v_floor IS NOT NULL THEN v_cut := least(v_cut, v_floor - 1); END IF;
+  v_held := v_floor IS NOT NULL AND v_floor - 1 < v_cut;
+  IF v_held THEN v_cut := v_floor - 1; END IF;
   SELECT r.position INTO v_limit FROM records r
    WHERE r.topic_id = p_topic AND r.position <= v_cut
    ORDER BY r.position OFFSET p_batch - 1 LIMIT 1;
@@ -397,6 +454,8 @@ BEGIN
     trim_at = CASE
       WHEN NOT done THEN now()
       WHEN v_oldest IS NOT NULL AND v_floor IS NULL THEN v_oldest + v_retention
+      -- The hold keeps the oldest record, so nothing moves before a hold ends.
+      WHEN v_oldest IS NOT NULL AND v_held THEN v_floor_until
       WHEN v_oldest IS NOT NULL THEN least(v_oldest + v_retention, v_floor_until)
       WHEN v_floor IS NOT NULL THEN v_floor_until
       ELSE coalesce(t.written_at, now()) + v_retention + v_grace END
@@ -424,4 +483,66 @@ BEGIN
     END IF;
   END LOOP;
   RETURN deleted;
+END $$;
+
+-- Keeps the newest `p_keep` entries of each partition, so a log with no driver stays bounded.
+CREATE FUNCTION cap_log_v1(p_keep int) RETURNS bigint
+LANGUAGE plpgsql SET search_path FROM CURRENT AS $$
+DECLARE
+  v_partition int;
+  v_oldest bigint;
+  v_rows bigint;
+  deleted bigint := 0;
+BEGIN
+  FOR v_partition IN 0..63 LOOP
+    SELECT n.id INTO v_oldest FROM notifications n WHERE n.partition = v_partition
+     ORDER BY n.id DESC OFFSET p_keep LIMIT 1;
+    IF FOUND THEN
+      -- An entry a driver took and still works on stays, or a quiet stream that shares the
+      -- partition with a busy one loses its only entry. One taken longer than a driver's
+      -- default `claim_idle` counts as left behind.
+      DELETE FROM notifications n WHERE n.partition = v_partition AND n.id <= v_oldest
+         AND (n.taken_by IS NULL OR n.taken_at < now() - interval '1 minute');
+      GET DIAGNOSTICS v_rows = ROW_COUNT;
+      deleted := deleted + v_rows;
+    END IF;
+  END LOOP;
+  RETURN deleted;
+END $$;
+
+-- The archive's hold is a `floors` row with the holder `archive`, and `archive_pending` is the
+-- archive's work list. Moves the hold to `p_position`, renews its lease and keeps the position as
+-- the topic's `archived`. The hold and `archived` move forward only. A topic with no row stays
+-- without one. The advance also makes the topic due at once, since the hold no longer keeps what
+-- it archived.
+CREATE FUNCTION advance_archive_v1(p_namespace text, p_kind smallint, p_owner text,
+  p_run text, p_activity text, p_topic text, p_position bigint, p_lease_ms bigint) RETURNS void
+LANGUAGE plpgsql SET search_path FROM CURRENT AS $$
+DECLARE
+  v_topic bigint;
+  v_archived bigint;
+  v_closed boolean;
+BEGIN
+  -- The key share lock keeps the janitor from deleting the topic under the insert.
+  SELECT t.topic_id, t.archived, t.closed INTO v_topic, v_archived, v_closed FROM chains c
+    JOIN topics t ON t.chain_id = c.chain_id AND t.topic = p_topic
+   WHERE (c.namespace, c.owner_kind, c.owner_id, c.first_run_id, c.activity_id)
+       = (p_namespace, p_kind, p_owner, p_run, p_activity)
+     FOR KEY SHARE OF t;
+  IF NOT FOUND THEN
+    RETURN;
+  END IF;
+  -- Two drivers can archive from the same start. The slower one's advance must not move the
+  -- hold back, nor hold a closed topic again after the archive released it.
+  IF p_position < v_archived OR (p_position = v_archived AND v_closed) THEN
+    RETURN;
+  END IF;
+  INSERT INTO floors AS f
+  VALUES (v_topic, 'archive', p_position, now() + p_lease_ms * interval '1 millisecond')
+  ON CONFLICT (topic_id, holder) DO UPDATE
+    SET position = excluded.position, until = excluded.until;
+  UPDATE topics t SET archived = p_position,
+         archive_pending = t.archive_pending AND t.last_position IS DISTINCT FROM p_position,
+         trim_at = least(t.trim_at, now())
+   WHERE t.topic_id = v_topic;
 END $$;

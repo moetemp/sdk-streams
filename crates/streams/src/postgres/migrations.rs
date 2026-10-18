@@ -19,38 +19,12 @@ pub(super) struct Migration {
     pub(super) compatible_from: i32,
 }
 
-pub(super) const MIGRATIONS: &[Migration] = &[
-    Migration {
-        version: 1,
-        name: "init",
-        sql: include_str!("migrations/0001_init.sql"),
-        compatible_from: 1,
-    },
-    Migration {
-        version: 2,
-        name: "notification_log",
-        sql: include_str!("migrations/0002_notification_log.sql"),
-        compatible_from: 1,
-    },
-    Migration {
-        version: 3,
-        name: "archive_hold",
-        sql: include_str!("migrations/0003_archive_hold.sql"),
-        compatible_from: 1,
-    },
-    Migration {
-        version: 4,
-        name: "review_fixes",
-        sql: include_str!("migrations/0004_review_fixes.sql"),
-        compatible_from: 1,
-    },
-    Migration {
-        version: 5,
-        name: "archive_trim",
-        sql: include_str!("migrations/0005_archive_trim.sql"),
-        compatible_from: 1,
-    },
-];
+pub(super) const MIGRATIONS: &[Migration] = &[Migration {
+    version: 1,
+    name: "init",
+    sql: include_str!("migrations/0001_init.sql"),
+    compatible_from: 1,
+}];
 
 /// The first key of every advisory lock the store takes.
 pub(super) const LOCK_SPACE: i32 = 1953653099;
