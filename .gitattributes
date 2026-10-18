@@ -1,9 +1,6 @@
 CHANGELOG.md merge=union
 # The Redis scripts are hashed byte for byte, so a CRLF checkout would change their SHA-1.
 crates/streams/lua/*.lua text eol=lf
-# The PostgreSQL store checks each applied migration by its SHA-256, so a CRLF checkout would
-# refuse a database that an LF checkout set up.
-crates/streams/src/postgres/migrations/*.sql text eol=lf
 # GitHub folds vendored protos and test vectors in diffs.
 crates/streams/protos/api_include/** linguist-generated=true
 **/testdata/** linguist-generated=true

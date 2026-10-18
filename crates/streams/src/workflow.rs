@@ -515,12 +515,13 @@ impl WorkflowOutput {
                 dropped_topics.push(topic.topic.clone());
             }
         }
-        let closes: Vec<_> = request
-            .resolved_owner_activities
-            .into_iter()
-            .filter_map(|resolved| ActivityStreamClose::of(&run.chain, &run.run_id, resolved))
-            .collect();
-        self.close_activity_streams(&request.worker_id, closes);
+        // Inline, since replay never sends a close again. A close that fails is logged and
+        // dropped, so it can't fail the Workflow Task, and the owner checks close those streams.
+        for resolved in request.resolved_owner_activities {
+            if let Some(close) = ActivityStreamClose::of(&run.chain, &run.run_id, resolved) {
+                close.run(self.store.as_ref()).await;
+            }
+        }
         Ok(PublishWorkflowTaskResponse { dropped_topics })
     }
 
@@ -627,24 +628,6 @@ impl WorkflowOutput {
                         debug!(%topic, attempt, %error, "Could not retire a stream output session");
                     }
                 }
-            }
-        });
-    }
-
-    /// Closes every topic each Workflow Activity in `closes` wrote, in the background. A close
-    /// that fails is logged and dropped, since it must not fail the Workflow Task. The owner
-    /// checks then close the streams with a generic failure. A rerun of a task that the server
-    /// refused resolves the Activity again and closes again, and the store answers that with the
-    /// first close.
-    fn close_activity_streams(&self, worker_id: &str, closes: Vec<ActivityStreamClose>) {
-        if closes.is_empty() {
-            return;
-        }
-        let store = self.store.clone();
-        // Replay never sends the close again, so a Worker shutdown waits for it.
-        self.spawn(worker_id, async move {
-            for close in closes {
-                close.run(store.as_ref()).await;
             }
         });
     }
