@@ -8,8 +8,7 @@
 //! [MemoryStore::with_capabilities] masks capabilities off, so Core's fallbacks run in tests.
 
 use crate::{
-    Capabilities, MAX_BATCH_BYTES, MAX_RECORD_BYTES, StreamError, StreamResult,
-    StreamStore,
+    Capabilities, MAX_BATCH_BYTES, MAX_RECORD_BYTES, StreamError, StreamResult, StreamStore,
     proto::{
         ChainId, DeleteOwnerRequest, DeleteOwnerResponse, StoreAppendRequest, StoreAppendResponse,
         StoreLatestRequest, StoreLatestResponse, StoreReadRequest, StoreReadResponse, StoredRecord,

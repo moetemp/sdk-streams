@@ -6,8 +6,7 @@ mod keys;
 mod scripts;
 
 use crate::{
-    Capabilities, MAX_BATCH_BYTES, MAX_RECORD_BYTES, StreamError, StreamResult,
-    StreamStore,
+    Capabilities, MAX_BATCH_BYTES, MAX_RECORD_BYTES, StreamError, StreamResult, StreamStore,
     proto::{
         ChainId, DeleteOwnerRequest, DeleteOwnerResponse, StoreAppendRequest, StoreAppendResponse,
         StoreLatestRequest, StoreLatestResponse, StoreReadRequest, StoreReadResponse, StoredRecord,
