@@ -6,8 +6,8 @@
 //! already observed, so it costs no round trip and every store reports a retry the same way.
 
 use crate::{
-    BEGINNING, END, StreamError, StreamResult, StreamStore, cursor_position, mint_cursor,
-    progress_counter,
+    BEGINNING, END, STREAM_RETRY_BITS, StreamError, StreamResult, StreamStore, cursor_position,
+    mint_cursor, progress_counter,
     proto::{
         ChainId, ReadRecord, ReadRequest, ReadResponse, StoreLatestRequest, StoreReadRequest,
         StoreReadResponse, StoredClose, StoredRecord, StreamRecord, StreamRecordKind, Supersession,
@@ -16,10 +16,6 @@ use crate::{
 };
 use prost::Message;
 use std::{collections::HashMap, time::Duration};
-
-/// The low bits of a Workflow producer's attempt, which count the reruns of one task. The high
-/// bits name the last task that completed before it.
-const WORKFLOW_RETRY_BITS: u32 = 16;
 
 /// Whether `record` withdraws what its producer's `previous` attempt wrote. `started` is the
 /// WorkflowTaskStarted event id that `previous` carried.
@@ -33,8 +29,8 @@ fn supersedes(previous: i64, started: i64, record: &StreamRecord) -> bool {
     if !record.producer_id.starts_with('@') {
         return true;
     }
-    let prefix = previous >> WORKFLOW_RETRY_BITS;
-    if prefix == record.attempt >> WORKFLOW_RETRY_BITS {
+    let prefix = previous >> STREAM_RETRY_BITS;
+    if prefix == record.attempt >> STREAM_RETRY_BITS {
         return true;
     }
     let completed = &record.completed_tasks;
@@ -102,9 +98,7 @@ pub(crate) struct ReadState {
     /// found one. The owner start grace counts from it.
     #[prost(uint64, tag = "11")]
     pub(crate) owner_missing_since_ms: u64,
-    /// Set once the read reached the first `CLOSE` record, so it ends there.
-    #[prost(bool, tag = "12")]
-    closed: bool,
+    // Don't reuse tag 12. A saved read state can still carry it.
 }
 
 /// What a read knows of one producer.
@@ -452,6 +446,8 @@ pub(crate) async fn read_bounded(
     let before = state.attempts();
     let mut records = Vec::with_capacity(page.records.len());
     let mut previous = start.clone();
+    // The position of `previous`, so an empty answer wakes after what the page moved past.
+    let mut moved_past = position.clone();
     let max_bytes = usize::try_from(request.max_bytes).unwrap_or(usize::MAX);
     let (mut bytes, mut kept) = (0usize, 0usize);
     for stored in page.records {
@@ -483,7 +479,6 @@ pub(crate) async fn read_bounded(
             Ok(StreamRecordKind::Close)
                 if record.topic.is_empty() || record.topic == target.topic =>
             {
-                state.closed = true;
                 closed = true;
                 // A chain close keeps no outcome.
                 if !record.topic.is_empty() {
@@ -497,6 +492,7 @@ pub(crate) async fn read_bounded(
             }
             Ok(StreamRecordKind::Close | StreamRecordKind::Topic) => {
                 previous = cursor;
+                moved_past = stored.position;
                 continue;
             }
             _ => {}
@@ -504,6 +500,7 @@ pub(crate) async fn read_bounded(
         let stale = match state.observe(&record) {
             Observed::Copy => {
                 previous = cursor;
+                moved_past = stored.position;
                 continue;
             }
             Observed::Known => false,
@@ -528,17 +525,21 @@ pub(crate) async fn read_bounded(
             stale,
         });
         previous = cursor;
+        moved_past = stored.position;
     }
-    state.fit_within(MAX_STATE_BYTES);
+    // A replay read fits once at its end, since its page edges differ from the live read's.
+    if until.is_none() {
+        state.fit_within(MAX_STATE_BYTES);
+    }
     Ok(Page {
         response: ReadResponse {
             cursor: previous,
             state: Vec::new(),
             done: false,
-            // An empty answer found nothing after `position`, so a notification counter above
+            // An empty answer found nothing after `moved_past`, so a notification counter above
             // that position's counter can only come from a newer record.
             wake_after: if records.is_empty() {
-                progress_counter(&position).unwrap_or(0)
+                progress_counter(&moved_past).unwrap_or(0)
             } else {
                 0
             },
@@ -955,6 +956,19 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn an_empty_answer_past_a_copy_wakes_after_the_copy() {
+        let log = Log::default();
+        log.write_at("p", 1, 1, b"1");
+        let first = read(&log, BEGINNING, &[]).await.unwrap();
+        // `p` lost the answer to its batch and sent it again.
+        log.write_at("p", 1, 1, b"1");
+        let again = read(&log, &first.cursor, &first.state).await.unwrap();
+        assert!(again.records.is_empty());
+        assert_eq!(again.cursor, cursor("2"));
+        assert_eq!(Some(again.wake_after), progress_counter("2"));
+    }
+
+    #[tokio::test]
     async fn a_copy_is_dropped_and_the_cursor_moves_past_it() {
         let log = Log::default();
         log.write_at("p", 1, 1, b"1");
@@ -1040,8 +1054,6 @@ mod tests {
         assert_eq!(log.lookups.load(Ordering::Relaxed), lookups);
         let resumed = read(&log, &page.cursor, &[]).await.unwrap();
         assert!(resumed.records.is_empty());
-        let state = ReadState::decode_from(&resumed.state).unwrap();
-        assert!(state.closed);
     }
 
     #[tokio::test]
@@ -1233,6 +1245,22 @@ mod tests {
                 .map(|indexes| indexes.iter().map(|i| i.as_u64().unwrap()).collect())
                 .unwrap_or_default();
             assert_eq!(stale, expected_stale, "{label}");
+            let mut superseded = vec![];
+            for pair in page.records.windows(2) {
+                if let (
+                    Some(read_record::Record::Superseded(_)),
+                    Some(read_record::Record::Stored(next)),
+                ) = (&pair[0].record, &pair[1].record)
+                {
+                    let index = String::from_utf8(next.body.clone().unwrap().data);
+                    superseded.push(index.unwrap().parse::<u64>().unwrap());
+                }
+            }
+            let expected_superseded: Vec<u64> = case["superseded"]
+                .as_array()
+                .map(|indexes| indexes.iter().map(|i| i.as_u64().unwrap()).collect())
+                .unwrap_or_default();
+            assert_eq!(superseded, expected_superseded, "{label}");
         }
     }
 
@@ -1364,7 +1392,7 @@ mod tests {
     #[test]
     fn a_workflow_producer_withdraws_an_attempt_whose_task_never_completed() {
         let vectors = vectors();
-        assert_eq!(vectors["retry_bits"], WORKFLOW_RETRY_BITS);
+        assert_eq!(vectors["retry_bits"], STREAM_RETRY_BITS);
         let written = |written: &serde_json::Value| StreamRecord {
             task_started_event_id: written["task_started_event_id"].as_i64().unwrap(),
             completed_tasks: written["completed_tasks"]
@@ -1387,7 +1415,7 @@ mod tests {
         for case in vectors["attempts"].as_array().unwrap() {
             let attempt = case["attempt"].as_i64().unwrap();
             assert_eq!(
-                attempt >> WORKFLOW_RETRY_BITS,
+                attempt >> STREAM_RETRY_BITS,
                 case["prefix"].as_i64().unwrap()
             );
         }
