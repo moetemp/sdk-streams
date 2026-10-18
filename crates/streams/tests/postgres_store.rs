@@ -796,6 +796,25 @@ async fn two_archive_advances_out_of_order_keep_the_higher() {
 }
 
 #[tokio::test]
+async fn a_topic_closed_before_its_first_write_reads_as_an_archive_mark() {
+    let Some(url) = url() else { return };
+    let mut options = options(&url);
+    options.notification_log = true;
+    options.archive_lease = Some(Duration::from_secs(60));
+    let store = PostgresStore::connect(options).await.unwrap();
+    let chain = chain("closed-unwritten");
+    store.close_topic(&chain, "out").await.unwrap();
+    let marks = store
+        .notification_log()
+        .unwrap()
+        .archive_marks(100)
+        .await
+        .unwrap();
+    assert_eq!(marks.len(), 1);
+    assert_eq!(marks[0].topic, "out");
+}
+
+#[tokio::test]
 async fn an_archive_advance_lets_the_janitor_trim_what_it_archived() {
     let Some(url) = url() else { return };
     let mut options = options(&url);

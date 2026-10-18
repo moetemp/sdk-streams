@@ -310,8 +310,10 @@ impl Sql {
                    x.topic, x.written_ms, x.idle_ms FROM ( \
                    SELECT c.namespace, c.owner_kind, c.owner_id, c.first_run_id, c.activity_id, \
                      t.topic, CASE WHEN t.closed THEN 0 \
-                       ELSE (extract(epoch FROM t.written_at) * 1000)::bigint END AS written_ms, \
-                     (extract(epoch FROM now() - t.written_at) * 1000)::bigint AS idle_ms, \
+                       ELSE (extract(epoch FROM coalesce(t.written_at, now())) * 1000)::bigint END \
+                       AS written_ms, \
+                     (extract(epoch FROM now() - coalesce(t.written_at, now())) * 1000)::bigint \
+                       AS idle_ms, \
                      row_number() OVER (PARTITION BY t.partition \
                        ORDER BY t.closed DESC, t.written_at) AS n \
                    FROM {s}.topics t JOIN {s}.chains c ON c.chain_id = t.chain_id \
