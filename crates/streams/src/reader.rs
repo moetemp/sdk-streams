@@ -13,27 +13,66 @@ use crate::{
         StoreReadResponse, StoredClose, StoredRecord, StreamRecord, StreamRecordKind, Supersession,
         read_record,
     },
+    record::LOCAL_PRODUCER_PREFIX,
 };
 use prost::Message;
 use std::{collections::HashMap, time::Duration};
 
-/// Whether `record` withdraws what its producer's `previous` attempt wrote. `started` is the
-/// WorkflowTaskStarted event id that `previous` carried.
+/// The low bits of a Local Activity producer's attempt, which hold the call's own attempt. The
+/// high bits hold the attempt of the Workflow Task that scheduled the call.
+const LOCAL_ATTEMPT_BITS: u32 = 14;
+const LOCAL_CALL_ATTEMPT: i64 = (1 << LOCAL_ATTEMPT_BITS) - 1;
+
+/// A producer whose attempt follows the Workflow Tasks of its run.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum TaskProducer<'a> {
+    /// The run's own output, `@<run id>`.
+    Workflow(&'a str),
+    /// A Local Activity call of the run, `__temporal_local_<n>@<run id>`.
+    Local(&'a str),
+}
+
+impl<'a> TaskProducer<'a> {
+    fn of(producer_id: &'a str) -> Option<Self> {
+        if let Some(run) = producer_id.strip_prefix('@') {
+            return Some(Self::Workflow(run));
+        }
+        let (_, run) = producer_id
+            .strip_prefix(LOCAL_PRODUCER_PREFIX)?
+            .rsplit_once('@')?;
+        Some(Self::Local(run))
+    }
+
+    fn run(self) -> &'a str {
+        match self {
+            Self::Workflow(run) | Self::Local(run) => run,
+        }
+    }
+
+    /// The Workflow Task attempt that wrote `attempt`.
+    fn task(self, attempt: i64) -> i64 {
+        match self {
+            Self::Workflow(_) => attempt,
+            Self::Local(_) => attempt >> LOCAL_ATTEMPT_BITS,
+        }
+    }
+}
+
+/// Whether a record of its run's task attempt `task` shows that the earlier task attempt
+/// `previous` never completed. `started` is the WorkflowTaskStarted event id that `previous`'s
+/// records carried.
 ///
-/// Any producer's higher attempt is a retry, except a Workflow producer's (`@<run id>`). It moves
-/// to a higher attempt with each completed task, so a later task withdraws nothing by itself. A
-/// rerun of the same task withdraws. So does a later task whose list of completed tasks shows
+/// A rerun of the same task shows it. So does a later task whose list of completed tasks shows
 /// that another attempt completed `previous`'s task, which happens when the rerun wrote nothing
 /// to the topic. When the list doesn't reach back to that task, nothing is withdrawn.
-fn supersedes(previous: i64, started: i64, record: &StreamRecord) -> bool {
-    if !record.producer_id.starts_with('@') {
-        return true;
+fn task_failed(previous: i64, started: i64, task: i64, completed: &[i64]) -> bool {
+    if task <= previous {
+        return false;
     }
     let prefix = previous >> STREAM_RETRY_BITS;
-    if prefix == record.attempt >> STREAM_RETRY_BITS {
+    if prefix == task >> STREAM_RETRY_BITS {
         return true;
     }
-    let completed = &record.completed_tasks;
     // The task completed after `prefix` is the one just before it in the newest-first list.
     started > 0
         && !completed.contains(&started)
@@ -41,6 +80,30 @@ fn supersedes(previous: i64, started: i64, record: &StreamRecord) -> bool {
             .iter()
             .position(|&id| id == prefix)
             .is_some_and(|at| at > 0)
+}
+
+/// Whether `record` withdraws what its producer's `previous` attempt wrote. `started` is the
+/// WorkflowTaskStarted event id that `previous` carried.
+///
+/// Any producer's higher attempt is a retry, except a Workflow producer's (`@<run id>`) and a
+/// Local Activity producer's (`__temporal_local_<n>@<run id>`). They move to a higher attempt
+/// with each completed task, so a later task withdraws nothing by itself, as [task_failed] says.
+/// A Local Activity's own retry in the same task attempt withdraws too.
+fn supersedes(previous: i64, started: i64, record: &StreamRecord) -> bool {
+    match TaskProducer::of(&record.producer_id) {
+        None => true,
+        Some(TaskProducer::Workflow(_)) => {
+            task_failed(previous, started, record.attempt, &record.completed_tasks)
+        }
+        Some(call) => {
+            // The read withdrew this attempt already, and no record has it.
+            if previous & LOCAL_CALL_ATTEMPT == 0 {
+                return false;
+            }
+            let (previous, task) = (call.task(previous), call.task(record.attempt));
+            previous == task || task_failed(previous, started, task, &record.completed_tasks)
+        }
+    }
 }
 
 /// How many producers a read remembers the newest attempt of.
@@ -111,8 +174,8 @@ struct Tracked {
     /// seen one is forgotten first.
     #[prost(uint64, tag = "2")]
     seen: u64,
-    /// The WorkflowTaskStarted event id the newest attempt's records carried, for a Workflow
-    /// producer.
+    /// The WorkflowTaskStarted event id the newest attempt's records carried, for a Workflow or
+    /// Local Activity producer.
     #[prost(int64, tag = "3")]
     started: i64,
     /// The highest sequence of the newest attempt this read delivered. A record of that attempt
@@ -232,7 +295,9 @@ impl ReadState {
             ..self.clone()
         };
         for record in kept {
-            state.observe(record);
+            if matches!(state.observe(record), Observed::Known | Observed::Newer(_)) {
+                state.withdraw_failed_calls(record);
+            }
         }
         state
     }
@@ -296,6 +361,55 @@ impl ReadState {
             attempt: record.attempt,
         }))
     }
+
+    /// Withdraws the Local Activity calls of `record`'s run whose task attempt `record` shows
+    /// never completed, with one `SUPERSEDED` each.
+    ///
+    /// A retried task need not run a call again, so the call's own next attempt can't be the one
+    /// that withdraws it. The withdrawn call moves to the attempt below every call of `record`'s
+    /// task attempt. So its late records read as stale, and a rerun of it in that task withdraws
+    /// nothing more.
+    fn withdraw_failed_calls(&mut self, record: &StreamRecord) -> Vec<Supersession> {
+        // Only the first record of a batch lists the completed tasks, and one check per batch is
+        // enough.
+        if record.completed_tasks.is_empty() {
+            return Vec::new();
+        }
+        let Some(writer) = TaskProducer::of(&record.producer_id) else {
+            return Vec::new();
+        };
+        let task = writer.task(record.attempt);
+        let mut withdrawn = Vec::new();
+        for (producer_id, tracked) in &mut self.producers {
+            let Some(call @ TaskProducer::Local(run)) = TaskProducer::of(producer_id) else {
+                continue;
+            };
+            if *producer_id == record.producer_id
+                || run != writer.run()
+                || tracked.attempt & LOCAL_CALL_ATTEMPT == 0
+                || !task_failed(
+                    call.task(tracked.attempt),
+                    tracked.started,
+                    task,
+                    &record.completed_tasks,
+                )
+            {
+                continue;
+            }
+            let attempt = task << LOCAL_ATTEMPT_BITS;
+            withdrawn.push(Supersession {
+                topic: record.topic.clone(),
+                producer_id: producer_id.clone(),
+                previous_attempt: tracked.attempt,
+                attempt,
+            });
+            tracked.attempt = attempt;
+            tracked.sequence = 0;
+        }
+        // Every store and every reader must report them in the same order.
+        withdrawn.sort_by(|a, b| a.producer_id.cmp(&b.producer_id));
+        withdrawn
+    }
 }
 
 /// Reads one page of a stream from `store`, as the `Read` call of `StreamService` answers it.
@@ -303,13 +417,14 @@ impl ReadState {
 /// The read turns stored records into what lang delivers. A producer's newer attempt gets a
 /// `SUPERSEDED` record before it, at the cursor of the record delivered before it, so a read that
 /// resumes there reports the supersession again. A Workflow producer's attempt for a later task
-/// gets one only when the earlier attempt's task never completed. A record from an attempt below
-/// the newest the read delivered is still delivered, marked `stale`. The attempts seen ride in
-/// `state`, so this holds across calls. A read that starts from a cursor without state looks up
-/// the record at the cursor first, since that record was delivered before. Only that record's
-/// producer is known then, and another producer's earlier attempts are not. A read remembers at
-/// most [MAX_TRACKED_PRODUCERS] producers in at most [MAX_STATE_BYTES], and the next attempt of one
-/// it forgot reads without `SUPERSEDED`.
+/// gets one only when the earlier attempt's task never completed. A Local Activity call whose task
+/// attempt never completed gets one before the next record of its run that shows it. A record from
+/// an attempt below the newest the read delivered is still delivered, marked `stale`. The attempts
+/// seen ride in `state`, so this holds across calls. A read that starts from a cursor without state
+/// looks up the record at the cursor first, since that record was delivered before. Only that
+/// record's producer is known then, and another producer's earlier attempts are not. A read
+/// remembers at most [MAX_TRACKED_PRODUCERS] producers in at most [MAX_STATE_BYTES], and the next
+/// attempt of one it forgot reads without `SUPERSEDED`.
 ///
 /// A record of a producer's newest attempt at or below the highest sequence the read delivered of
 /// it is a copy, and the read drops it, on every store. A record with no sequence is never a
@@ -450,6 +565,7 @@ pub(crate) async fn read_bounded(
     let mut moved_past = position.clone();
     let max_bytes = usize::try_from(request.max_bytes).unwrap_or(usize::MAX);
     let (mut bytes, mut kept) = (0usize, 0usize);
+    let mut withdrawn = Vec::new();
     for stored in page.records {
         if until.is_some_and(|until| previous == until) {
             break;
@@ -503,15 +619,13 @@ pub(crate) async fn read_bounded(
                 moved_past = stored.position;
                 continue;
             }
-            Observed::Known => false,
+            Observed::Known => {
+                withdrawn.extend(state.withdraw_failed_calls(&record));
+                false
+            }
             Observed::Newer(superseded) => {
-                if let Some(superseded) = superseded {
-                    records.push(ReadRecord {
-                        cursor: previous.clone(),
-                        record: Some(read_record::Record::Superseded(superseded)),
-                        stale: false,
-                    });
-                }
+                withdrawn.extend(superseded);
+                withdrawn.extend(state.withdraw_failed_calls(&record));
                 false
             }
             Observed::Behind { newest } => {
@@ -519,6 +633,13 @@ pub(crate) async fn read_bounded(
                 true
             }
         };
+        for superseded in withdrawn.drain(..) {
+            records.push(ReadRecord {
+                cursor: previous.clone(),
+                record: Some(read_record::Record::Superseded(superseded)),
+                stale: false,
+            });
+        }
         records.push(ReadRecord {
             cursor: cursor.clone(),
             record: Some(read_record::Record::Stored(record)),
@@ -1192,6 +1313,8 @@ mod tests {
                         data: index.to_string().into_bytes(),
                         ..Default::default()
                     }),
+                    task_started_event_id: record["task_started_event_id"].as_i64().unwrap_or(0),
+                    completed_tasks: completed_tasks(&record["completed_tasks"]),
                     ..Default::default()
                 };
                 log.push(stored.encode_to_vec());
@@ -1389,16 +1512,19 @@ mod tests {
         serde_json::from_str(include_str!("../testdata/workflow_attempts.json")).unwrap()
     }
 
+    fn completed_tasks(ids: &serde_json::Value) -> Vec<i64> {
+        ids.as_array()
+            .map(|ids| ids.iter().map(|id| id.as_i64().unwrap()).collect())
+            .unwrap_or_default()
+    }
+
     #[test]
     fn a_workflow_producer_withdraws_an_attempt_whose_task_never_completed() {
         let vectors = vectors();
         assert_eq!(vectors["retry_bits"], STREAM_RETRY_BITS);
         let written = |written: &serde_json::Value| StreamRecord {
             task_started_event_id: written["task_started_event_id"].as_i64().unwrap(),
-            completed_tasks: written["completed_tasks"]
-                .as_array()
-                .map(|ids| ids.iter().map(|id| id.as_i64().unwrap()).collect())
-                .unwrap_or_default(),
+            completed_tasks: completed_tasks(&written["completed_tasks"]),
             ..data_record("@run", written["attempt"].as_i64().unwrap(), b"")
         };
         for case in vectors["supersession"].as_array().unwrap() {
@@ -1431,6 +1557,117 @@ mod tests {
         }
         let error = ReadState::decode_from(&state.encode_to_vec()).unwrap_err();
         assert_eq!(error.kind, StreamFailureKind::Cursor);
+    }
+
+    #[test]
+    fn a_local_activity_call_is_withdrawn_when_its_task_never_completed() {
+        let vectors = vectors();
+        assert_eq!(vectors["local_attempt_bits"], LOCAL_ATTEMPT_BITS);
+        for case in vectors["local_attempts"].as_array().unwrap() {
+            let (task, call) = (
+                case["task_attempt"].as_i64().unwrap(),
+                case["attempt"].as_i64(),
+            );
+            let attempt = case["local_attempt"].as_i64().unwrap();
+            assert_eq!(attempt >> LOCAL_ATTEMPT_BITS, task);
+            assert_eq!(
+                attempt & LOCAL_CALL_ATTEMPT,
+                call.unwrap().min(LOCAL_CALL_ATTEMPT)
+            );
+        }
+        let written = |written: &serde_json::Value| StreamRecord {
+            task_started_event_id: written["task_started_event_id"].as_i64().unwrap(),
+            completed_tasks: completed_tasks(&written["completed_tasks"]),
+            ..data_record(
+                written["producer"].as_str().unwrap(),
+                written["attempt"].as_i64().unwrap(),
+                b"",
+            )
+        };
+        for case in vectors["local_supersession"].as_array().unwrap() {
+            let (previous, next) = (written(&case["previous"]), written(&case["next"]));
+            let mut state = ReadState::default();
+            state.observe(&previous);
+            let mut withdrawn = match state.observe(&next) {
+                Observed::Newer(superseded) => superseded.into_iter().collect(),
+                _ => Vec::new(),
+            };
+            withdrawn.extend(state.withdraw_failed_calls(&next));
+            let expected = Supersession {
+                topic: "out".to_string(),
+                producer_id: previous.producer_id.clone(),
+                previous_attempt: previous.attempt,
+                attempt: withdrawn.first().map_or(0, |superseded| superseded.attempt),
+            };
+            let superseded = case["superseded"].as_bool().unwrap();
+            assert_eq!(
+                withdrawn,
+                if superseded { vec![expected] } else { vec![] },
+                "{}",
+                case["label"]
+            );
+        }
+    }
+
+    #[test]
+    fn a_state_at_a_cut_keeps_the_calls_its_records_withdrew() {
+        let call = |producer: &str, attempt: i64, started: i64| StreamRecord {
+            task_started_event_id: started,
+            completed_tasks: vec![3, 0],
+            ..data_record(producer, attempt, b"")
+        };
+        let (failed, rerun) = ((3 << 16) | 1, (3 << 16) | 2);
+        let kept = [
+            call("__temporal_local_1@run", (failed << 14) | 1, 5),
+            call("@run", rerun, 8),
+        ];
+        let state = ReadState::default();
+        let mut cut = state.at_cut(&state.attempts(), kept.iter());
+        // The withdrawal went out before the cut, so the call's rerun reports none.
+        assert_eq!(
+            cut.observe(&call("__temporal_local_1@run", (rerun << 14) | 1, 8)),
+            Observed::Newer(None)
+        );
+    }
+
+    #[test]
+    fn a_withdrawn_call_moves_below_every_call_of_the_task_that_withdrew_it() {
+        let call = |producer: &str, attempt: i64, started: i64, completed: Vec<i64>| StreamRecord {
+            task_started_event_id: started,
+            completed_tasks: completed,
+            ..data_record(producer, attempt, b"")
+        };
+        let (failed, rerun) = ((3 << 16) | 1, (3 << 16) | 2);
+        let mut state = ReadState::default();
+        for number in [1, 2] {
+            let producer = format!("__temporal_local_{number}@run");
+            state.observe(&call(&producer, (failed << 14) | 1, 5, vec![3, 0]));
+        }
+        let withdrawn = state.withdraw_failed_calls(&call("@run", rerun, 8, vec![3, 0]));
+        assert_eq!(
+            withdrawn
+                .iter()
+                .map(|superseded| (superseded.producer_id.as_str(), superseded.attempt))
+                .collect::<Vec<_>>(),
+            [
+                ("__temporal_local_1@run", rerun << 14),
+                ("__temporal_local_2@run", rerun << 14)
+            ]
+        );
+        // Withdrawn once, so a later task of the run withdraws nothing more.
+        let later = call("@run", (9 << 16) | 1, 11, vec![9, 3, 0]);
+        assert_eq!(state.withdraw_failed_calls(&later), []);
+        // A later batch of an attempt lists no completed tasks, so it checks nothing.
+        state.observe(&call(
+            "__temporal_local_3@run",
+            (rerun << 14) | 1,
+            8,
+            vec![3, 0],
+        ));
+        assert_eq!(
+            state.withdraw_failed_calls(&call("@run", (9 << 16) | 1, 11, vec![])),
+            []
+        );
     }
 
     #[test]

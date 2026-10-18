@@ -47,6 +47,7 @@ async fn link(store: Arc<dyn StreamStore>, agent: &str, sequence: i64, link: Str
             producer: Some(Producer::Named(NamedProducer {
                 producer_id: "agent".to_string(),
                 attempt: 1,
+                ..Default::default()
             })),
             sequence,
             digest: vec![sequence as u8; 32],
