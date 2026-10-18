@@ -54,10 +54,6 @@ service StreamService {
   // unsupported when the config turns no notifier client on.
   rpc DescribeStreamNotifier(temporal.api.workflowservice.v1.DescribeStreamNotifierRequest)
       returns (temporal.api.workflowservice.v1.DescribeStreamNotifierResponse);
-  // Runs a stream driver over the store's notification log until the caller cancels the call.
-  // It answers only when the server takes no stream notifications, or when the store keeps no
-  // log. Each driver of one store needs its own consumer name.
-  rpc RunStreamDriver(RunStreamDriverRequest) returns (RunStreamDriverResponse);
   // Reads again the exact range an earlier read answered, for a positions-only Workflow reader on
   // replay, and checks it against that read's digest. Waits for nothing and checks no owner.
   rpc ReadRange(ReadRangeRequest) returns (ReadResponse);
@@ -91,7 +87,6 @@ message StreamStoreConfig {
   oneof store {
     RedisStoreConfig redis = 1;
     MemoryStoreConfig memory = 2;
-    PostgresStoreConfig postgres = 9;
   }
   // Tells each stream's notifier on the server when the stream moves, after every append. That's
   // what wakes a reader that waits on the notifier. Off by default, since most streams have no
@@ -108,33 +103,6 @@ message StreamStoreConfig {
   // owner does. After it the read fails as NOT_FOUND. Unset waits 60 seconds, and zero fails at
   // once.
   google.protobuf.Duration owner_start_grace = 6;
-  // Each append writes a notification entry in the same store step, and producers send no
-  // notifications. A `StreamDriver` reads the entries and notifies the server, so readers wake
-  // only while one runs. Off by default. A store without a notification log refuses it.
-  bool notification_log = 7;
-  // Keeps streams in object storage after the store drops them, so they stay readable for longer
-  // than the store's retention. Reads cross from the archive to the store with no gap, with the
-  // same cursors. A `StreamDriver` writes the archive, so it needs `notification_log`.
-  ArchiveConfig archive = 8;
-}
-
-// Where and how a stream archive keeps streams.
-message ArchiveConfig {
-  // `s3://<bucket>/<prefix>` or `file:///<directory>`. S3 credentials, the region and the
-  // endpoint come from the environment, as `AWS_ACCESS_KEY_ID`, `AWS_REGION` and
-  // `AWS_ENDPOINT_URL`. The archive deletes nothing but an owner's delete, so a bucket lifecycle
-  // rule sets how long it keeps streams.
-  string url = 1;
-  // A segment ends at the first record that takes it to this many bytes or more. Zero uses
-  // 4 MiB.
-  uint64 segment_bytes = 2;
-  // How long a stream goes without a write before the driver archives its tail. A stream that
-  // keeps taking writes has its tail archived this often too. Unset uses five minutes.
-  google.protobuf.Duration segment_idle = 3;
-  // How long the store holds records that the archive doesn't hold yet, after the archive last
-  // moved. When the driver stops for longer, the store's retention goes on and readers find the
-  // gap as expired. Unset uses seven days.
-  google.protobuf.Duration stall_limit = 4;
 }
 
 // Streams in a Redis or Redis Cluster that the service connects to itself.
@@ -158,47 +126,9 @@ message RedisStoreConfig {
   google.protobuf.Duration floor_lease = 7;
   // How long a hold lasts after its reader released it. Unset keeps one day.
   google.protobuf.Duration floor_release_grace = 8;
-  // With `StreamStoreConfig.notification_log`, how many doorbell streams the log rings, each one
-  // a driver blocks on. Zero uses 16.
-  uint32 notify_doorbells = 9;
   // Runs with no Lua, so the store keeps no producer state and no last position, and the service
   // takes their fallbacks. For tests of the fallbacks on a real store.
   bool plain = 10;
-}
-
-// Streams in a PostgreSQL database that the service connects to itself, PostgreSQL 14 or later.
-message PostgresStoreConfig {
-  // A `postgres://` or `postgresql://` URL. Credentials come from the URL. TLS follows the URL's
-  // `sslmode` and `sslrootcert` as libpq reads them.
-  string url = 1;
-  // The schema that holds the tables. Empty uses `temporal_streams`.
-  string schema = 2;
-  // How long a stream keeps a record. Unset keeps seven days.
-  google.protobuf.Duration retention = 3;
-  // How many connections the pool keeps. Zero uses 16.
-  uint32 max_connections = 4;
-  // How long a call waits, as the session's `statement_timeout`. Unset uses five seconds.
-  google.protobuf.Duration response_timeout = 5;
-  // How long a positions-only reader holds a stream's records after its last read. Unset uses
-  // `retention`.
-  google.protobuf.Duration floor_lease = 6;
-  // How long a hold lasts after its reader released it. Unset keeps one day.
-  google.protobuf.Duration floor_release_grace = 7;
-  // With `StreamStoreConfig.notification_log`, how many doorbells the log rings, from 1 to 64.
-  // Zero uses 16.
-  uint32 notify_doorbells = 8;
-  // A URL for the connection that listens and the one that applies migrations, when `url` goes
-  // through a pooler in transaction mode. Empty uses `url`.
-  string listen_url = 9;
-  // How often a process looks for new records for its waiting reads. Unset uses 100 ms.
-  google.protobuf.Duration poll_interval = 10;
-  // Each append also sends NOTIFY, so waiting reads in other processes wake in milliseconds.
-  // Costs append throughput when many producers write at once.
-  bool notify_reads = 11;
-  // The store checks the schema version and never changes it. A DBA applies the migrations.
-  bool skip_migrations = 12;
-  // How often the janitor trims records past the retention. Unset uses one minute.
-  google.protobuf.Duration janitor_interval = 13;
 }
 
 // Streams in this process's memory, for tests and local development. Nothing survives the
@@ -673,21 +603,6 @@ message WaitForNotificationResponse {
   // The failure the stream closed with, when it closed with one.
   temporal.api.failure.v1.Failure close_failure = 6;
 }
-
-message RunStreamDriverRequest {
-  // The driver's name in the log's consumer group, unique among the store's drivers.
-  string consumer = 1;
-  // How often the driver looks at every slot that holds entries. Unset uses 30 seconds.
-  google.protobuf.Duration sweep_interval = 2;
-  // How long another driver's unacked entries wait before this one takes them. Unset uses 60
-  // seconds.
-  google.protobuf.Duration claim_idle = 3;
-  // The most entries one read takes, and so the most streams one notify call names. Zero uses
-  // 100.
-  uint32 batch = 4;
-}
-
-message RunStreamDriverResponse {}
 
 message DeleteOwnerRequest {
   string namespace = 1;
