@@ -486,6 +486,7 @@ async fn an_append_that_may_not_have_landed_is_sent_again() {
             "append",
             "append",
             "retire_producer",
+            "list_topics",
             "close_chain"
         ]
     );
@@ -611,7 +612,7 @@ async fn each_publish_around_a_local_activity_is_visible_before_the_task_complet
 }
 
 #[tokio::test]
-async fn replay_makes_no_store_call() {
+async fn a_lang_that_skips_the_publish_on_replay_writes_nothing() {
     let store = Arc::new(RecordingStore::default());
     let lang = lang_appending_to(timer_history(), vec![2.into()], &store, Default::default());
     let first = lang.poll().await;
@@ -626,8 +627,8 @@ async fn replay_makes_no_store_call() {
     lang.complete(&fired, vec![], vec![complete_workflow()])
         .await;
     lang.shutdown().await;
-    // The live task that completes the run closes its chain, and nothing else reaches the store.
-    assert_eq!(store.calls(), ["close_chain"]);
+    // Only the live task that completes the run reaches the store. It finds no topic to close.
+    assert_eq!(store.calls(), ["list_topics"]);
 }
 
 /// The owner's Worker closes the chain after a live completion that ends it, once the server shows
@@ -691,9 +692,14 @@ async fn the_owner_closes_a_chain_the_run_ended(
     );
     let lang = Lang::new(mock, store.clone(), Owner::closed_by(status, Some(3)));
     let activation = lang.poll().await;
-    lang.complete(&activation, vec![], vec![command]).await;
+    lang.complete(&activation, records(&["a"]), vec![command])
+        .await;
     lang.shutdown().await;
-    let expected: &[&str] = if closes { &["close_chain"] } else { &[] };
+    let expected: &[&str] = if closes {
+        &["append", "list_topics", "close_chain"]
+    } else {
+        &["append"]
+    };
     assert_eq!(store.calls(), expected);
 }
 
@@ -1567,7 +1573,7 @@ async fn an_accepted_terminal_completion_closes_the_chain() {
     );
     lang.complete_eviction(&eviction).await;
     lang.shutdown().await;
-    assert_eq!(store.calls(), ["append", "close_chain"]);
+    assert_eq!(store.calls(), ["append", "list_topics", "close_chain"]);
     assert_eq!(owner.asked.lock().len(), 1);
 }
 
