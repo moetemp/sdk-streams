@@ -35,8 +35,9 @@ pub const FLUSH_LIMIT: Duration = Duration::from_secs(10);
 pub const CLOSE_RETRY_FIRST: Duration = Duration::from_secs(1);
 /// The longest wait between two tries of a notifier close.
 pub const CLOSE_RETRY_CAP: Duration = Duration::from_secs(60);
-/// How long a failed notifier close is tried again in all. Past it the close is dropped, and
-/// readers learn of the end from their owner checks.
+/// How long a failed notifier close is tried again in all. Past it the close is dropped. The store
+/// closed the topic first, so a waiting reader finds the close at its next read, after a recheck
+/// or the client poll limit.
 pub const CLOSE_RETRY_LIMIT: Duration = Duration::from_secs(10 * 60);
 
 // A stream that goes quiet after a failed notification leaves its reader parked until the next
