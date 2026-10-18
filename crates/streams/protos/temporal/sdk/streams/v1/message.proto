@@ -31,13 +31,14 @@ message StreamRecord {
     // The producer's position within its attempt, starting at one, or zero
     // when it does not number its records.
     int64 sequence = 7;
-    // Set by a Workflow run's own producer only: the WorkflowTaskStarted
-    // event id of the task attempt that wrote the record.
+    // Set by a Workflow run's own producer and its Local Activity calls only:
+    // the WorkflowTaskStarted event id of the task attempt that wrote the
+    // record, or that scheduled the call.
     int64 task_started_event_id = 9;
-    // Set by a Workflow run's own producer, on the first record of each
-    // batch: the WorkflowTaskStarted event ids of the run's last completed
-    // tasks, newest first, at most eight. The first is the attempt's prefix.
-    // A trailing zero means the list goes back to the run's start. A reader
+    // Set by the same producers, on the first record of each batch: the
+    // WorkflowTaskStarted event ids of the run's last completed tasks, newest
+    // first, at most eight. The first is the task attempt's prefix. A
+    // trailing zero means the list goes back to the run's start. A reader
     // learns from it whether an earlier attempt it delivered completed.
     repeated int64 completed_tasks = 10;
 }

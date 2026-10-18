@@ -306,6 +306,7 @@ impl Both {
             producer: Some(Producer::Named(NamedProducer {
                 producer_id: "p".to_string(),
                 attempt: 1,
+                ..Default::default()
             })),
             sequence: 1,
             records: values.iter().map(json_record).collect(),
