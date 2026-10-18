@@ -347,6 +347,52 @@
       "superseded": true
     },
     {
+      "label": "a call rerun in a later task after its task completed as a heartbeat",
+      "previous": {
+        "producer": "__temporal_local_1@run",
+        "attempt": 3221241857,
+        "task_started_event_id": 5,
+        "completed_tasks": [
+          3,
+          0
+        ]
+      },
+      "next": {
+        "producer": "__temporal_local_1@run",
+        "attempt": 5368741889,
+        "task_started_event_id": 10,
+        "completed_tasks": [
+          5,
+          3,
+          0
+        ]
+      },
+      "superseded": true
+    },
+    {
+      "label": "a call retried after a backoff in a later task",
+      "previous": {
+        "producer": "__temporal_local_1@run",
+        "attempt": 3221241857,
+        "task_started_event_id": 5,
+        "completed_tasks": [
+          3,
+          0
+        ]
+      },
+      "next": {
+        "producer": "__temporal_local_1@run",
+        "attempt": 5368725506,
+        "task_started_event_id": 7,
+        "completed_tasks": [
+          5,
+          3,
+          0
+        ]
+      },
+      "superseded": true
+    },
+    {
       "label": "a call in a completed task, then the next task wrote",
       "previous": {
         "producer": "__temporal_local_1@run",
