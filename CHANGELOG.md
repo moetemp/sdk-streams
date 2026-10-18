@@ -28,8 +28,8 @@
   the stream wakes on a Workflow Task's attachments, with the shared vectors
   `testdata/wake_folds.json` and the codec notes in `docs/wakes.md`.
 - `PublishWorkflowTask` takes `resolved_owner_activities`, the owner Activities an activation
-  resolves. The service closes each one's streams after the records land, and `ShutdownWorker`
-  waits for the closes. `STREAM_OWNER_HEADER` names the header lang marks an owner with.
+  resolves. The service closes each one's streams after the records land, before the publish
+  answers. `STREAM_OWNER_HEADER` names the header lang marks an owner with.
 - Ported Jetty's Core tests onto Core's mock Worker with the test as lang: owner Activity closes,
   LINK records in the publish, and the stream wakes on a task's attachments.
 - The crate generates the stream API from its own copy in `protos/api_stream`, taken from
@@ -59,3 +59,6 @@
   counter wins, and an operation that resolved gets no progress. The shared vectors are in
   `testdata/nexus_progress_folds.json`.
 - Ported Bridge's Core progress tests onto Core's mock Worker with the test as lang.
+- Took the notification log, the stream driver, the archive tier and the PostgreSQL store out of
+  the main chain. Producers notify per append through `NotifyingStore`. The parts come back as an
+  optional layer.
