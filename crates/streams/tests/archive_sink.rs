@@ -5,7 +5,7 @@
 //! `STREAMS_POSTGRES_URL` for the PostgreSQL case, and `STREAMS_S3_URL` with the `AWS_*` variables
 //! for the S3 case.
 
-#[cfg(any(feature = "archive", feature = "redis"))]
+#[cfg(any(feature = "archive", feature = "redis", feature = "postgres"))]
 #[path = "support/server.rs"]
 mod server;
 
@@ -274,8 +274,7 @@ async fn the_driver_archives_a_redis_store_into_a_directory() {
 #[cfg(feature = "postgres")]
 #[tokio::test]
 async fn the_driver_archives_a_postgres_store_into_a_directory() {
-    let Ok(url) = std::env::var("STREAMS_POSTGRES_URL") else {
-        eprintln!("set STREAMS_POSTGRES_URL to run the PostgreSQL archive cases");
+    let Some(url) = server::server_url("STREAMS_POSTGRES_URL") else {
         return;
     };
     let schema = unique("archive_sink").replace('-', "_");

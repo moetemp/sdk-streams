@@ -95,13 +95,15 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: dtolnay/rust-toolchain@1.94.0
       - uses: arduino/setup-protoc@v3
         with:
           repo-token: ${{ secrets.GITHUB_TOKEN }}
       - uses: Swatinem/rust-cache@v2
       - run: crates/streams/scripts/postgres-test-server.sh | sed 's/^export //' >> "$GITHUB_ENV"
       - run: cargo test -p temporalio-streams --all-features -- --test-threads=8
+        env:
+          STREAMS_REQUIRE: postgres
 
   archive:
     name: S3 archive tests on MinIO

@@ -954,10 +954,7 @@ mod on_postgres {
         variable: &str,
         change: impl FnOnce(&mut PostgresStoreOptions),
     ) -> Option<Postgres> {
-        let Ok(url) = std::env::var(variable) else {
-            eprintln!("set {variable} to run the PostgreSQL store cases");
-            return None;
-        };
+        let url = crate::server::server_url(variable)?;
         let schema = schema();
         let mut options = options(&url, &schema);
         change(&mut options);
@@ -1019,10 +1016,7 @@ mod on_postgres {
     }
 
     async fn postgres_as_documented_role_with(variable: &str, log: bool) -> Option<Postgres> {
-        let Ok(url) = std::env::var(variable) else {
-            eprintln!("set {variable} to run the PostgreSQL store cases");
-            return None;
-        };
+        let url = crate::server::server_url(variable)?;
         let schema = schema();
         drop(
             PostgresStore::connect(options(&url, &schema))

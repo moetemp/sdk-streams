@@ -4,6 +4,9 @@
 
 #![cfg(feature = "postgres")]
 
+#[path = "support/server.rs"]
+mod server;
+
 use std::{
     sync::{
         Arc,
@@ -23,11 +26,7 @@ use tokio::time::Instant;
 static SCHEMAS: AtomicUsize = AtomicUsize::new(0);
 
 fn url() -> Option<String> {
-    let url = std::env::var("STREAMS_POSTGRES_URL").ok();
-    if url.is_none() {
-        eprintln!("set STREAMS_POSTGRES_URL to run the PostgreSQL store tests");
-    }
-    url
+    server::server_url("STREAMS_POSTGRES_URL")
 }
 
 fn options(url: &str) -> PostgresStoreOptions {
