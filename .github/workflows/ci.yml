@@ -78,3 +78,12 @@ jobs:
       - run: sudo apt-get update && sudo apt-get install -y redis-server
       - run: crates/streams/scripts/redis-test-servers.sh >> "$GITHUB_ENV"
       - run: cargo test -p temporalio-streams --all-features -- --test-threads=8
+
+  optional-restore:
+    name: The optional layers' restore commits copy 4aebbd4a
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - run: scripts/check-optional-restore.py

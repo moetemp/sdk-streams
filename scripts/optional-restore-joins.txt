@@ -1,0 +1,25 @@
+there is no notification log and no floor hold, so plain mode declares neither holds nor a
+change feed, and a config that asks for a log is refused.
+    NotificationEntry, NotificationLog, NotifierClient, NotifyError, StreamError,
+    StreamNotification, StreamResult, StreamStore, chain_owner, mint_cursor, progress_counter,
+    proto::ChainId, stream_hash,
+    time::Duration,
+pub use driver::{StreamDriver, StreamDriverOptions};
+    NotificationEntry, NotificationLog, StreamError, StreamResult, StreamStore,
+    WORKFLOW_ACTIVITY_OWNER_KIND, WORKFLOW_OWNER_KIND, chain_owner,
+        if options.plain && options.notification_log {
+                "the Redis store in plain mode runs no script, so it keeps no notification log",
+                false,
+        let mut script = match &self.log {
+            Some(_) => scripts::APPEND_LOGGED_SCRIPT.prepare_invoke(),
+            None => scripts::APPEND_SCRIPT.prepare_invoke(),
+        RunStreamDriverRequest, RunStreamDriverResponse, ShutdownWorkerRequest,
+                connect_redis(redis, config.notification_log).await?
+                let driver = crate::StreamDriver::new(
+    BEGINNING, CHAIN_LOG, Capabilities, END, MemoryStore, NotificationEntry, NotificationLog,
+    Notifier, NotifierClient, NotifyError, NotifyingStore, ReadTarget, StreamNotification,
+    StreamResult, StreamStore, append_batch, chain_owner, close_chain, close_topic, mint_cursor,
+    proto::*, read_page, stored_append_record, stream_hash,
+//! The stream driver over a Redis notification log, on a standalone server and on a cluster.
+//! Set `STREAMS_REDIS_URL` and `STREAMS_REDIS_CLUSTER_URL` to run these.
+#![cfg(feature = "redis")]
