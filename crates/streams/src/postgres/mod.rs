@@ -38,7 +38,8 @@ const DELETE_BATCH: i32 = 10_000;
 const PARTITIONS: u32 = 64;
 /// The oldest PostgreSQL the store runs on, as `server_version_num`.
 const OLDEST_SERVER: i32 = 140_000;
-/// How many entries each log partition keeps at most, as the Redis log's `MAXLEN ~ 10000`.
+/// How many untaken entries each of the 64 log partitions keeps at most. The Redis log caps each
+/// of its 16,384 slots at about as many, so the two caps differ.
 const LOG_CAP: i32 = 10_000;
 /// The longest schema name. A channel name, `<schema>_read_63`, takes at most 63 bytes.
 const MAX_SCHEMA: usize = 55;
