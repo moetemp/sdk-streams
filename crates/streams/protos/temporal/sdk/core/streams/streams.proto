@@ -96,7 +96,8 @@ message StreamStoreConfig {
   // what wakes a reader that waits on the notifier. Off by default, since most streams have no
   // such reader and each notification costs a call. It turns on progress only. Closes reach the
   // notifier either way. A server without the stream notifier costs one call, and then the
-  // process stops notifying.
+  // process stops notifying. An append answers only after its notification went, or after a few
+  // failed tries, so a producer that stops before then gets no answer and its retry notifies.
   bool notify_on_append = 3;
   // How many streams to keep a notifier for, dropping the least recently used. Zero uses 1000.
   uint32 max_notifiers = 4;
@@ -671,10 +672,7 @@ message DescribeStoreResponse {
 message StoreCapabilities {
   // The append checks the producer attempt's dedupe entry and the close flags in the same step.
   bool producer_state = 1;
-  // The append can fail unless the log's next position is the expected one.
-  bool conditional_tail = 2;
-  // The append can fail unless the stream's fence token is the expected one.
-  bool conditional_fence = 3;
+  reserved 2, 3;
   // The store knows a topic's newest position after retention dropped every record.
   bool kept_last = 4;
   // A holder can keep records from retention.

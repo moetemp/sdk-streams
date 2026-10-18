@@ -133,8 +133,9 @@ cluster with one replica per primary. `STREAMS_REDIS_CLUSTER_ADMIN=1` lets the d
 a slot and fail a primary over, so set it only for a cluster of the tests' own. The
 conformance suite runs on each, once more as a user with exactly the ACL above, and once in
 plain mode with the cases of the fallbacks. `tests/fallbacks.rs` adds faults on plain Redis
-too. The cross-implementation test also needs `STREAMS_BROOK_PY`, a Python SDK checkout whose
-provider predates the move.
+too. The cross-implementation test also needs `STREAMS_BROOK_PY`, a Python SDK checkout with its
+own Redis provider. When `STREAMS_REQUIRE` names `redis`, a Redis test with no URL set fails and
+does not skip.
 
 **Managed Redis.** [managed-redis.md](managed-redis.md) covers Amazon MemoryDB and ElastiCache,
 with the access string that those services take in place of `ACL SETUSER`.

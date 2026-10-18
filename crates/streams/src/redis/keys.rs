@@ -1,5 +1,5 @@
-//! The Redis key layout, shared with every SDK that wrote streams before the store moved into
-//! this crate.
+//! The Redis key layout, which every SDK must use the same so their streams stay readable by
+//! each other.
 //!
 //! Every key of one run chain shares a Redis Cluster hash tag, the chain itself, so one script
 //! can touch all of them:
@@ -290,7 +290,7 @@ mod tests {
 
     #[test]
     fn keys_match_the_python_sdk() {
-        // Streams written by an SDK before the store moved into this crate must stay readable.
+        // Streams another SDK wrote must stay readable.
         let cases: Vec<Value> =
             serde_json::from_str(include_str!("../../testdata/redis/keys.json")).unwrap();
         assert!(cases.len() >= 4);
