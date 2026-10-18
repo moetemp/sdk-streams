@@ -399,15 +399,14 @@ impl StreamStore for MemoryStore {
 
     async fn latest(&self, request: StoreLatestRequest) -> StreamResult<StoreLatestResponse> {
         let chains = self.chains.lock().unwrap();
-        let head = chains
+        // Positions outlive truncation, but a topic whose records retention dropped holds none.
+        let newest = chains
             .get(&chain_key(chain_of(request.chain.as_ref())?))
             .and_then(|chain| chain.topics.get(&request.topic))
-            .map_or(0, Topic::head);
+            .filter(|topic| !topic.records.is_empty())
+            .map(|topic| topic.head() - 1);
         Ok(StoreLatestResponse {
-            position: head
-                .checked_sub(1)
-                .map(|p| p.to_string())
-                .unwrap_or_default(),
+            position: newest.map(|p| p.to_string()).unwrap_or_default(),
         })
     }
 

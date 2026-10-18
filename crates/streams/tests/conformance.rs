@@ -854,6 +854,15 @@ mod cases {
         assert_eq!(latest(case, &case.chain(), OUT).await, "");
     }
 
+    pub(crate) async fn latest_is_empty_once_retention_dropped_every_record(case: &dyn Case) {
+        let chain = case.chain();
+        Producer::new(case, &chain, OUT, "p", 1)
+            .append(&["1", "2"])
+            .await;
+        case.expire_log(&chain, OUT).await;
+        assert_eq!(latest(case, &chain, OUT).await, "");
+    }
+
     pub(crate) async fn a_cursor_resumes_strictly_after_its_record(case: &dyn Case) {
         let chain = case.chain();
         let mut producer = Producer::new(case, &chain, OUT, "p", 1);
@@ -1969,6 +1978,7 @@ macro_rules! store_cases {
             an_empty_append_is_refused,
             an_append_without_a_digest_is_refused,
             latest_is_empty_on_an_empty_topic,
+            latest_is_empty_once_retention_dropped_every_record,
             a_cursor_resumes_strictly_after_its_record,
             latest_positions_a_reader_at_the_end,
             end_reads_only_what_arrives_after_the_read_starts,
