@@ -185,7 +185,10 @@ fn nexus_progress_folds_match_the_vectors() {
 #[test]
 fn nexus_progress_deliveries_match_the_vectors() {
     // Each lang hands progress to its operations itself, so each one must give these results.
-    use temporalio_streams::{NexusProgressOperations, fold_nexus_progress};
+    use temporalio_streams::{
+        NexusProgressOperations, fold_nexus_progress,
+        protos::temporal::api::nexus::v1::nexus_operation_progress::{Operation, OperationKey},
+    };
     let vectors: Value =
         serde_json::from_str(include_str!("../testdata/nexus_progress_folds.json")).unwrap();
     let cases = vectors["deliveries"].as_array().unwrap();
@@ -193,6 +196,7 @@ fn nexus_progress_deliveries_match_the_vectors() {
     for case in cases {
         let name = case["name"].as_str().unwrap();
         let mut operations = NexusProgressOperations::default();
+        let mut keys: std::collections::HashMap<u32, OperationKey> = Default::default();
         for (index, step) in case["steps"].as_array().unwrap().iter().enumerate() {
             let text = |value: &Value, field: &str| value[field].as_str().unwrap().to_string();
             let seq = |value: &Value| value["seq"].as_u64().unwrap() as u32;
@@ -203,8 +207,20 @@ fn nexus_progress_deliveries_match_the_vectors() {
                     &text(scheduled, "service"),
                     &text(scheduled, "operation"),
                 );
+                keys.insert(
+                    seq(scheduled),
+                    OperationKey {
+                        endpoint: text(scheduled, "endpoint"),
+                        service: text(scheduled, "service"),
+                        operation: text(scheduled, "operation"),
+                        operation_token: String::new(),
+                    },
+                );
             } else if let Some(started) = step.get("start") {
                 operations.start(seq(started), &text(started, "operation_token"));
+                if let Some(key) = keys.get_mut(&seq(started)) {
+                    key.operation_token = text(started, "operation_token");
+                }
             } else if let Some(resolved) = step.get("resolve") {
                 operations.resolve(seq(resolved));
             } else {
@@ -212,18 +228,34 @@ fn nexus_progress_deliveries_match_the_vectors() {
                 for progress in vector_progresses(&step["attachments"]) {
                     fold_nexus_progress(&mut folded, &progress);
                 }
-                let delivered: Vec<(u32, String, i64)> = operations
-                    .deliver(&folded)
-                    .into_iter()
-                    .map(|(seq, progress)| (seq, progress.position, progress.counter))
-                    .collect();
-                let expected: Vec<(u32, String, i64)> = step["delivered"]
+                // A delivery hands over the whole folded progress of the operation's key, so
+                // its key and metadata reach lang as they came.
+                let expected: Vec<_> = step["delivered"]
                     .as_array()
                     .unwrap()
                     .iter()
-                    .map(|d| (seq(d), text(d, "position"), d["counter"].as_i64().unwrap()))
+                    .map(|d| {
+                        let operation = Some(Operation::OperationKey(keys[&seq(d)].clone()));
+                        let progress = folded
+                            .iter()
+                            .find(|progress| progress.operation == operation)
+                            .unwrap_or_else(|| panic!("{name}, step {index}: no progress"));
+                        assert_eq!(
+                            (progress.position.as_str(), progress.counter),
+                            (
+                                d["position"].as_str().unwrap(),
+                                d["counter"].as_i64().unwrap()
+                            ),
+                            "{name}, step {index}"
+                        );
+                        (seq(d), progress.clone())
+                    })
                     .collect();
-                assert_eq!(delivered, expected, "{name}, step {index}");
+                assert_eq!(
+                    operations.deliver(&folded),
+                    expected,
+                    "{name}, step {index}"
+                );
             }
         }
     }
