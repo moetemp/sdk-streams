@@ -291,6 +291,7 @@ fn batch(stream: &StreamAddress, producer: &str, sequence: i64, values: &[&str])
         producer: Some(append_request::Producer::Named(NamedProducer {
             producer_id: producer.to_string(),
             attempt: 1,
+            ..Default::default()
         })),
         sequence,
         records: values.iter().map(|value| data(value)).collect(),
