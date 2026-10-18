@@ -112,8 +112,8 @@ promise about the order.
 
 ## Tests
 
-`tests/archive_sink.rs` runs the driver's sink on memory, on Redis with `STREAMS_REDIS_URL`, and
-on S3 with `STREAMS_S3_URL`. The conformance suite runs
+`tests/archive_sink.rs` runs the driver's sink on memory, on Redis with `STREAMS_REDIS_URL`, on
+PostgreSQL with `STREAMS_POSTGRES_URL`, and on S3 with `STREAMS_S3_URL`. The conformance suite runs
 the archive cases on a local directory, and on S3 with `STREAMS_S3_URL`, such as
 `s3://archive/tests` on a local S3-compatible server with `AWS_ENDPOINT_URL` and
 `AWS_ALLOW_HTTP=true`.

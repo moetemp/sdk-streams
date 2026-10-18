@@ -1,8 +1,9 @@
 //! The stream driver's archive sink: it copies the topics a store marks into an archive, so a
 //! `TieredStore` reads them after the store drops them.
 //!
-//! The memory cases always run. Set `STREAMS_REDIS_URL` for the Redis case, and `STREAMS_S3_URL`
-//! with the `AWS_*` variables for the S3 case.
+//! The memory cases always run. Set `STREAMS_REDIS_URL` for the Redis case,
+//! `STREAMS_POSTGRES_URL` for the PostgreSQL case, and `STREAMS_S3_URL` with the `AWS_*` variables
+//! for the S3 case.
 
 use std::{
     sync::{
@@ -263,6 +264,50 @@ async fn the_driver_archives_a_redis_store_into_a_directory() {
             .query_async(&mut raw.clone())
             .await
             .unwrap();
+    })
+    .await;
+    std::fs::remove_dir_all(root).unwrap();
+}
+
+#[cfg(feature = "postgres")]
+#[tokio::test]
+async fn the_driver_archives_a_postgres_store_into_a_directory() {
+    let Ok(url) = std::env::var("STREAMS_POSTGRES_URL") else {
+        eprintln!("set STREAMS_POSTGRES_URL to run the PostgreSQL archive cases");
+        return;
+    };
+    let schema = unique("archive_sink").replace('-', "_");
+    let mut options = temporalio_streams::PostgresStoreOptions::new(url.clone());
+    options.schema = schema.clone();
+    options.max_connections = 4;
+    options.notification_log = true;
+    options.archive_lease = Some(Duration::from_secs(60));
+    let store = Arc::new(
+        temporalio_streams::PostgresStore::connect(options)
+            .await
+            .unwrap(),
+    );
+    let root = std::env::temp_dir().join(unique("streams-archive-sink"));
+    let archive = Arc::new(LocalFileArchive::new(&root));
+    let (raw, connection) = tokio_postgres::connect(&url, tokio_postgres::NoTls)
+        .await
+        .unwrap();
+    tokio::spawn(connection);
+    let raw = Arc::new(raw);
+    the_driver_archives_closed_and_busy_topics(store, archive, async |chain, topic| {
+        // The topic row goes with its records, as when the janitor deleted a tombstone.
+        raw.execute(
+            &format!(
+                "WITH t AS (SELECT t.topic_id FROM {schema}.chains c \
+                   JOIN {schema}.topics t ON t.chain_id = c.chain_id AND t.topic = $3 \
+                   WHERE c.namespace = $1 AND c.owner_id = $2), \
+                 gone AS (DELETE FROM {schema}.records r USING t WHERE r.topic_id = t.topic_id) \
+                 DELETE FROM {schema}.topics x USING t WHERE x.topic_id = t.topic_id"
+            ),
+            &[&chain.namespace, &chain.workflow_id, &topic],
+        )
+        .await
+        .unwrap();
     })
     .await;
     std::fs::remove_dir_all(root).unwrap();

@@ -24,6 +24,8 @@ pub mod nexus;
 mod notify;
 mod notifylog;
 mod owner;
+#[cfg(feature = "postgres")]
+mod postgres;
 mod progress;
 pub mod protos;
 mod reader;
@@ -37,6 +39,8 @@ mod tiered;
 mod wake;
 mod workflow;
 
+#[cfg(feature = "postgres")]
+pub use self::postgres::{DEFAULT_POSTGRES_DOORBELLS, PostgresStore, PostgresStoreOptions};
 #[cfg(feature = "redis")]
 pub use self::redis::{DEFAULT_NOTIFY_DOORBELLS, RedisStore, RedisStoreOptions};
 #[cfg(feature = "archive")]

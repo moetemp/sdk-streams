@@ -1,10 +1,11 @@
-//! The stream driver over a Redis notification log, on a standalone server and on a cluster.
+//! The stream driver over a Redis notification log, on a standalone server and on a cluster, and
+//! over a PostgreSQL one.
 //!
-//! Set `STREAMS_REDIS_URL` and `STREAMS_REDIS_CLUSTER_URL` to run these.
+//! Set `STREAMS_REDIS_URL`, `STREAMS_REDIS_CLUSTER_URL` and `STREAMS_POSTGRES_URL` to run these.
 //! The cluster cases that move slots and fail a primary over need `STREAMS_REDIS_CLUSTER_ADMIN`,
 //! since they change the cluster, and replicas for the failover.
 
-#![cfg(feature = "redis")]
+#![cfg(any(feature = "redis", feature = "postgres"))]
 
 use std::{
     collections::{BTreeMap, HashMap},
@@ -706,4 +707,67 @@ async fn a_primary_failover_under_traffic_still_notifies_every_stream() {
     let expected = writer.await.unwrap();
     notifiers.reach(&expected, Duration::from_secs(30)).await;
     running.abort();
+}
+
+#[cfg(feature = "postgres")]
+mod on_postgres {
+    use super::*;
+    use temporalio_streams::{PostgresStore, PostgresStoreOptions};
+
+    /// A schema no other case uses.
+    fn schema() -> String {
+        unique("driver").replace('-', "_")
+    }
+
+    async fn store(url: &str, schema: &str) -> Arc<PostgresStore> {
+        let mut options = PostgresStoreOptions::new(url);
+        options.schema = schema.to_string();
+        options.max_connections = 8;
+        options.notification_log = true;
+        options.notify_doorbells = 4;
+        Arc::new(PostgresStore::connect(options).await.unwrap())
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn streams_on_postgres_reach_their_notifiers() {
+        let Some(url) = url("STREAMS_POSTGRES_URL") else {
+            return;
+        };
+        streams_in_every_slot_reach_their_notifiers(store(&url, &schema()).await).await;
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn activity_streams_on_postgres_reach_their_notifiers() {
+        let Some(url) = url("STREAMS_POSTGRES_URL") else {
+            return;
+        };
+        activity_streams_reach_their_notifiers(store(&url, &schema()).await).await;
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn a_lost_ring_on_postgres_is_found_by_the_sweep() {
+        let Some(url) = url("STREAMS_POSTGRES_URL") else {
+            return;
+        };
+        let schema = schema();
+        // The rings go to the writer's listener, as when the driver's process was away.
+        let writer = store(&url, &schema).await;
+        let expected = write(&*writer, 20, 1).await;
+        let reader = store(&url, &schema).await;
+        let notifiers = Arc::new(Notifiers::default());
+        let driver =
+            Arc::new(StreamDriver::new(reader.clone(), notifiers.clone(), options("d1")).unwrap());
+        let running = tokio::spawn(driver.run());
+        // One sweep interval and the time one sweep takes.
+        notifiers.reach(&expected, Duration::from_secs(5)).await;
+        running.abort();
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn a_stopped_drivers_entries_on_postgres_move_to_another_driver() {
+        let Some(url) = url("STREAMS_POSTGRES_URL") else {
+            return;
+        };
+        a_stopped_drivers_entries_move_on(store(&url, &schema()).await).await;
+    }
 }

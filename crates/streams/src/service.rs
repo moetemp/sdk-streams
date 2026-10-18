@@ -109,6 +109,9 @@ impl StreamService {
             Some(stream_store_config::Store::Redis(redis)) => {
                 connect_redis(redis, config.notification_log, stall_limit).await?
             }
+            Some(stream_store_config::Store::Postgres(postgres)) => {
+                connect_postgres(postgres, config.notification_log, stall_limit).await?
+            }
             None => {
                 return Err(StreamError::refused(
                     "the stream store config names no store",
@@ -585,6 +588,72 @@ async fn connect_redis(
     ))
 }
 
+#[cfg(feature = "postgres")]
+async fn connect_postgres(
+    config: crate::proto::PostgresStoreConfig,
+    notification_log: bool,
+    archive_lease: Option<Duration>,
+) -> StreamResult<(Arc<dyn StreamStore>, Duration)> {
+    let mut options = crate::PostgresStoreOptions::new(config.url);
+    options.notification_log = notification_log;
+    options.archive_lease = archive_lease;
+    if config.notify_doorbells > 0 {
+        options.notify_doorbells = config.notify_doorbells;
+    }
+    options.listen_url = Some(config.listen_url).filter(|url| !url.is_empty());
+    options.notify_reads = config.notify_reads;
+    if !config.schema.is_empty() {
+        options.schema = config.schema;
+    }
+    let name = |field: &str| format!("Postgres store's {field}");
+    options.retention = positive_or(config.retention, options.retention, &name("retention"))?;
+    if config.max_connections > 0 {
+        options.max_connections = config.max_connections as usize;
+    }
+    options.response_timeout = positive_or(
+        config.response_timeout,
+        options.response_timeout,
+        &name("response timeout"),
+    )?;
+    if let Some(lease) = config.floor_lease {
+        options.floor_lease = Some(positive_or(
+            Some(lease),
+            Duration::ZERO,
+            &name("floor lease"),
+        )?);
+    }
+    options.floor_release_grace = positive_or(
+        config.floor_release_grace,
+        options.floor_release_grace,
+        &name("floor release grace"),
+    )?;
+    options.poll_interval = positive_or(
+        config.poll_interval,
+        options.poll_interval,
+        &name("poll interval"),
+    )?;
+    options.skip_migrations = config.skip_migrations;
+    options.janitor_interval = positive_or(
+        config.janitor_interval,
+        options.janitor_interval,
+        &name("janitor interval"),
+    )?;
+    let retention = options.retention;
+    let store = crate::PostgresStore::connect(options).await?;
+    Ok((Arc::new(store), retention))
+}
+
+#[cfg(not(feature = "postgres"))]
+async fn connect_postgres(
+    _: crate::proto::PostgresStoreConfig,
+    _: bool,
+    _: Option<Duration>,
+) -> StreamResult<(Arc<dyn StreamStore>, Duration)> {
+    Err(StreamError::unsupported(
+        "this build has no PostgreSQL store; build temporalio-streams with its postgres feature",
+    ))
+}
+
 #[cfg(feature = "redis")]
 fn duration(seconds: i64, nanos: i32, name: &str) -> StreamResult<Duration> {
     match (u64::try_from(seconds), u32::try_from(nanos)) {
@@ -957,6 +1026,55 @@ mod tests {
         .await
         .unwrap_err();
         assert_eq!(error.kind, StreamFailureKind::Unsupported);
+    }
+
+    #[cfg(not(feature = "postgres"))]
+    #[tokio::test]
+    async fn postgres_needs_the_postgres_feature() {
+        let error = StreamService::connect(
+            StreamStoreConfig {
+                store: Some(stream_store_config::Store::Postgres(Default::default())),
+                ..Default::default()
+            },
+            Arc::new(Running),
+        )
+        .await
+        .unwrap_err();
+        assert_eq!(error.kind, StreamFailureKind::Unsupported);
+    }
+
+    #[cfg(feature = "postgres")]
+    #[tokio::test]
+    async fn a_postgres_config_with_a_bad_value_is_refused() {
+        let config = |postgres: crate::proto::PostgresStoreConfig| StreamStoreConfig {
+            store: Some(stream_store_config::Store::Postgres(postgres)),
+            ..Default::default()
+        };
+        for (postgres, text) in [
+            (Default::default(), "postgres://"),
+            (
+                crate::proto::PostgresStoreConfig {
+                    url: "postgres://localhost/db".to_string(),
+                    retention: Some(Default::default()),
+                    ..Default::default()
+                },
+                "retention",
+            ),
+            (
+                crate::proto::PostgresStoreConfig {
+                    url: "postgres://localhost/db".to_string(),
+                    schema: "Bad-Schema".to_string(),
+                    ..Default::default()
+                },
+                "schema",
+            ),
+        ] {
+            let error = StreamService::connect(config(postgres), Arc::new(Running))
+                .await
+                .unwrap_err();
+            assert_eq!(error.kind, StreamFailureKind::Refused, "{error}");
+            assert!(error.message.contains(text), "{error}");
+        }
     }
 
     /// Records the notifications it was sent.
