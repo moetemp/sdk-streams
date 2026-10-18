@@ -11,6 +11,7 @@ use crate::{
         StoreAppendRequest, StoredClose, StreamFailureKind, StreamOwnerKind, StreamRecordKind,
         WorkflowTerminalCommand,
     },
+    record::completed_tasks,
     stored_append_record, workflow_batch_digest, workflow_producer_id,
 };
 use parking_lot::Mutex;
@@ -36,26 +37,12 @@ pub const STREAM_OWNER_HEADER: &str = "__temporal_stream_owner";
 /// The bits of a Workflow producer's attempt that hold the reruns since the last completed task.
 pub const STREAM_RETRY_BITS: u32 = 16;
 
-/// How many completed tasks a Workflow producer's records name. A reader learns from them whether
-/// an earlier attempt it delivered completed, as long as fewer tasks completed since.
-pub const STREAM_COMPLETED_TASKS: usize = 8;
-
 /// A Workflow producer's attempt, with the prefix in the high bits, then 1 plus the reruns since
 /// it. The prefix is the WorkflowTaskStarted event id of the last completed task, 0 before one
 /// did. Each completed task moves the producer on with no supersession.
 pub fn stream_attempt(prefix: i64, reruns: i64) -> i64 {
     let retry = (1 + reruns).min((1 << STREAM_RETRY_BITS) - 1);
     (prefix << STREAM_RETRY_BITS) | retry
-}
-
-/// The completed tasks a record names, from the activation's list, with a trailing zero when the
-/// list goes back to the run's start.
-fn completed_tasks(completed_started_event_ids: &[i64]) -> Vec<i64> {
-    let mut ids = completed_started_event_ids.to_vec();
-    if ids.len() < STREAM_COMPLETED_TASKS {
-        ids.push(0);
-    }
-    ids
 }
 
 const CONTENT_HASH_BYTES: usize = 32;

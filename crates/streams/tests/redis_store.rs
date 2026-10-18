@@ -812,6 +812,7 @@ async fn a_new_producer_marks_an_ended_chain_closed_until_it_expires() {
         producer: Some(Producer::Named(NamedProducer {
             producer_id: producer.to_string(),
             attempt: 1,
+            ..Default::default()
         })),
         sequence: 1,
         records: vec![AppendRecord {
@@ -1745,6 +1746,7 @@ async fn a_replay_read_on_redis_repeats_the_read_and_survives_retention_under_a_
         producer: Some(Producer::Named(NamedProducer {
             producer_id: "p".to_string(),
             attempt,
+            ..Default::default()
         })),
         sequence,
         records: vec![AppendRecord {
@@ -1833,6 +1835,7 @@ async fn a_replay_read_from_a_trimmed_start_on_redis_is_a_lost_range() {
         producer: Some(Producer::Named(NamedProducer {
             producer_id: "p".to_string(),
             attempt: 1,
+            ..Default::default()
         })),
         sequence,
         records: vec![AppendRecord {
@@ -2077,6 +2080,7 @@ async fn a_replay_whose_end_record_the_store_lost_is_a_lost_range() {
         producer: Some(Producer::Named(NamedProducer {
             producer_id: "p".to_string(),
             attempt: 1,
+            ..Default::default()
         })),
         sequence,
         records: vec![AppendRecord {
