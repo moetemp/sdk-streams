@@ -3,6 +3,10 @@
 //! record, readers that never write, where readers end when the owner ends, and reads that give
 //! the same records however they page.
 
+#[cfg(feature = "redis")]
+#[path = "support/server.rs"]
+mod server;
+
 use prost::Message;
 use sha2::{Digest, Sha256};
 use std::{
@@ -255,7 +259,7 @@ async fn stores() -> Vec<(&'static str, Arc<dyn StreamStore>)> {
         ),
     ];
     #[cfg(feature = "redis")]
-    if let Ok(url) = std::env::var("STREAMS_REDIS_URL") {
+    if let Some(url) = server::server_url("STREAMS_REDIS_URL") {
         let mut options = temporalio_streams::RedisStoreOptions::new(url);
         options.key_prefix = format!("fallbacks-{}", std::process::id());
         options.plain = true;

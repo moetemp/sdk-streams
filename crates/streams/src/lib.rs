@@ -20,6 +20,10 @@ mod reader;
 mod record;
 #[cfg(feature = "redis")]
 mod redis;
+#[cfg(all(test, feature = "redis"))]
+mod server {
+    include!("../tests/support/server.rs");
+}
 mod service;
 mod store;
 

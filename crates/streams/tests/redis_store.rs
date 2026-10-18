@@ -5,6 +5,9 @@
 
 #![cfg(feature = "redis")]
 
+#[path = "support/server.rs"]
+mod server;
+
 use prost::Message;
 use redis::AsyncCommands;
 use serde_json::Value as Json;
@@ -39,11 +42,7 @@ fn unique(prefix: &str) -> String {
 }
 
 fn url() -> Option<String> {
-    let url = std::env::var("STREAMS_REDIS_URL").ok();
-    if url.is_none() {
-        eprintln!("set STREAMS_REDIS_URL to run the Redis store tests");
-    }
-    url
+    server::server_url("STREAMS_REDIS_URL")
 }
 
 struct Setup {
@@ -1205,8 +1204,7 @@ async fn a_server_that_refuses_config_is_not_warned_about() {
 
 #[tokio::test]
 async fn an_evicting_primary_of_a_cluster_is_warned_about() {
-    let Ok(url) = std::env::var("STREAMS_REDIS_CLUSTER_URL") else {
-        eprintln!("set STREAMS_REDIS_CLUSTER_URL to run the Redis cluster tests");
+    let Some(url) = server::server_url("STREAMS_REDIS_CLUSTER_URL") else {
         return;
     };
     let _serial = POLICY.lock().await;
@@ -1410,8 +1408,7 @@ async fn a_delete_without_scan_is_refused_under_the_documented_acl() {
 
 #[tokio::test]
 async fn a_delete_reaches_every_primary_of_a_cluster() {
-    let Ok(url) = std::env::var("STREAMS_REDIS_CLUSTER_URL") else {
-        eprintln!("set STREAMS_REDIS_CLUSTER_URL to run the Redis cluster tests");
+    let Some(url) = server::server_url("STREAMS_REDIS_CLUSTER_URL") else {
         return;
     };
     let prefix = unique("cluster-delete");

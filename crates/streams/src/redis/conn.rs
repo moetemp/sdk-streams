@@ -447,8 +447,7 @@ mod tests {
 
     #[tokio::test]
     async fn a_cached_slot_on_a_dead_node_goes_back_to_the_seed() {
-        let Ok(url) = std::env::var("STREAMS_REDIS_URL") else {
-            eprintln!("set STREAMS_REDIS_URL to run this test");
+        let Some(url) = crate::server::server_url("STREAMS_REDIS_URL") else {
             return;
         };
         // A standalone server answers every slot, so the seed serves the read once the dead

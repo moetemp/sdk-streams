@@ -59,4 +59,5 @@ Listing a chain's topics scans every primary, as a delete does, and needs `+scan
 conformance suite runs on each, once more as a user with exactly the ACL above, and once in
 plain mode with the cases of the fallbacks. `tests/fallbacks.rs` adds faults on plain Redis
 too. The cross-implementation test also needs `STREAMS_BROOK_PY`, a Python SDK checkout with
-its own Redis provider.
+its own Redis provider. When `STREAMS_REQUIRE` names `redis`, a Redis test with no URL set
+fails and does not skip.
