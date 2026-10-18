@@ -98,9 +98,7 @@ pub(crate) struct ReadState {
     /// found one. The owner start grace counts from it.
     #[prost(uint64, tag = "11")]
     pub(crate) owner_missing_since_ms: u64,
-    /// Set once the read reached the first `CLOSE` record, so it ends there.
-    #[prost(bool, tag = "12")]
-    closed: bool,
+    // Don't reuse tag 12. A saved read state can still carry it.
 }
 
 /// What a read knows of one producer.
@@ -177,7 +175,7 @@ impl ReadState {
 
     /// Forgets the least recently seen producers until the encoded state takes at most `bytes`.
     /// A forgotten producer's next attempt reads without `SUPERSEDED`, as past the producer cap.
-    fn fit_within(&mut self, bytes: usize) {
+    pub(crate) fn fit_within(&mut self, bytes: usize) {
         let mut size = self.encoded_len();
         if size <= bytes {
             return;
@@ -381,6 +379,8 @@ pub(crate) async fn read_bounded(
     let (mut closed, mut close) = (page.closed, page.close);
     let mut records = Vec::with_capacity(page.records.len());
     let mut previous = start.clone();
+    // The position of `previous`, so an empty answer wakes after what the page moved past.
+    let mut moved_past = position.clone();
     let max_bytes = usize::try_from(request.max_bytes).unwrap_or(usize::MAX);
     let (mut bytes, mut kept) = (0usize, 0usize);
     for stored in page.records {
@@ -412,7 +412,6 @@ pub(crate) async fn read_bounded(
             Ok(StreamRecordKind::Close)
                 if record.topic.is_empty() || record.topic == target.topic =>
             {
-                state.closed = true;
                 closed = true;
                 // A chain close keeps no outcome.
                 if !record.topic.is_empty() {
@@ -426,6 +425,7 @@ pub(crate) async fn read_bounded(
             }
             Ok(StreamRecordKind::Close | StreamRecordKind::Topic) => {
                 previous = cursor;
+                moved_past = stored.position;
                 continue;
             }
             _ => {}
@@ -433,6 +433,7 @@ pub(crate) async fn read_bounded(
         let stale = match state.observe(&record) {
             Observed::Copy => {
                 previous = cursor;
+                moved_past = stored.position;
                 continue;
             }
             Observed::Known => false,
@@ -457,17 +458,21 @@ pub(crate) async fn read_bounded(
             stale,
         });
         previous = cursor;
+        moved_past = stored.position;
     }
-    state.fit_within(MAX_STATE_BYTES);
+    // A replay read fits once at its end, since its page edges differ from the live read's.
+    if until.is_none() {
+        state.fit_within(MAX_STATE_BYTES);
+    }
     Ok((
         ReadResponse {
             cursor: previous,
             state: Vec::new(),
             done: false,
-            // An empty answer found nothing after `position`, so a notification counter above
+            // An empty answer found nothing after `moved_past`, so a notification counter above
             // that position's counter can only come from a newer record.
             wake_after: if records.is_empty() {
-                progress_counter(&position).unwrap_or(0)
+                progress_counter(&moved_past).unwrap_or(0)
             } else {
                 0
             },
@@ -883,6 +888,19 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn an_empty_answer_past_a_copy_wakes_after_the_copy() {
+        let log = Log::default();
+        log.write_at("p", 1, 1, b"1");
+        let first = read(&log, BEGINNING, &[]).await.unwrap();
+        // `p` lost the answer to its batch and sent it again.
+        log.write_at("p", 1, 1, b"1");
+        let again = read(&log, &first.cursor, &first.state).await.unwrap();
+        assert!(again.records.is_empty());
+        assert_eq!(again.cursor, cursor("2"));
+        assert_eq!(Some(again.wake_after), progress_counter("2"));
+    }
+
+    #[tokio::test]
     async fn a_copy_is_dropped_and_the_cursor_moves_past_it() {
         let log = Log::default();
         log.write_at("p", 1, 1, b"1");
@@ -966,8 +984,6 @@ mod tests {
         assert_eq!(log.lookups.load(Ordering::Relaxed), lookups);
         let resumed = read(&log, &page.cursor, &[]).await.unwrap();
         assert!(resumed.records.is_empty());
-        let state = ReadState::decode_from(&resumed.state).unwrap();
-        assert!(state.closed);
     }
 
     #[tokio::test]

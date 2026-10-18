@@ -15,7 +15,7 @@ the crate.
 | Stage | sdk-streams branch | sdk-rust commit |
 |---|---|---|
 | Brook | `moe/brook/ss1-import-store` and up | `moe/brook/k1-workflow-task-info` `5dd6f0ec` |
-| Jetty | `moe/jetty/sj1-import-jetty` and up | `moe/jetty/kj5-early-task-heartbeat` `4c05def9` |
+| Jetty | `moe/jetty/sj1-import-jetty` and up | `moe/jetty/kj5-early-task-heartbeat` `869a190a` |
 
 ## Linking from a lang bridge
 
@@ -57,8 +57,8 @@ the stream notifier RPCs by method path through `Connection::raw_unary`.
   lang's place.
 - FIPS: `cargo tree -e normal,build --no-default-features --features fips,redis -i ring` prints
   nothing.
-- Redis: run `crates/streams/scripts/redis-test-servers.sh`, then the test command with the two
-  URLs it prints.
+- Redis: run `crates/streams/scripts/redis-test-servers.sh`, then the test command with the URLs
+  it prints, two or three with Kvrocks.
 
 The Redis script starts one standalone server, a cluster of three primaries and three replicas,
 and Kvrocks when a binary or its image is there. Set `STREAMS_STANDALONE_PORT`,
