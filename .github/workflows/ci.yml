@@ -100,9 +100,10 @@ jobs:
       AWS_SECRET_ACCESS_KEY: streams-secret
       AWS_REGION: us-east-1
       STREAMS_S3_URL: s3://streams-archive/ci
+      STREAMS_REQUIRE: s3
     steps:
       - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: dtolnay/rust-toolchain@1.94.0
       - uses: arduino/setup-protoc@v3
         with:
           repo-token: ${{ secrets.GITHUB_TOKEN }}

@@ -182,10 +182,7 @@ async fn tiered<C: Case>(inner: impl std::future::Future<Output = Option<C>>) ->
 async fn tiered_on_s3<C: Case>(
     inner: impl std::future::Future<Output = Option<C>>,
 ) -> Option<Tiered<C>> {
-    let Ok(url) = std::env::var("STREAMS_S3_URL") else {
-        eprintln!("set STREAMS_S3_URL to run the S3 archive cases");
-        return None;
-    };
+    let url = crate::server::server_url("STREAMS_S3_URL")?;
     let inner = inner.await?;
     let url = format!("{}/{}", url.trim_end_matches('/'), unique("conformance"));
     let archive = temporalio_streams::ObjectStoreArchive::from_s3_url(&url).unwrap();
