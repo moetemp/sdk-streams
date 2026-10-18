@@ -60,7 +60,7 @@ impl Call<'_> {
 
     /// The read of source `number` that comes next, waiting up to `wait`.
     fn read_request(&self, number: u32, wait: Duration) -> Option<ReadRequest> {
-        let (stream, cursor, state, _) = self.state.read_input(number)?;
+        let (stream, cursor, state) = self.state.read_input(number)?;
         Some(ReadRequest {
             stream: Some(stream),
             after: cursor,
@@ -222,7 +222,7 @@ impl Call<'_> {
     }
 }
 
-/// Reads a stream and the streams it links, in one order (DD-204, DD-205).
+/// Reads a stream and the streams it links, in one order.
 pub(crate) async fn follow(
     streams: &Streams,
     subscriptions: &Subscriptions,

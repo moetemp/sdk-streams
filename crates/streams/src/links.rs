@@ -78,9 +78,7 @@ struct SourceState {
     held: Option<ReadRecord>,
     #[prost(uint32, tag = "12")]
     held_for: u32,
-    /// Set by the source's first read.
-    #[prost(bool, tag = "13")]
-    started: bool,
+    // Don't reuse tag 13. A saved follow state can still carry it.
     /// The source's stream ended while it held a JOIN. It ends once the JOIN is delivered.
     #[prost(bool, tag = "14")]
     done_pending: bool,
@@ -163,15 +161,13 @@ impl FollowState {
             .collect()
     }
 
-    /// What the next read of `number` takes: its stream, cursor, read state, and whether it is
-    /// the source's first read.
-    pub(crate) fn read_input(&self, number: u32) -> Option<(StreamAddress, String, Vec<u8>, bool)> {
+    /// What the next read of `number` takes: its stream, cursor and read state.
+    pub(crate) fn read_input(&self, number: u32) -> Option<(StreamAddress, String, Vec<u8>)> {
         let source = self.source(number)?;
         Some((
             source.stream.clone()?,
             source.cursor.clone(),
             source.read_state.clone(),
-            !source.started,
         ))
     }
 
@@ -218,10 +214,9 @@ impl FollowState {
     /// cut there by the caller is taken whole, so replay of the cut page gives the same answer.
     pub(crate) fn apply(&mut self, number: u32, page: Page) -> Applied {
         let mut applied = Applied::default();
-        let Some(source) = self.source_mut(number) else {
+        if self.source(number).is_none() {
             return applied;
-        };
-        source.started = true;
+        }
         self.note(number, &mut applied);
         let stored = page
             .records
