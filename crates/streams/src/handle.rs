@@ -17,6 +17,7 @@ use crate::{
         read_record, retire_producer_request,
     },
     reader::{ReadState, read_bounded, read_with},
+    record::{LOCAL_PRODUCER_PREFIX, STREAM_COMPLETED_TASKS, completed_tasks},
     stored_append_record, stream_hash,
 };
 use prost::Message;
@@ -275,6 +276,10 @@ impl Streams {
             ));
         }
         check_append_digest(&request.digest)?;
+        let (task_started, completed) = match &request.producer {
+            Some(append_request::Producer::Named(named)) => call_task(named)?,
+            _ => (0, Vec::new()),
+        };
         let writer = Writer {
             topic: &stream.topic,
             producer_id: &producer_id,
@@ -298,7 +303,13 @@ impl Streams {
                     request.sequence + index as i64,
                     record,
                 )
-                .map(|stored| stored.encode_to_vec())
+                .map(|mut stored| {
+                    stored.task_started_event_id = task_started;
+                    if index == 0 {
+                        stored.completed_tasks = completed.clone();
+                    }
+                    stored.encode_to_vec()
+                })
             })
             .collect::<StreamResult<Vec<_>>>()?;
         check_store_limits(&records, &self.store.capabilities())?;
@@ -1154,7 +1165,6 @@ fn unsupported_kind(owner_kind: i32) -> StreamError {
     ))
 }
 
-/// Refuses a topic no store keys reliably, by the rules the Workflow publish also applies.
 /// The producer id and attempt a named producer or an Activity attempt writes as.
 fn producer(
     named: Option<&NamedProducer>,
@@ -1187,6 +1197,39 @@ fn producer(
     Ok((producer_id, attempt))
 }
 
+/// The task started event id and the completed tasks a Local Activity call's records carry, from
+/// the Workflow Task info the call names. Other named producers name none.
+fn call_task(named: &NamedProducer) -> StreamResult<(i64, Vec<i64>)> {
+    if named.task_started_event_id == 0 && named.completed_started_event_ids.is_empty() {
+        return Ok((0, Vec::new()));
+    }
+    // Readers apply the task rule to these ids only, and would read the task info of any other
+    // producer as noise.
+    if !named.producer_id.starts_with(LOCAL_PRODUCER_PREFIX) {
+        return Err(StreamError::invalid_argument(format!(
+            "only a Local Activity call, `{LOCAL_PRODUCER_PREFIX}<n>@<run id>`, names its Workflow \
+             Task, not {:?}",
+            named.producer_id
+        )));
+    }
+    if named.task_started_event_id < 1 {
+        return Err(StreamError::invalid_argument(format!(
+            "a Local Activity call's task started event id starts at one, not {}",
+            named.task_started_event_id
+        )));
+    }
+    if named.completed_started_event_ids.len() > STREAM_COMPLETED_TASKS {
+        return Err(StreamError::invalid_argument(format!(
+            "a Local Activity call names at most {STREAM_COMPLETED_TASKS} completed tasks, not {}",
+            named.completed_started_event_ids.len()
+        )));
+    }
+    Ok((
+        named.task_started_event_id,
+        completed_tasks(&named.completed_started_event_ids),
+    ))
+}
+
 /// The key a producer attempt's chain is remembered by. A Workflow writes through a new local
 /// producer per flush, `__temporal_<kind>_<n>@<run id>`, and every flush of a run shares the
 /// run's chain. So they share one entry, and a busy run can't push the long-lived producers out.
@@ -1208,6 +1251,7 @@ fn producer_key(owner: OwnerKey, producer_id: &str, attempt: i64) -> ProducerKey
     }
 }
 
+/// Refuses a topic no store keys reliably, by the rules the Workflow publish also applies.
 fn check_topic(topic: &str) -> StreamResult<()> {
     crate::check_topic(topic).map_err(StreamError::invalid_argument)
 }
@@ -1555,6 +1599,7 @@ mod tests {
             producer: Some(Producer::Named(NamedProducer {
                 producer_id: producer.to_string(),
                 attempt: 1,
+                ..Default::default()
             })),
             sequence,
             records: vec![data(value)],
@@ -1653,6 +1698,62 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn a_local_activity_call_names_its_workflow_task() {
+        let setup = setup(StreamsOptions::default());
+        let call = |producer: &str, started: i64, completed: Vec<i64>| {
+            let mut request = append(producer, 1, "1");
+            request.records.push(data("2"));
+            request.producer = Some(Producer::Named(NamedProducer {
+                producer_id: producer.to_string(),
+                attempt: (196_609 << 14) | 1,
+                task_started_event_id: started,
+                completed_started_event_ids: completed,
+            }));
+            request
+        };
+        let producer = "__temporal_local_1@run-1";
+        setup
+            .streams
+            .append(call(producer, 5, vec![3]))
+            .await
+            .unwrap();
+        let read = setup
+            .streams
+            .read(ReadRequest {
+                stream: Some(stream("out")),
+                ..Default::default()
+            })
+            .await
+            .unwrap();
+        let stored: Vec<_> = read
+            .records
+            .iter()
+            .map(|record| match &record.record {
+                Some(crate::proto::read_record::Record::Stored(stored)) => {
+                    (stored.task_started_event_id, stored.completed_tasks.clone())
+                }
+                other => panic!("{other:?}"),
+            })
+            .collect();
+        // The trailing zero says the list reaches back to the run's start.
+        assert_eq!(stored, [(5, vec![3, 0]), (5, vec![])]);
+        for request in [
+            call("p", 5, vec![3]),
+            call(producer, 0, vec![3]),
+            call(
+                producer,
+                5,
+                vec![9; crate::record::STREAM_COMPLETED_TASKS + 1],
+            ),
+        ] {
+            assert_eq!(
+                kind(setup.streams.append(request).await),
+                StreamFailureKind::InvalidArgument
+            );
+        }
+    }
+
+    #[tokio::test]
     async fn requests_no_store_keeps_are_refused() {
         let setup = setup(StreamsOptions::default());
         let cases: Vec<(AppendRequest, StreamFailureKind)> = vec![
@@ -1662,6 +1763,7 @@ mod tests {
                     producer: Some(Producer::Named(NamedProducer {
                         producer_id: "p".to_string(),
                         attempt: 0,
+                        ..Default::default()
                     })),
                     ..append("p", 1, "1")
                 },
@@ -2152,6 +2254,7 @@ mod tests {
                 producer: Some(retire_producer_request::Producer::Named(NamedProducer {
                     producer_id: "p".to_string(),
                     attempt: 1,
+                    ..Default::default()
                 })),
             })
             .await
@@ -2195,6 +2298,7 @@ mod tests {
             Some(retire_producer_request::Producer::Named(NamedProducer {
                 producer_id: "p".to_string(),
                 attempt,
+                ..Default::default()
             }))
         };
         // A closed stream refuses no retire, and a repeat answers the same.
@@ -2559,6 +2663,7 @@ mod tests {
             producer: Some(Producer::Named(NamedProducer {
                 producer_id: producer.to_string(),
                 attempt,
+                ..Default::default()
             })),
             ..append(producer, sequence, value)
         }

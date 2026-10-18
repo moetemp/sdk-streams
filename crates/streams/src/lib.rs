@@ -59,10 +59,10 @@ pub use reader::{
     DEFAULT_MAX_RECORDS, MAX_STATE_BYTES, MAX_TRACKED_PRODUCERS, ReadTarget, read_page,
 };
 pub use record::{
-    ACTIVITY_OWNER_KIND, MAX_KEYED_ACTIVITY_ATTEMPT, WORKFLOW_ACTIVITY_OWNER_KIND,
-    WORKFLOW_OWNER_KIND, activity_attempt, activity_producer_id, chain_owner, check_append_digest,
-    check_record_limit, check_store_limits, close_record, stored_append_record, topic_record,
-    workflow_batch_digest, workflow_producer_id,
+    ACTIVITY_OWNER_KIND, MAX_KEYED_ACTIVITY_ATTEMPT, STREAM_COMPLETED_TASKS,
+    WORKFLOW_ACTIVITY_OWNER_KIND, WORKFLOW_OWNER_KIND, activity_attempt, activity_producer_id,
+    chain_owner, check_append_digest, check_record_limit, check_store_limits, close_record,
+    stored_append_record, topic_record, workflow_batch_digest, workflow_producer_id,
 };
 pub use service::StreamService;
 pub use store::{
@@ -70,9 +70,7 @@ pub use store::{
     MAX_FLOOR_HOLDERS, MAX_RECORD_BYTES, StreamStore, empty_close_result,
 };
 pub use wake::{STREAM_WAKE_TYPE_URL, fold_stream_wake, fold_stream_wakes};
-pub use workflow::{
-    STREAM_COMPLETED_TASKS, STREAM_OWNER_HEADER, STREAM_RETRY_BITS, stream_attempt,
-};
+pub use workflow::{STREAM_OWNER_HEADER, STREAM_RETRY_BITS, stream_attempt};
 
 /// The protos stores and lang exchange.
 pub mod proto {
