@@ -9,8 +9,8 @@ mod migrations;
 mod wait;
 
 use crate::{
-    Capabilities, ConditionForms, MAX_BATCH_BYTES, MAX_RECORD_BYTES, NotificationLog, StreamError,
-    StreamResult, StreamStore,
+    Capabilities, MAX_BATCH_BYTES, MAX_RECORD_BYTES, NotificationLog, StreamError, StreamResult,
+    StreamStore,
     proto::{
         ChainId, DeleteOwnerRequest, DeleteOwnerResponse, StoreAppendRequest, StoreAppendResponse,
         StoreLatestRequest, StoreLatestResponse, StoreReadRequest, StoreReadResponse, StoredClose,
@@ -812,7 +812,6 @@ impl StreamStore for PostgresStore {
     fn capabilities(&self) -> Capabilities {
         Capabilities {
             producer_state: true,
-            conditional: ConditionForms::default(),
             kept_last: true,
             holds: true,
             change_feed: self.notification_log().is_some(),
