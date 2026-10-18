@@ -53,11 +53,6 @@ fn completed_tasks(completed_started_event_ids: &[i64]) -> Vec<i64> {
 
 const CONTENT_HASH_BYTES: usize = 32;
 
-/// The most record bytes one append carries when the store declares no limit. A larger commit goes
-/// as several appends per topic, so no activation is too large to append and lang never fails a
-/// task for its size.
-pub const MAX_APPEND_BYTES: usize = 4 << 20;
-
 /// What the store adds to each record besides its body, topic and hash, counted high. That is the
 /// producer id, the attempt, the sequence, the hash's metadata entry and the completed tasks.
 const ENVELOPE_BYTES: usize = 256;
@@ -649,7 +644,7 @@ mod tests {
         let appends = output_by_topic(
             vec![big("a", 1), big("a", 2), big("a", 3), data("b", 4)],
             &mut committed,
-            MAX_APPEND_BYTES,
+            crate::MAX_BATCH_BYTES,
         )
         .unwrap();
         let shape: Vec<(&str, i64, usize)> = appends
@@ -676,7 +671,7 @@ mod tests {
         let first = output_by_topic(
             vec![data("b", 1), data("a", 2), finish("b")],
             &mut committed,
-            MAX_APPEND_BYTES,
+            crate::MAX_BATCH_BYTES,
         )
         .unwrap();
         let shape: Vec<_> = first
@@ -684,7 +679,8 @@ mod tests {
             .map(|t| (t.topic.as_str(), t.sequence, t.records.len()))
             .collect();
         assert_eq!(shape, [("b", 1, 2), ("a", 1, 1)]);
-        let second = output_by_topic(vec![data("a", 3)], &mut committed, MAX_APPEND_BYTES).unwrap();
+        let second =
+            output_by_topic(vec![data("a", 3)], &mut committed, crate::MAX_BATCH_BYTES).unwrap();
         assert_eq!((second[0].topic.as_str(), second[0].sequence), ("a", 2));
     }
 
@@ -711,7 +707,7 @@ mod tests {
             let error = output_by_topic(
                 vec![data("t", 9), record],
                 &mut HashMap::new(),
-                MAX_APPEND_BYTES,
+                crate::MAX_BATCH_BYTES,
             )
             .unwrap_err();
             assert_eq!(error.kind, StreamFailureKind::InvalidArgument);

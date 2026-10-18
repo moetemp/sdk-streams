@@ -51,7 +51,7 @@ pub use record::{
 };
 pub use service::StreamService;
 pub use store::{Capabilities, MAX_BATCH_BYTES, MAX_RECORD_BYTES, StreamStore};
-pub use workflow::{MAX_APPEND_BYTES, STREAM_COMPLETED_TASKS, STREAM_RETRY_BITS, stream_attempt};
+pub use workflow::{STREAM_COMPLETED_TASKS, STREAM_RETRY_BITS, stream_attempt};
 
 /// The protos stores and lang exchange.
 pub mod proto {
