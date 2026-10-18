@@ -720,19 +720,31 @@ impl StreamStore for MemoryStore {
         let position = parse_position(position)?;
         let mut chains = self.chains.lock().unwrap();
         let stored = chains.entry(chain_key(chain)).or_default();
+        let Some(held) = stored.topics.get_mut(topic) else {
+            // The topic is gone, so its mark would only hold back the other topics.
+            if let Some(log) = &self.log {
+                log.unmark(chain, topic);
+            }
+            return Ok(());
+        };
+        // Two drivers can archive from the same start. The slower one's advance must not move the
+        // hold back, nor hold a closed topic again after the archive released it.
+        if held.archived.is_some()
+            && (position < held.archived || (position == held.archived && held.closed))
+        {
+            return Ok(());
+        }
+        held.archived = position;
+        if let Some(log) = &self.log
+            && position.is_some_and(|position| position + 1 == held.head())
+        {
+            log.unmark(chain, topic);
+        }
         stored
             .floors
             .entry(topic.to_string())
             .or_default()
             .insert(ARCHIVE_HOLDER.to_string(), position);
-        if let Some(held) = stored.topics.get_mut(topic) {
-            held.archived = position;
-            if let Some(log) = &self.log
-                && position.is_some_and(|position| position + 1 == held.head())
-            {
-                log.unmark(chain, topic);
-            }
-        }
         Ok(())
     }
 
