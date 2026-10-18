@@ -505,6 +505,17 @@ impl WorkflowOutput {
         let chain = run.chain.clone();
         let run_id = run.run_id.clone();
         self.spawn(worker_id, async move {
+            // Lang publishes every terminal completion, also of a run that wrote no stream. Such
+            // a chain has nothing to close. A close would cost a History read and leave a marker
+            // in the store for the whole retention.
+            if store.capabilities().topic_listing
+                && store
+                    .list_topics(&chain)
+                    .await
+                    .is_ok_and(|topics| topics.is_empty())
+            {
+                return;
+            }
             match owner
                 .run_close(&chain.namespace, &chain.workflow_id, &run_id)
                 .await
@@ -525,7 +536,7 @@ impl WorkflowOutput {
                     );
                 }
                 Err(error) => {
-                    debug!(
+                    warn!(
                         %run_id,
                         %error,
                         "Kept the chain open, since the run's History could not be read"
