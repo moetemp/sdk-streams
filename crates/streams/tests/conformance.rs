@@ -5,6 +5,10 @@
 //! chains and drops its oldest records. Cases that need a Worker or the owner's History live with
 //! the Worker and the owner checks.
 
+#[cfg(feature = "redis")]
+#[path = "support/server.rs"]
+mod server;
+
 use prost::Message;
 use std::{
     sync::{
@@ -662,10 +666,7 @@ mod on_redis {
         extra: &[&str],
         notification_log: bool,
     ) -> Option<Redis> {
-        let Ok(url) = std::env::var(variable) else {
-            eprintln!("set {variable} to run the Redis store cases");
-            return None;
-        };
+        let url = crate::server::server_url(variable)?;
         let prefix = unique("conformance-acl");
         let log_rules = [
             format!("~{}:{{*}}:n", part(&prefix)),
@@ -734,10 +735,7 @@ mod on_redis {
 
     /// A store with the notification log on, as a user with exactly the MemoryDB access string.
     pub(crate) async fn redis_as_memorydb_user(variable: &str, cluster: bool) -> Option<Redis> {
-        let Ok(url) = std::env::var(variable) else {
-            eprintln!("set {variable} to run the Redis store cases");
-            return None;
-        };
+        let url = crate::server::server_url(variable)?;
         let prefix = unique("conformance-memorydb");
         let user = DocumentedUser::create_memorydb(&url, &prefix, "default").await;
         let mut options = RedisStoreOptions::new(user.url.clone());
@@ -816,10 +814,7 @@ mod on_redis {
         notification_log: bool,
         plain: bool,
     ) -> Option<Redis> {
-        let Ok(url) = std::env::var(variable) else {
-            eprintln!("set {variable} to run the Redis store cases");
-            return None;
-        };
+        let url = crate::server::server_url(variable)?;
         // A prefix per case keeps cases apart in one Redis, its notification streams too.
         let prefix = unique("conformance");
         let mut options = RedisStoreOptions::new(url.clone());

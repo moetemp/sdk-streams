@@ -14,8 +14,8 @@ the crate.
 
 | Stage | sdk-streams branch | sdk-rust commit |
 |---|---|---|
-| Brook | `moe/brook/ss1-import-store` and up | `moe/brook/k1-workflow-task-info` `4ebdacab` |
-| Jetty | `moe/jetty/sj1-import-jetty` and up | `moe/jetty/kj5-early-task-heartbeat` `4c05def9` |
+| Brook | `moe/brook/ss1-import-store` and up | `moe/brook/k1-workflow-task-info` `5dd6f0ec` |
+| Jetty | `moe/jetty/sj1-import-jetty` and up | `moe/jetty/kj5-early-task-heartbeat` `869a190a` |
 | Bridge | `moe/bridge/sb1-import-bridge` and up | `moe/bridge/kb1-pin` `84dc65fd` |
 
 ## Linking from a lang bridge
@@ -64,8 +64,8 @@ the two share a file path or a full name.
   lang's place.
 - FIPS: `cargo tree -e normal,build --no-default-features --features fips,redis,archive -i ring`
   prints nothing.
-- Redis: run `crates/streams/scripts/redis-test-servers.sh`, then the test command with the two
-  URLs it prints.
+- Redis: run `crates/streams/scripts/redis-test-servers.sh`, then the test command with the URLs
+  it prints, two or three with Kvrocks.
 
 - S3 archive: point `STREAMS_S3_URL` and the `AWS_*` variables at a bucket, such as one on MinIO.
 

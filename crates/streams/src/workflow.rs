@@ -60,11 +60,6 @@ fn completed_tasks(completed_started_event_ids: &[i64]) -> Vec<i64> {
 
 const CONTENT_HASH_BYTES: usize = 32;
 
-/// The most record bytes one append carries when the store declares no limit. A larger commit goes
-/// as several appends per topic, so no activation is too large to append and lang never fails a
-/// task for its size.
-pub const MAX_APPEND_BYTES: usize = 4 << 20;
-
 /// What the store adds to each record besides its body, topic and hash, counted high. That is the
 /// producer id, the attempt, the sequence, the hash's metadata entry and the completed tasks.
 const ENVELOPE_BYTES: usize = 256;
@@ -480,11 +475,10 @@ impl WorkflowOutput {
                 task_started: request.task_started_event_id,
             });
         let max_batch_bytes = self.store.capabilities().max_batch_bytes;
-        let topics = output_by_topic(
-            request.records,
-            &mut run.committed_by_topic,
-            max_batch_bytes,
-        )?;
+        // The counts move only once every append landed, so a failed publish leaves no gap in
+        // the attempt's sequences.
+        let mut committed = run.committed_by_topic.clone();
+        let topics = output_by_topic(request.records, &mut committed, max_batch_bytes)?;
         run.sessions
             .entry(attempt)
             .or_default()
@@ -515,6 +509,7 @@ impl WorkflowOutput {
                 dropped_topics.push(topic.topic.clone());
             }
         }
+        run.committed_by_topic = committed;
         // Inline, since replay never sends a close again. A close that fails is logged and
         // dropped, so it can't fail the Workflow Task, and the owner checks close those streams.
         for resolved in request.resolved_owner_activities {
@@ -667,6 +662,17 @@ impl WorkflowOutput {
         let chain = run.chain.clone();
         let run_id = run.run_id.clone();
         self.spawn(worker_id, async move {
+            // Lang publishes every terminal completion, also of a run that wrote no stream. Such
+            // a chain has nothing to close. A close would cost a History read and leave a marker
+            // in the store for the whole retention.
+            if store.capabilities().topic_listing
+                && store
+                    .list_topics(&chain)
+                    .await
+                    .is_ok_and(|topics| topics.is_empty())
+            {
+                return;
+            }
             match owner
                 .run_close(&chain.namespace, &chain.workflow_id, &run_id)
                 .await
@@ -687,7 +693,7 @@ impl WorkflowOutput {
                     );
                 }
                 Err(error) => {
-                    debug!(
+                    warn!(
                         %run_id,
                         %error,
                         "Kept the chain open, since the run's History could not be read"
@@ -808,7 +814,7 @@ mod tests {
         let appends = output_by_topic(
             vec![big("a", 1), big("a", 2), big("a", 3), data("b", 4)],
             &mut committed,
-            MAX_APPEND_BYTES,
+            crate::MAX_BATCH_BYTES,
         )
         .unwrap();
         let shape: Vec<(&str, i64, usize)> = appends
@@ -835,7 +841,7 @@ mod tests {
         let first = output_by_topic(
             vec![data("b", 1), data("a", 2), finish("b")],
             &mut committed,
-            MAX_APPEND_BYTES,
+            crate::MAX_BATCH_BYTES,
         )
         .unwrap();
         let shape: Vec<_> = first
@@ -843,7 +849,8 @@ mod tests {
             .map(|t| (t.topic.as_str(), t.sequence, t.records.len()))
             .collect();
         assert_eq!(shape, [("b", 1, 2), ("a", 1, 1)]);
-        let second = output_by_topic(vec![data("a", 3)], &mut committed, MAX_APPEND_BYTES).unwrap();
+        let second =
+            output_by_topic(vec![data("a", 3)], &mut committed, crate::MAX_BATCH_BYTES).unwrap();
         assert_eq!((second[0].topic.as_str(), second[0].sequence), ("a", 2));
     }
 
@@ -888,7 +895,7 @@ mod tests {
             let error = output_by_topic(
                 vec![data("t", 9), record],
                 &mut HashMap::new(),
-                MAX_APPEND_BYTES,
+                crate::MAX_BATCH_BYTES,
             )
             .unwrap_err();
             assert_eq!(error.kind, StreamFailureKind::InvalidArgument);
@@ -918,7 +925,7 @@ mod tests {
         let topics = output_by_topic(
             vec![data("t", 1), link_record("t", join("tool-1"))],
             &mut HashMap::new(),
-            MAX_APPEND_BYTES,
+            crate::MAX_BATCH_BYTES,
         )
         .unwrap();
         assert_eq!(topics.len(), 1);

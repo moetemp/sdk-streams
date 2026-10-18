@@ -3,6 +3,10 @@
 //! record, readers that never write, where readers end when the owner ends, and reads that give
 //! the same records however they page.
 
+#[cfg(feature = "redis")]
+#[path = "support/server.rs"]
+mod server;
+
 use prost::Message;
 use sha2::{Digest, Sha256};
 use std::{
@@ -257,7 +261,7 @@ async fn stores() -> Vec<(&'static str, Arc<dyn StreamStore>)> {
         ),
     ];
     #[cfg(feature = "redis")]
-    if let Ok(url) = std::env::var("STREAMS_REDIS_URL") {
+    if let Some(url) = server::server_url("STREAMS_REDIS_URL") {
         let mut options = temporalio_streams::RedisStoreOptions::new(url);
         options.key_prefix = format!("fallbacks-{}", std::process::id());
         options.plain = true;
@@ -542,7 +546,26 @@ async fn readers_agree_on_the_end_only_after_a_close() {
 }
 
 /// Reads every page of a topic with `max_records` per call, carrying the state.
-async fn paged(store: &dyn StreamStore, target: &ReadTarget, max_records: u32) -> Vec<String> {
+/// Each delivered record as its value and stale mark, with a `superseded` entry for each
+/// supersession, so a page edge that drops or moves a mark shows.
+fn marked(records: &[ReadRecord]) -> Vec<(String, bool)> {
+    records
+        .iter()
+        .map(|record| match record.record.as_ref().unwrap() {
+            read_record::Record::Stored(stored) => (
+                String::from_utf8(stored.body.clone().unwrap().data).unwrap(),
+                record.stale,
+            ),
+            read_record::Record::Superseded(_) => ("superseded".to_string(), false),
+        })
+        .collect()
+}
+
+async fn paged(
+    store: &dyn StreamStore,
+    target: &ReadTarget,
+    max_records: u32,
+) -> Vec<(String, bool)> {
     let mut request = ReadRequest {
         after: BEGINNING.to_string(),
         max_records,
@@ -554,7 +577,7 @@ async fn paged(store: &dyn StreamStore, target: &ReadTarget, max_records: u32) -
         if page.cursor == request.after && page.records.is_empty() {
             return delivered;
         }
-        delivered.extend(values(&page.records));
+        delivered.extend(marked(&page.records));
         request.after = page.cursor;
         request.state = page.state;
     }
@@ -622,7 +645,16 @@ async fn a_read_gives_the_same_records_however_it_pages() {
             stream_hash: stream_hash("ns", "workflow", &stream.workflow_id, "out"),
         };
         let whole = paged(&*store, &target, 1000).await;
-        assert_eq!(whole, ["p1.1", "q1.1", "p2.1", "p1.2", "q1.2"], "{label}");
+        let expected = [
+            ("p1.1", false),
+            ("q1.1", false),
+            ("superseded", false),
+            ("p2.1", false),
+            ("p1.2", true),
+            ("q1.2", false),
+        ]
+        .map(|(value, stale)| (value.to_string(), stale));
+        assert_eq!(whole, expected, "{label}");
         for max_records in [1, 2, 3] {
             assert_eq!(
                 paged(&*store, &target, max_records).await,
