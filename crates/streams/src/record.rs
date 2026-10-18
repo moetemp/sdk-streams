@@ -20,6 +20,23 @@ pub fn activity_producer_id(activity: &ActivityProducer) -> String {
     format!("{}@{}", activity.activity_id, activity.run_id)
 }
 
+/// How a Local Activity call's producer id starts, `__temporal_local_<n>@<run id>`.
+pub(crate) const LOCAL_PRODUCER_PREFIX: &str = "__temporal_local_";
+
+/// How many completed tasks a record of a Workflow run names. A reader learns from them whether
+/// an earlier attempt it delivered completed, as long as fewer tasks completed since.
+pub const STREAM_COMPLETED_TASKS: usize = 8;
+
+/// The completed tasks a record names, from an activation's list, with a trailing zero when the
+/// list goes back to the run's start.
+pub(crate) fn completed_tasks(completed_started_event_ids: &[i64]) -> Vec<i64> {
+    let mut ids = completed_started_event_ids.to_vec();
+    if ids.len() < STREAM_COMPLETED_TASKS {
+        ids.push(0);
+    }
+    ids
+}
+
 /// The producer id a Workflow run writes its own records as.
 ///
 /// It is an Activity's id form with no Activity id. An Activity id is never empty, so no Activity
