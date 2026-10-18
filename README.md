@@ -16,7 +16,7 @@ the crate.
 |---|---|---|
 | Brook | `moe/brook/ss1-import-store` and up | `moe/brook/k1-workflow-task-info` `4ebdacab` |
 | Jetty | `moe/jetty/sj1-import-jetty` and up | `moe/jetty/kj5-early-task-heartbeat` `4c05def9` |
-| Bridge | `moe/bridge/sb1-import-bridge` and up | `moe/bridge/kb1-pin` `33f5f203` |
+| Bridge | `moe/bridge/sb1-import-bridge` and up | `moe/bridge/kb1-pin` `84dc65fd` |
 
 ## Linking from a lang bridge
 
