@@ -6,6 +6,8 @@
 //! the call landed. A failed call leaves them pending, so this driver or another one sends them
 //! again. Delivery is at least once, and a notifier ignores a counter it has seen. A call the
 //! server refuses goes again one stream at a time, so one bad entry holds back no other stream.
+//! The log keeps a capped backlog. When drivers fall behind by more than the cap, the oldest
+//! entries go before any driver takes them, and those readers wake at the server's next Recheck.
 
 use crate::{
     NotificationEntry, NotificationLog, NotifierClient, NotifyError, StreamError,
