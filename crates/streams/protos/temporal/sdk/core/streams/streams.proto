@@ -645,10 +645,7 @@ message DescribeStoreResponse {
 message StoreCapabilities {
   // The append checks the producer attempt's dedupe entry and the close flags in the same step.
   bool producer_state = 1;
-  // The append can fail unless the log's next position is the expected one.
-  bool conditional_tail = 2;
-  // The append can fail unless the stream's fence token is the expected one.
-  bool conditional_fence = 3;
+  reserved 2, 3;
   // The store knows a topic's newest position after retention dropped every record.
   bool kept_last = 4;
   // A holder can keep records from retention.

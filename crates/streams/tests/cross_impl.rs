@@ -1,9 +1,8 @@
-//! The Core store and the Python SDK's Redis provider on one Redis, each reading and writing
+//! The crate's store and the Python SDK's Redis provider on one Redis, each reading and writing
 //! what the other wrote.
 //!
-//! Set `STREAMS_REDIS_URL`, and `STREAMS_BROOK_PY` to a Python SDK checkout whose Redis provider
-//! is the one before the store moved into Core. The Python side runs `tests/cross_impl/brook.py`
-//! through `uv`.
+//! Set `STREAMS_REDIS_URL`, and `STREAMS_BROOK_PY` to a Python SDK checkout with its own Redis
+//! provider. The Python side runs `tests/cross_impl/brook.py` through `uv`.
 
 #![cfg(feature = "redis")]
 
@@ -118,7 +117,7 @@ impl Both {
         mint_cursor("redis", &self.target(topic).stream_hash, position)
     }
 
-    /// Appends JSON values as producer `p` the way lang hands them to Core.
+    /// Appends JSON values as producer `p` the way lang hands them to the crate.
     async fn core_append(
         &self,
         sequence: i64,
@@ -156,7 +155,7 @@ impl Both {
         (landed.first_position, landed.last_position)
     }
 
-    /// Reads a topic from `after` with the Core reader, as JSON values.
+    /// Reads a topic from `after` with the crate's reader, as JSON values.
     async fn core_read(&self, topic: &str, after: &str) -> Result<Vec<Value>, StreamFailureKind> {
         let page = read_page(
             &self.core,
@@ -229,7 +228,7 @@ async fn what_python_wrote_core_reads_and_resumes() {
         both.core_read("events", "").await.unwrap(),
         [json!({"n": 1}), json!({"n": 2}), json!({"n": 3})]
     );
-    // A cursor the Python provider minted resumes on the Core store.
+    // A cursor the Python provider minted resumes on the crate's store.
     let cursor = first["cursor"].as_str().unwrap();
     assert_eq!(
         both.core_read("events", cursor).await.unwrap(),
@@ -257,7 +256,7 @@ async fn what_core_wrote_python_reads_and_resumes() {
     let read = both.brook(json!({"op": "read", "count": 2}));
     assert_eq!(values(&read), [json!({"n": 1}), json!({"n": 2})]);
     assert_eq!(read[0]["producer_id"], "p");
-    // A cursor the Core store minted resumes on the Python provider.
+    // A cursor the crate's store minted resumes on the Python provider.
     let after =
         both.brook(json!({"op": "read", "count": 1, "after": both.cursor("events", &first)}));
     assert_eq!(values(&after), [json!({"n": 2})]);
