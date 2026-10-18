@@ -442,6 +442,7 @@ mod tests {
             producer: Some(append_request::Producer::Named(NamedProducer {
                 producer_id: "p".to_string(),
                 attempt: 1,
+                ..Default::default()
             })),
             sequence,
             digest: vec![sequence as u8; 32],
@@ -611,6 +612,7 @@ mod tests {
                 NamedProducer {
                     producer_id: "p".to_string(),
                     attempt: 1,
+                    ..Default::default()
                 },
             )),
         };
