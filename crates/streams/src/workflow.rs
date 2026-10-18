@@ -793,7 +793,7 @@ mod tests {
         let topics = output_by_topic(
             vec![data("t", 1), link_record("t", join("tool-1"))],
             &mut HashMap::new(),
-            MAX_APPEND_BYTES,
+            crate::MAX_BATCH_BYTES,
         )
         .unwrap();
         assert_eq!(topics.len(), 1);
