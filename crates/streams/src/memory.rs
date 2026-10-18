@@ -8,7 +8,7 @@
 //! [MemoryStore::with_capabilities] masks capabilities off, so Core's fallbacks run in tests.
 
 use crate::{
-    Capabilities, ConditionForms, MAX_BATCH_BYTES, MAX_RECORD_BYTES, StreamError, StreamResult,
+    Capabilities, MAX_BATCH_BYTES, MAX_RECORD_BYTES, StreamError, StreamResult,
     StreamStore,
     proto::{
         ChainId, DeleteOwnerRequest, DeleteOwnerResponse, StoreAppendRequest, StoreAppendResponse,
@@ -28,10 +28,6 @@ const NAME: &str = "memory";
 /// Every capability the memory store has.
 const FULL: Capabilities = Capabilities {
     producer_state: true,
-    conditional: ConditionForms {
-        tail: false,
-        fence: false,
-    },
     kept_last: true,
     holds: false,
     change_feed: false,
