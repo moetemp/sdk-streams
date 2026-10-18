@@ -6,7 +6,8 @@
 //! already observed, so it costs no round trip and every store reports a retry the same way.
 
 use crate::{
-    BEGINNING, END, StreamError, StreamResult, StreamStore, cursor_position, mint_cursor,
+    BEGINNING, END, STREAM_RETRY_BITS, StreamError, StreamResult, StreamStore, cursor_position,
+    mint_cursor,
     proto::{
         ChainId, ReadRecord, ReadRequest, ReadResponse, StoreLatestRequest, StoreReadRequest,
         StoreReadResponse, StoredRecord, StreamRecord, StreamRecordKind, Supersession, read_record,
@@ -14,10 +15,6 @@ use crate::{
 };
 use prost::Message;
 use std::{collections::HashMap, time::Duration};
-
-/// The low bits of a Workflow producer's attempt, which count the reruns of one task. The high
-/// bits name the last task that completed before it.
-const WORKFLOW_RETRY_BITS: u32 = 16;
 
 /// Whether `record` withdraws what its producer's `previous` attempt wrote. `started` is the
 /// WorkflowTaskStarted event id that `previous` carried.
@@ -31,8 +28,8 @@ fn supersedes(previous: i64, started: i64, record: &StreamRecord) -> bool {
     if !record.producer_id.starts_with('@') {
         return true;
     }
-    let prefix = previous >> WORKFLOW_RETRY_BITS;
-    if prefix == record.attempt >> WORKFLOW_RETRY_BITS {
+    let prefix = previous >> STREAM_RETRY_BITS;
+    if prefix == record.attempt >> STREAM_RETRY_BITS {
         return true;
     }
     let completed = &record.completed_tasks;
@@ -1071,6 +1068,22 @@ mod tests {
                 .map(|indexes| indexes.iter().map(|i| i.as_u64().unwrap()).collect())
                 .unwrap_or_default();
             assert_eq!(stale, expected_stale, "{label}");
+            let mut superseded = vec![];
+            for pair in page.records.windows(2) {
+                if let (
+                    Some(read_record::Record::Superseded(_)),
+                    Some(read_record::Record::Stored(next)),
+                ) = (&pair[0].record, &pair[1].record)
+                {
+                    let index = String::from_utf8(next.body.clone().unwrap().data);
+                    superseded.push(index.unwrap().parse::<u64>().unwrap());
+                }
+            }
+            let expected_superseded: Vec<u64> = case["superseded"]
+                .as_array()
+                .map(|indexes| indexes.iter().map(|i| i.as_u64().unwrap()).collect())
+                .unwrap_or_default();
+            assert_eq!(superseded, expected_superseded, "{label}");
         }
     }
 
@@ -1202,7 +1215,7 @@ mod tests {
     #[test]
     fn a_workflow_producer_withdraws_an_attempt_whose_task_never_completed() {
         let vectors = vectors();
-        assert_eq!(vectors["retry_bits"], WORKFLOW_RETRY_BITS);
+        assert_eq!(vectors["retry_bits"], STREAM_RETRY_BITS);
         let written = |written: &serde_json::Value| StreamRecord {
             task_started_event_id: written["task_started_event_id"].as_i64().unwrap(),
             completed_tasks: written["completed_tasks"]
@@ -1225,7 +1238,7 @@ mod tests {
         for case in vectors["attempts"].as_array().unwrap() {
             let attempt = case["attempt"].as_i64().unwrap();
             assert_eq!(
-                attempt >> WORKFLOW_RETRY_BITS,
+                attempt >> STREAM_RETRY_BITS,
                 case["prefix"].as_i64().unwrap()
             );
         }

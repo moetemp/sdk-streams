@@ -21,6 +21,10 @@ mod reader;
 mod record;
 #[cfg(feature = "redis")]
 mod redis;
+#[cfg(all(test, feature = "redis"))]
+mod server {
+    include!("../tests/support/server.rs");
+}
 mod service;
 mod store;
 mod workflow;
@@ -46,8 +50,8 @@ pub use record::{
     workflow_producer_id,
 };
 pub use service::StreamService;
-pub use store::{Capabilities, ConditionForms, MAX_BATCH_BYTES, MAX_RECORD_BYTES, StreamStore};
-pub use workflow::{MAX_APPEND_BYTES, STREAM_COMPLETED_TASKS, STREAM_RETRY_BITS, stream_attempt};
+pub use store::{Capabilities, MAX_BATCH_BYTES, MAX_RECORD_BYTES, StreamStore};
+pub use workflow::{STREAM_COMPLETED_TASKS, STREAM_RETRY_BITS, stream_attempt};
 
 /// The protos stores and lang exchange.
 pub mod proto {
