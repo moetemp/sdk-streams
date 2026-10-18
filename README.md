@@ -14,7 +14,7 @@ the crate.
 
 | Stage | sdk-streams branch | sdk-rust commit |
 |---|---|---|
-| Brook | `moe/brook/ss1-import-store` and up | `moe/brook/k1-workflow-task-info` `4ebdacab` |
+| Brook | `moe/brook/ss1-import-store` and up | `moe/brook/k1-workflow-task-info` `5dd6f0ec` |
 | Jetty | `moe/jetty/sj1-import-jetty` and up | `moe/jetty/kj5-early-task-heartbeat` `4c05def9` |
 
 ## Linking from a lang bridge
