@@ -1962,6 +1962,81 @@ mod tests {
         assert!(state.withdrawn.is_empty());
     }
 
+    #[test]
+    fn a_source_under_a_descendant_that_stays_ended_stays_ended_too() {
+        // The child, mid and leaf pause together. Mid is open again, so it stays ended, and the
+        // leaf, which paused with mid, stays ended with it.
+        let mut state = new_state();
+        let mut items = run_items(
+            &mut state,
+            vec![
+                (0, page(vec![by("act", 1, open("r", 1, "b", "child"))])),
+                (1, page(vec![open("t", 1, "m", "mid")])),
+                (2, page(vec![open("m", 1, "l", "leaf")])),
+                (3, page(vec![data("l", 1)])),
+                (0, page(vec![superseded("r", 1, "act", 1, 2)])),
+            ],
+        );
+        assert_eq!(withdrawn(&state), [1, 2, 3]);
+        items.extend(run_items(
+            &mut state,
+            vec![
+                (0, page(vec![by("other", 1, open("r", 2, "x", "mid"))])),
+                (0, page(vec![by("act", 2, open("r", 3, "b", "child"))])),
+            ],
+        ));
+        each_record_once(&items);
+        let items = shape(&items);
+        assert_eq!(
+            items[items.len() - 4..],
+            ["0:2", "4:OPENED", "0:3", "1:OPENED:resumed"]
+        );
+        assert_eq!(state.readable(), [0, 4, 1]);
+        assert!(state.withdrawn.is_empty());
+    }
+
+    #[test]
+    fn a_descendant_past_max_open_takes_the_entries_under_it() {
+        // The leaf was withdrawn by its own producer before the child paused. Mid doesn't fit
+        // when the child resumes, so mid stays ended, and the leaf's entry goes with it.
+        let mut state = FollowState::new(root(), "", 0, 3);
+        run(
+            &mut state,
+            vec![
+                (0, page(vec![by("act", 1, open("r", 1, "b", "child"))])),
+                (1, page(vec![open("t", 1, "m", "mid")])),
+                (2, page(vec![by("q", 1, open("m", 1, "l", "leaf"))])),
+                (2, page(vec![superseded("m", 1, "q", 1, 2)])),
+                (0, page(vec![superseded("r", 1, "act", 1, 2)])),
+            ],
+        );
+        assert_eq!(withdrawn(&state), [3, 1, 2]);
+        let items = run(
+            &mut state,
+            vec![
+                (0, page(vec![by("other", 1, open("r", 2, "x", "x"))])),
+                (0, page(vec![by("other", 1, open("r", 3, "y", "y"))])),
+                (0, page(vec![by("act", 2, open("r", 4, "b", "child"))])),
+            ],
+        );
+        assert_eq!(
+            items,
+            [
+                "0:2",
+                "4:OPENED",
+                "0:3",
+                "5:OPENED",
+                "0:4",
+                "1:OPENED:resumed"
+            ]
+        );
+        assert_eq!(state.readable(), [0, 4, 5, 1]);
+        assert!(
+            state.withdrawn.is_empty(),
+            "no entry is left that nothing can resume"
+        );
+    }
+
     fn stale(mut record: ReadRecord) -> ReadRecord {
         record.stale = true;
         record
