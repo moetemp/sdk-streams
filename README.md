@@ -21,6 +21,13 @@ it can't read is unavailable, and the follow goes on without it.
 A follow reads a stale LINK as a plain record. An older attempt wrote it after the read gave a
 newer attempt, so it opens and joins nothing.
 
+An attempt owns the OPENs it writes. A SUPERSEDED ends each segment that the withdrawn attempt
+opened, with DONE and reason `withdrawn`. The same OPEN from a later attempt of that producer, with
+the same name, stream and `after`, resumes the segment at its cursor, with OPENED and reason
+`resumed`. So a retry that writes the same OPEN again shows each linked record once. Another OPEN
+of the name opens the stream from its `after`. A withdrawn JOIN stays in effect, since its segment
+ended before the SUPERSEDED.
+
 ## Stage pins
 
 The crate depends on `temporalio-common` and `temporalio-client` from one sdk-rust commit per
