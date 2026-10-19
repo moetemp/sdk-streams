@@ -42,3 +42,5 @@
   and a batch with no link keeps its digest.
 - Added `Follow`, which reads a stream and the streams it links in one order and resumes from its
   `state`, and `ReadResponse.start_cursor`.
+- A follow reads a stale LINK as a plain record. It opens and joins nothing, so a late OPEN from an
+  older attempt can't open a segment again after its JOIN.
