@@ -1116,6 +1116,47 @@ mod cases {
             .await;
     }
 
+    pub(crate) async fn a_link_record_reads_back_with_its_link(case: &dyn Case) {
+        use temporalio_streams::protos::temporal::api::{
+            enums::v1::StreamOwnerKind as Kind, stream::v1::StreamReference,
+        };
+        let chain = case.chain();
+        let open = StreamLink {
+            event: stream_link::Event::Open as i32,
+            stream: Some(StreamReference {
+                owner_kind: Kind::Workflow as i32,
+                workflow_id: "child".to_string(),
+                topic: OUT.to_string(),
+                ..Default::default()
+            }),
+            name: "sub-3".to_string(),
+            after: "a cursor".to_string(),
+            ..Default::default()
+        };
+        let join = StreamLink {
+            event: stream_link::Event::Join as i32,
+            name: "sub-3".to_string(),
+            ..Default::default()
+        };
+        let link = |link: &StreamLink| AppendRecord {
+            kind: StreamRecordKind::Link as i32,
+            link: Some(link.clone()),
+            ..Default::default()
+        };
+        let mut producer = Producer::new(case, &chain, OUT, "p", 1);
+        producer
+            .send(&[data("1"), link(&open), data("2"), link(&join)])
+            .await
+            .unwrap();
+        let page = read(case, &chain, OUT, BEGINNING).await.unwrap();
+        let kinds: Vec<_> = page.records.iter().map(|r| stored(r).kind).collect();
+        let (data_kind, link_kind) = (StreamRecordKind::Data as i32, StreamRecordKind::Link as i32);
+        assert_eq!(kinds, [data_kind, link_kind, data_kind, link_kind]);
+        assert_eq!(stored(&page.records[1]).link, Some(open));
+        assert_eq!(stored(&page.records[3]).link, Some(join));
+        assert_eq!(stored(&page.records[2]).link, None);
+    }
+
     pub(crate) async fn a_closed_topic_answers_a_repeat_and_ends_reads(case: &dyn Case) {
         let chain = case.chain();
         let landed = Producer::new(case, &chain, OUT, "p", 1)
@@ -1390,6 +1431,7 @@ mod memory {
         a_read_resumed_before_a_new_attempt_reports_it,
         a_record_that_does_not_parse_fails_with_its_cursor,
         finish_is_a_record_of_its_own,
+        a_link_record_reads_back_with_its_link,
         topics_and_chains_are_apart,
         a_cursor_from_another_stream_or_store_is_refused,
         a_closed_chain_refuses_new_batches_but_answers_a_repeat,
@@ -1435,6 +1477,7 @@ macro_rules! redis_cases {
             a_read_resumed_before_a_new_attempt_reports_it,
             a_record_that_does_not_parse_fails_with_its_cursor,
             finish_is_a_record_of_its_own,
+            a_link_record_reads_back_with_its_link,
             topics_and_chains_are_apart,
             a_cursor_from_another_stream_or_store_is_refused,
             a_closed_chain_refuses_new_batches_but_answers_a_repeat,
@@ -1518,6 +1561,7 @@ macro_rules! required {
             a_read_resumed_before_a_new_attempt_reports_it,
             a_record_that_does_not_parse_fails_with_its_cursor,
             finish_is_a_record_of_its_own,
+            a_link_record_reads_back_with_its_link,
             topics_and_chains_are_apart,
             a_cursor_from_another_stream_or_store_is_refused,
             the_declared_capabilities_match_the_calls,

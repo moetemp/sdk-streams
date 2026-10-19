@@ -1518,3 +1518,62 @@ async fn an_accepted_terminal_completion_closes_the_chain() {
     assert_eq!(store.calls(), ["append", "list_topics", "close_chain"]);
     assert_eq!(owner.asked.lock().len(), 1);
 }
+
+#[tokio::test]
+async fn a_publish_with_a_link_lands_before_the_completion() {
+    use temporalio_streams::{
+        proto::{StreamLink, StreamRecord, stream_link},
+        protos::temporal::api::{enums::v1::StreamOwnerKind as Kind, stream::v1::StreamReference},
+    };
+    let store = Arc::new(RecordingStore::default());
+    let appended_at_completion: Arc<Mutex<Vec<usize>>> = Default::default();
+    let lang = lang_appending_to(
+        timer_history(),
+        vec![1.into(), 2.into()],
+        &store,
+        appended_at_completion.clone(),
+    );
+    let link = StreamLink {
+        event: stream_link::Event::Open as i32,
+        stream: Some(StreamReference {
+            owner_kind: Kind::Workflow as i32,
+            workflow_id: format!("{WORKFLOW_ID}-child"),
+            topic: "turn_events".to_string(),
+            ..Default::default()
+        }),
+        name: "child#1".to_string(),
+        ..Default::default()
+    };
+    let mut committed = records(&["a"]);
+    committed.push(OutputRecord {
+        topic: TOPIC.to_string(),
+        kind: StreamRecordKind::Link as i32,
+        link: Some(link.clone()),
+        ..Default::default()
+    });
+    let activation = lang.poll().await;
+    lang.complete(
+        &activation,
+        committed.clone(),
+        vec![start_timer_cmd(1, Duration::from_secs(10))],
+    )
+    .await;
+    let fired = lang.poll().await;
+    lang.complete(&fired, vec![], vec![complete_workflow()])
+        .await;
+    lang.shutdown().await;
+    assert_eq!(appended_at_completion.lock()[0], 1);
+    let [append] = store.appends().try_into().unwrap();
+    assert_eq!(
+        append.digest,
+        temporalio_streams::workflow_batch_digest(
+            TOPIC,
+            committed
+                .iter()
+                .map(|r| (r.kind, r.content_hash.as_slice(), r.link.as_ref()))
+        )
+    );
+    let stored = StreamRecord::decode(append.records[1].as_slice()).unwrap();
+    assert_eq!(stored.kind, StreamRecordKind::Link as i32);
+    assert_eq!(stored.link, Some(link));
+}
