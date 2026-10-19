@@ -6,6 +6,19 @@ Experimental. Not supported. The repo moves to `temporalio/sdk-streams` once the
 publishes records to a stream in a store it configures, and readers follow the stream. The SDKs
 link this crate through their bridges. Temporal Core holds no stream code.
 
+## Links
+
+A producer writes a LINK record to name another stream. An OPEN says that a follower reads the
+linked stream after the OPEN, from the link's `after`. A JOIN with the same name says that the
+linked stream's segment ends at `until`, or at the stream's end when `until` is empty. `Follow`
+reads a stream and the streams it links in one order. Order within each stream is kept, a linked
+stream's records come after its OPEN, and the records after a JOIN come after the segment ended.
+The answer's `state` resumes the follow, so a client or an Activity loses nothing and repeats
+nothing. A link names a Workflow's stream in the same namespace. A follow reads links 4 deep and
+16 open at once by default, and it skips a link past a limit, a link back to an open stream and a
+link to another endpoint. A linked stream it can't read is unavailable, and the follow goes on
+without it.
+
 ## Stage pins
 
 The crate depends on `temporalio-common` and `temporalio-client` from one sdk-rust commit per
@@ -44,7 +57,9 @@ build takes `fips` with no default features. It turns on `tls-aws-lc` and the FI
 The build needs `protoc`. The crate generates `coresdk.streams` and `temporal.sdk.streams.v1` from
 `crates/streams/protos`. The Temporal API protos under `protos/api_include` are a copy for imports
 only. `scripts/sync-api-protos.sh` refreshes the copy from the pinned sdk-rust commit, and CI fails
-when the copy differs.
+when the copy differs. `protos/api_stream` holds the two stream API types a link names,
+`StreamReference` and `StreamOwnerKind`, which sdk-rust does not vendor. The crate generates them
+itself.
 
 - Format and lint: `cargo fmt --all -- --check`, then
   `cargo clippy --workspace --all-features --tests -- -D warnings`.

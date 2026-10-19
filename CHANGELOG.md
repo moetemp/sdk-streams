@@ -16,3 +16,8 @@
 - Read the run's History tail for the chain close, not its description. The close event must match
   the terminal command, and the task before it must be the completed one.
 - Added the Core mock tests of the Workflow publish, including the four chain-close contract cases.
+- Added LINK records. `AppendRecord.link` and `OutputRecord.link` carry a `StreamLink` that names a
+  Workflow's stream with the stream API's `StreamReference`. The batch digest takes each link field,
+  and a batch with no link keeps its digest.
+- Added `Follow`, which reads a stream and the streams it links in one order and resumes from its
+  `state`, and `ReadResponse.start_cursor`.
