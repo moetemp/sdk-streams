@@ -643,4 +643,67 @@ mod tests {
         moved.after = "2".to_string();
         assert_ne!(digest(&moved), base);
     }
+
+    #[test]
+    fn the_batch_digests_match_the_shared_vectors() {
+        let vectors: serde_json::Value =
+            serde_json::from_str(include_str!("../testdata/workflow_attempts.json")).unwrap();
+        let cases = vectors["batch_digests"].as_array().unwrap();
+        assert!(!cases.is_empty());
+        let hex = |value: &serde_json::Value| -> Vec<u8> {
+            let text = value.as_str().unwrap_or("");
+            (0..text.len())
+                .step_by(2)
+                .map(|i| u8::from_str_radix(&text[i..i + 2], 16).unwrap())
+                .collect()
+        };
+        for case in cases {
+            let records: Vec<(i32, Vec<u8>, Option<StreamLink>)> = case["records"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .map(|record| {
+                    let link = record.get("link").map(|link| {
+                        let text = |field: &str| link[field].as_str().unwrap_or("").to_string();
+                        let stream = link.get("stream").map(|stream| {
+                            let text =
+                                |field: &str| stream[field].as_str().unwrap_or("").to_string();
+                            crate::protos::temporal::api::stream::v1::StreamReference {
+                                owner_kind: stream["owner_kind"].as_i64().unwrap() as i32,
+                                workflow_id: text("workflow_id"),
+                                run_id: text("run_id"),
+                                topic: text("topic"),
+                                activity_id: text("activity_id"),
+                            }
+                        });
+                        StreamLink {
+                            event: link["event"].as_i64().unwrap() as i32,
+                            stream,
+                            name: text("name"),
+                            after: text("after"),
+                            until: text("until"),
+                            namespace: text("namespace"),
+                            endpoint: text("endpoint"),
+                        }
+                    });
+                    (
+                        record["kind"].as_i64().unwrap() as i32,
+                        hex(&record["content_hash"]),
+                        link,
+                    )
+                })
+                .collect();
+            let digest = workflow_batch_digest(
+                case["topic"].as_str().unwrap(),
+                records
+                    .iter()
+                    .map(|(kind, hash, link)| (*kind, hash.as_slice(), link.as_ref())),
+            );
+            assert_eq!(
+                content_hash_text(&digest),
+                case["digest"].as_str().unwrap(),
+                "{case}"
+            );
+        }
+    }
 }
