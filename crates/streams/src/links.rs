@@ -565,43 +565,49 @@ impl FollowState {
         }) else {
             return false;
         };
-        // The entry comes back with each source that ended with it, or not at all. A resume of
-        // part of the group could leave a source that waits on a JOIN of a source that is gone.
-        let mut group = vec![self.withdrawn[at].number];
-        let mut next = 0;
-        while next < group.len() {
-            let parent = group[next];
-            next += 1;
-            group.extend(
-                self.withdrawn
-                    .iter()
-                    .filter(|entry| entry.with_ancestor && entry.parent == parent)
-                    .map(|entry| entry.number),
-            );
-        }
-        let open_again = self.withdrawn.iter().any(|entry| {
-            group.contains(&entry.number)
-                && self.sources.iter().any(|source| {
-                    source.stream.as_ref().map(stream_key) == entry.stream.as_ref().map(stream_key)
-                })
-        });
-        if open_again || self.sources.len() + group.len() - 1 > self.max_open as usize {
+        // A top entry that can't come back takes the usual path. That gives `SKIPPED` with `open`
+        // or `limit`, so nothing reads the segment again from `after`.
+        let is_open = |sources: &[SourceState], entry: &SourceState| {
+            sources.iter().any(|source| {
+                source.stream.as_ref().map(stream_key) == entry.stream.as_ref().map(stream_key)
+            })
+        };
+        if is_open(&self.sources, &self.withdrawn[at])
+            || self.sources.len() > self.max_open as usize
+        {
             return false;
         }
-        for &source in &group {
-            let at = self
-                .withdrawn
-                .iter()
-                .position(|entry| entry.number == source)
-                .expect("the group is withdrawn");
+        let mut entry = self.withdrawn.remove(at);
+        entry.attempt = writer.1;
+        let mut resumed = vec![entry.number];
+        self.sources.push(entry);
+        // Each source that ended with the entry comes back, oldest first, while it fits and its
+        // Stream is not open again. One that can't stays ended, with every source it opened, and
+        // the JOIN its parent waits on for it goes out, so the follow can still end.
+        let mut ended: Vec<(u32, u32)> = vec![];
+        let mut gone: Vec<u32> = vec![];
+        loop {
+            let Some(at) = self.withdrawn.iter().position(|entry| {
+                entry.with_ancestor
+                    && (resumed.contains(&entry.parent) || gone.contains(&entry.parent))
+            }) else {
+                break;
+            };
             let mut entry = self.withdrawn.remove(at);
-            entry.with_ancestor = false;
-            if source == group[0] {
-                entry.attempt = writer.1;
+            if gone.contains(&entry.parent)
+                || is_open(&self.sources, &entry)
+                || self.sources.len() > self.max_open as usize
+            {
+                if !gone.contains(&entry.parent) {
+                    ended.push((entry.parent, entry.number));
+                }
+                gone.push(entry.number);
+                continue;
             }
+            entry.with_ancestor = false;
+            resumed.push(entry.number);
             self.sources.push(entry);
         }
-        let resumed = group;
         for source in resumed {
             self.note(source, applied);
             let link = self.source(source).and_then(|source| source.link.clone());
@@ -614,6 +620,9 @@ impl FollowState {
                     ..Default::default()
                 },
             ));
+        }
+        for (parent, child) in ended {
+            self.release(parent, child, applied);
         }
         true
     }
@@ -1703,39 +1712,123 @@ mod tests {
         );
     }
 
-    #[test]
-    fn a_resume_whose_descendant_stream_is_open_again_does_not_resume() {
-        let mut state = new_state();
-        let items = run(
-            &mut state,
+    /// Asserts that no stored Record of a source shows twice in `items`.
+    fn each_record_once(items: &[String]) {
+        let records: Vec<&String> = items
+            .iter()
+            .filter(|item| {
+                item.split(':')
+                    .nth(1)
+                    .is_some_and(|at| at.parse::<u64>().is_ok())
+            })
+            .collect();
+        let mut unique = records.clone();
+        unique.sort();
+        unique.dedup();
+        assert_eq!(
+            unique.len(),
+            records.len(),
+            "a Record shows twice in {items:?}"
+        );
+    }
+
+    /// The root opens the child as attempt 1 of `act`, the child opens the grandchild, each
+    /// reads a Record, and a SUPERSEDED pauses both.
+    fn paused_child_and_grandchild(state: &mut FollowState, join_grandchild: bool) -> Vec<String> {
+        let mut child_page = vec![open("t", 1, "g", "grandchild")];
+        if join_grandchild {
+            child_page.push(join("t", 2, "g", ""));
+        } else {
+            child_page.push(data("t", 2));
+        }
+        run(
+            state,
             vec![
                 (0, page(vec![by("act", 1, open("r", 1, "b", "child"))])),
-                (1, page(vec![open("t", 1, "g", "grandchild")])),
+                (1, page(child_page)),
+                (2, page(vec![data("g", 1)])),
                 (0, page(vec![superseded("r", 1, "act", 1, 2)])),
+            ],
+        )
+    }
+
+    #[test]
+    fn a_descendant_whose_stream_is_open_again_stays_ended() {
+        let mut state = new_state();
+        let mut items = paused_child_and_grandchild(&mut state, false);
+        items.extend(run(
+            &mut state,
+            vec![
                 (
                     0,
                     page(vec![by("other", 1, open("r", 2, "x", "grandchild"))]),
                 ),
+                (3, page(vec![data("g", 2)])),
                 (0, page(vec![by("act", 2, open("r", 3, "b", "child"))])),
+                (1, page(vec![data("t", 3)])),
             ],
-        );
-        // The grandchild is open again as source 3, so the child does not come back with it.
-        // The OPEN opens the child from `after` as a new source.
+        ));
         assert_eq!(
-            items[items.len() - 4..],
-            ["0:2", "3:OPENED", "0:3", "4:OPENED"]
+            items[items.len() - 6..],
+            ["0:2", "3:OPENED", "3:2", "0:3", "1:OPENED:resumed", "1:3"],
         );
-        assert_eq!(state.readable(), [0, 3, 4]);
+        assert_eq!(
+            state.readable(),
+            [0, 3, 1],
+            "the grandchild is read once, as source 3"
+        );
         assert!(state.withdrawn.is_empty());
+        each_record_once(&items);
     }
 
     #[test]
-    fn a_resume_past_max_open_does_not_resume() {
+    fn a_descendant_that_stays_ended_lets_its_parent_go_on_past_the_join() {
+        let mut state = new_state();
+        let mut items = paused_child_and_grandchild(&mut state, true);
+        items.extend(run(
+            &mut state,
+            vec![
+                (
+                    0,
+                    page(vec![by("other", 1, open("r", 2, "x", "grandchild"))]),
+                ),
+                (
+                    0,
+                    done(page(vec![by("act", 2, open("r", 3, "b", "child"))])),
+                ),
+                (1, done(page(vec![data("t", 3)]))),
+                (3, done(page(vec![data("g", 2)]))),
+            ],
+        ));
+        assert_eq!(
+            items[items.len() - 9..],
+            [
+                "0:2",
+                "3:OPENED",
+                "0:3",
+                "1:OPENED:resumed",
+                "1:2",
+                "1:3",
+                "1:DONE",
+                "3:2",
+                "3:DONE",
+            ]
+        );
+        assert!(
+            state.done(),
+            "the child got its JOIN back, so the follow ends"
+        );
+        each_record_once(&items);
+    }
+
+    #[test]
+    fn a_resume_past_max_open_is_skipped_and_reads_nothing_again() {
         let mut state = FollowState::new(root(), "", 0, 1);
         let items = run(
             &mut state,
             vec![
                 (0, page(vec![by("act", 1, open("r", 1, "b", "child"))])),
+                (1, page(vec![data("t", 1)])),
                 (0, page(vec![superseded("r", 1, "act", 1, 2)])),
                 (0, page(vec![by("other", 1, open("r", 2, "c", "x"))])),
                 (0, page(vec![by("act", 2, open("r", 3, "b", "child"))])),
@@ -1746,6 +1839,7 @@ mod tests {
             [
                 "0:1",
                 "1:OPENED",
+                "1:1",
                 "0:SUPERSEDED",
                 "1:DONE:withdrawn",
                 "0:2",
@@ -1756,6 +1850,28 @@ mod tests {
         );
         assert_eq!(state.readable(), [0, 2]);
         assert!(state.withdrawn.is_empty());
+        each_record_once(&items);
+    }
+
+    #[test]
+    fn a_descendant_past_max_open_stays_ended() {
+        let mut state = FollowState::new(root(), "", 0, 2);
+        let mut items = paused_child_and_grandchild(&mut state, false);
+        items.extend(run(
+            &mut state,
+            vec![
+                (0, page(vec![by("other", 1, open("r", 2, "c", "x"))])),
+                (0, page(vec![by("act", 2, open("r", 3, "b", "child"))])),
+                (1, page(vec![data("t", 3)])),
+            ],
+        ));
+        assert_eq!(
+            items[items.len() - 5..],
+            ["0:2", "3:OPENED", "0:3", "1:OPENED:resumed", "1:3"]
+        );
+        assert_eq!(state.readable(), [0, 3, 1]);
+        assert!(state.withdrawn.is_empty());
+        each_record_once(&items);
     }
 
     fn stale(mut record: ReadRecord) -> ReadRecord {
