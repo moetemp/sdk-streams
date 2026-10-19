@@ -286,7 +286,11 @@ fn shape(calls: &[(Vec<u8>, FollowResponse)]) -> Vec<String> {
                     .unwrap()
                     .as_str_name();
                 let name = state.link.as_ref().map(|l| l.name.as_str()).unwrap_or("");
-                format!("{kind}:{name}")
+                if state.reason.is_empty() {
+                    format!("{kind}:{name}")
+                } else {
+                    format!("{kind}:{name}:{}", state.reason)
+                }
             }
             None => "none".to_string(),
         })
@@ -584,6 +588,101 @@ async fn a_stale_open_after_the_join_opens_nothing(streams: Option<Streams>) {
     );
     // A follower that resumes after each record gets the same order.
     assert_eq!(shape(&streams.follow_to_end(1).await), order);
+}
+
+/// Activity attempt 1 sends `m1` and opens the child. Attempt 2 sends `m2` and writes the same
+/// OPEN again, and the Workflow joins the child at its third record.
+async fn an_activity_retry_that_writes_the_same_open_resumes_the_segment(streams: Option<Streams>) {
+    let Some(streams) = streams else { return };
+    use stream_link::Event::{Join, Open};
+    let (agent, child) = (streams.agent_stream(), streams.child_stream());
+    streams
+        .append(
+            &child,
+            1,
+            vec![data("c1"), data("c2"), data("c3"), data("c4")],
+        )
+        .await;
+    let mut join = link(Join, None, "b");
+    join.link.as_mut().unwrap().until = streams.cursor_at(&child, 3).await;
+    streams
+        .append_as(
+            &agent,
+            "act",
+            1,
+            vec![data("m1"), link(Open, Some(&child), "b")],
+        )
+        .await;
+    streams
+        .append_as(
+            &agent,
+            "act",
+            2,
+            vec![data("m2"), link(Open, Some(&child), "b")],
+        )
+        .await;
+    streams
+        .append_as(&agent, "wf", 1, vec![join, data("r")])
+        .await;
+    streams.close(&agent, "done").await;
+    let order = shape(&streams.follow_to_end(100).await);
+    assert_eq!(
+        order,
+        [
+            "m1",
+            "EVENT_OPEN:b",
+            "KIND_OPENED:b",
+            "SUPERSEDED",
+            "KIND_DONE:b:withdrawn",
+            "m2",
+            "EVENT_OPEN:b",
+            "KIND_OPENED:b:resumed",
+            "c1",
+            "c2",
+            "c3",
+            "KIND_DONE:b",
+            "EVENT_JOIN:b",
+            "r",
+        ]
+    );
+    // A follower that resumes after each record reads the child between the two OPENs, and it
+    // still shows each child record once.
+    let one_by_one = shape(&streams.follow_to_end(1).await);
+    for record in ["c1", "c2", "c3"] {
+        let count = one_by_one.iter().filter(|item| *item == record).count();
+        assert_eq!(count, 1, "{record} in {one_by_one:?}");
+    }
+    assert!(!one_by_one.contains(&"c4".to_string()));
+    let pause = one_by_one
+        .iter()
+        .position(|item| item == "KIND_DONE:b:withdrawn");
+    let resume = one_by_one
+        .iter()
+        .position(|item| item == "KIND_OPENED:b:resumed");
+    assert!(pause < resume && pause.is_some(), "{one_by_one:?}");
+}
+
+#[tokio::test]
+async fn memory_an_activity_retry_that_writes_the_same_open_resumes_the_segment() {
+    an_activity_retry_that_writes_the_same_open_resumes_the_segment(on_memory().await).await;
+}
+
+#[cfg(feature = "redis")]
+#[tokio::test]
+async fn standalone_redis_an_activity_retry_that_writes_the_same_open_resumes_the_segment() {
+    an_activity_retry_that_writes_the_same_open_resumes_the_segment(
+        on_redis("STREAMS_REDIS_URL", false).await,
+    )
+    .await;
+}
+
+#[cfg(feature = "redis")]
+#[tokio::test]
+async fn cluster_redis_an_activity_retry_that_writes_the_same_open_resumes_the_segment() {
+    an_activity_retry_that_writes_the_same_open_resumes_the_segment(
+        on_redis("STREAMS_REDIS_CLUSTER_URL", true).await,
+    )
+    .await;
 }
 
 #[tokio::test]
