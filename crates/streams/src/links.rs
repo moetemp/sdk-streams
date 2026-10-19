@@ -497,10 +497,14 @@ impl FollowState {
         for child in children {
             self.pause(child, false, applied);
         }
-        // A dropped entry makes a later OPEN read its segment from `after` again.
+        // A dropped entry makes a later OPEN read its segment from `after` again. The sources
+        // that ended with an entry go with it, since a resumed source can wait on a JOIN of one.
         while self.withdrawn.len() > self.max_open as usize {
-            let oldest = self.withdrawn.remove(0).number;
-            self.forget(|entry| entry.parent == oldest);
+            let Some(oldest) = self.withdrawn.iter().find(|entry| !entry.with_ancestor) else {
+                break;
+            };
+            let oldest = oldest.number;
+            self.forget(|entry| entry.number == oldest);
         }
     }
 
@@ -1542,6 +1546,56 @@ mod tests {
             ["0:2", "1:OPENED:resumed", "2:OPENED:resumed", "2:2"]
         );
         assert_eq!(state.readable(), [0, 1, 2]);
+    }
+
+    #[test]
+    fn a_dropped_entry_takes_the_sources_that_ended_with_it() {
+        // The child waits on a JOIN of the grandchild when it pauses. The list drops the child
+        // and the grandchild together, so no resumed source waits on a source that is gone.
+        let mut state = FollowState::new(root(), "", 0, 2);
+        let items = run(
+            &mut state,
+            vec![
+                (0, page(vec![by("act", 1, open("r", 1, "b", "child"))])),
+                (
+                    1,
+                    page(vec![open("t", 1, "g", "grandchild"), join("t", 2, "g", "")]),
+                ),
+                (0, page(vec![superseded("r", 1, "act", 1, 2)])),
+                (0, page(vec![by("other", 1, open("r", 2, "c", "x"))])),
+                (0, page(vec![superseded("r", 2, "other", 1, 2)])),
+            ],
+        );
+        assert_eq!(
+            items,
+            [
+                "0:1",
+                "1:OPENED",
+                "1:1",
+                "2:OPENED",
+                "0:SUPERSEDED",
+                "2:DONE:withdrawn",
+                "1:DONE:withdrawn",
+                "0:2",
+                "3:OPENED",
+                "0:SUPERSEDED",
+                "3:DONE:withdrawn",
+            ]
+        );
+        assert_eq!(
+            state
+                .withdrawn
+                .iter()
+                .map(|entry| entry.number)
+                .collect::<Vec<_>>(),
+            [3]
+        );
+        let items = run(
+            &mut state,
+            vec![(0, page(vec![by("act", 2, open("r", 3, "b", "child"))]))],
+        );
+        assert_eq!(items, ["0:3", "4:OPENED"]);
+        assert_eq!(state.readable(), [0, 4]);
     }
 
     #[test]
