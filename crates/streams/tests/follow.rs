@@ -140,6 +140,48 @@ impl Streams {
             .await;
     }
 
+    /// Appends one batch as attempt `attempt` of producer `producer`.
+    async fn append_as(
+        &self,
+        stream: &StreamAddress,
+        producer: &str,
+        attempt: i64,
+        records: Vec<AppendRecord>,
+    ) {
+        let _: temporalio_streams::proto::AppendResponse = self
+            .call(
+                "Append",
+                AppendRequest {
+                    stream: Some(stream.clone()),
+                    producer: Some(Producer::Named(NamedProducer {
+                        producer_id: producer.to_string(),
+                        attempt,
+                        ..Default::default()
+                    })),
+                    sequence: 1,
+                    digest: vec![attempt as u8; 32],
+                    records,
+                },
+            )
+            .await;
+    }
+
+    /// The cursor of the `count`th record of `stream`.
+    async fn cursor_at(&self, stream: &StreamAddress, count: u32) -> String {
+        let read: temporalio_streams::proto::ReadResponse = self
+            .call(
+                "Read",
+                temporalio_streams::proto::ReadRequest {
+                    stream: Some(stream.clone()),
+                    max_records: count,
+                    ..Default::default()
+                },
+            )
+            .await;
+        assert_eq!(read.records.len(), count as usize);
+        read.cursor
+    }
+
     async fn close(&self, stream: &StreamAddress, result: &str) {
         let _: temporalio_streams::proto::CloseResponse = self
             .call(
@@ -471,6 +513,95 @@ impl OwnerClient for Missing {
         }
         Running.describe(namespace, owner, run_id).await
     }
+}
+
+/// Activity attempt 2 sends turn 1 and its OPEN, and the Workflow joins turn 1. Then attempt 1's
+/// late append of the same OPEN comes in, and turn 2 opens the same child from turn 1's end.
+async fn a_stale_open_after_the_join_opens_nothing(streams: Option<Streams>) {
+    let Some(streams) = streams else { return };
+    use stream_link::Event::{Join, Open};
+    let (agent, child) = (streams.agent_stream(), streams.child_stream());
+    streams
+        .append(&child, 1, vec![data("t1"), data("t2")])
+        .await;
+    let (end_1, end_2) = (
+        streams.cursor_at(&child, 1).await,
+        streams.cursor_at(&child, 2).await,
+    );
+    let open = |name: &str, after: &str| {
+        let mut open = link(Open, Some(&child), name);
+        open.link.as_mut().unwrap().after = after.to_string();
+        open
+    };
+    let join = |name: &str, until: &str| {
+        let mut join = link(Join, None, name);
+        join.link.as_mut().unwrap().until = until.to_string();
+        join
+    };
+    streams
+        .append_as(&agent, "turn-1", 2, vec![data("m1"), open("h#1", "")])
+        .await;
+    streams
+        .append_as(&agent, "wf", 1, vec![join("h#1", &end_1)])
+        .await;
+    streams
+        .append_as(&agent, "turn-1", 1, vec![data("late"), open("h#1", "")])
+        .await;
+    streams
+        .append_as(&agent, "turn-2", 1, vec![data("m2"), open("h#2", &end_1)])
+        .await;
+    streams
+        .append(&agent, 2, vec![join("h#2", &end_2), data("r2")])
+        .await;
+    streams.close(&agent, "ok").await;
+    let whole = streams.follow_to_end(100).await;
+    let late = whole
+        .iter()
+        .flat_map(|(_, answer)| answer.records.iter())
+        .filter(|item| matches!(&item.item, Some(followed_record::Item::Record(r)) if r.stale))
+        .count();
+    assert_eq!(late, 2, "the late DATA and the late OPEN read as stale");
+    let order = shape(&whole);
+    assert_eq!(
+        order,
+        [
+            "m1",
+            "EVENT_OPEN:h#1",
+            "KIND_OPENED:h#1",
+            "t1",
+            "KIND_DONE:h#1",
+            "EVENT_JOIN:h#1",
+            "late",
+            "EVENT_OPEN:h#1",
+            "m2",
+            "EVENT_OPEN:h#2",
+            "KIND_OPENED:h#2",
+            "t2",
+            "KIND_DONE:h#2",
+            "EVENT_JOIN:h#2",
+            "r2",
+        ]
+    );
+    // A follower that resumes after each record gets the same order.
+    assert_eq!(shape(&streams.follow_to_end(1).await), order);
+}
+
+#[tokio::test]
+async fn memory_a_stale_open_after_the_join_opens_nothing() {
+    a_stale_open_after_the_join_opens_nothing(on_memory().await).await;
+}
+
+#[cfg(feature = "redis")]
+#[tokio::test]
+async fn standalone_redis_a_stale_open_after_the_join_opens_nothing() {
+    a_stale_open_after_the_join_opens_nothing(on_redis("STREAMS_REDIS_URL", false).await).await;
+}
+
+#[cfg(feature = "redis")]
+#[tokio::test]
+async fn cluster_redis_a_stale_open_after_the_join_opens_nothing() {
+    a_stale_open_after_the_join_opens_nothing(on_redis("STREAMS_REDIS_CLUSTER_URL", true).await)
+        .await;
 }
 
 #[tokio::test]
