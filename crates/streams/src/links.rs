@@ -11,7 +11,8 @@ use crate::{
     StreamError, StreamResult,
     proto::{
         FollowSource, FollowedRecord, LinkState, ReadRecord, StreamAddress, StreamFailure,
-        StreamLink, StreamRecordKind, followed_record, link_state, read_record, stream_link,
+        StreamLink, StreamRecordKind, Supersession, followed_record, link_state, read_record,
+        stream_link,
     },
 };
 use prost::Message;
@@ -39,6 +40,10 @@ pub(crate) struct FollowState {
     #[prost(bool, tag = "5")]
     root_done: bool,
     // Jetty keeps the root's close outcome in tags 6 and 7, so they stay free.
+    /// Each segment that a `SUPERSEDED` ended, oldest first, so that the same OPEN from a later
+    /// attempt resumes it at its cursor.
+    #[prost(message, repeated, tag = "8")]
+    withdrawn: Vec<SourceState>,
 }
 
 #[derive(Clone, PartialEq, Message)]
@@ -79,6 +84,16 @@ struct SourceState {
     #[prost(bool, tag = "14")]
     done_pending: bool,
     // Jetty keeps the source's close outcome in tags 15 and 16, so they stay free.
+    /// The producer and the attempt that wrote the OPEN. A `SUPERSEDED` of that attempt ends the
+    /// segment.
+    #[prost(string, tag = "17")]
+    producer_id: String,
+    #[prost(int64, tag = "18")]
+    attempt: i64,
+    /// Set on a withdrawn entry that ended because an ancestor's segment was withdrawn. It
+    /// resumes with that ancestor, not by an OPEN of its own.
+    #[prost(bool, tag = "19")]
+    with_ancestor: bool,
 }
 
 /// One read of one source, as the follower got it.
@@ -211,15 +226,22 @@ impl FollowState {
         let mut stopped = false;
         let mut holds = false;
         for record in page.records {
-            let link = match &record.record {
+            let (link, writer) = match &record.record {
                 Some(read_record::Record::Stored(stored)) => {
                     applied.consumed += 1;
                     // A stale LINK comes from an older attempt after the read gave a newer one. It
                     // is not the current answer, so it opens and joins nothing.
-                    stored
+                    let link = stored
                         .link
                         .clone()
-                        .filter(|_| stored.kind == StreamRecordKind::Link as i32 && !record.stale)
+                        .filter(|_| stored.kind == StreamRecordKind::Link as i32 && !record.stale);
+                    (link, (stored.producer_id.clone(), stored.attempt))
+                }
+                Some(read_record::Record::Superseded(superseded)) => {
+                    let superseded = superseded.clone();
+                    push_record(&mut applied, number, record);
+                    self.withdraw(number, &superseded, &mut applied);
+                    continue;
                 }
                 _ => {
                     push_record(&mut applied, number, record);
@@ -236,7 +258,7 @@ impl FollowState {
                 }
                 Some(link) if link.event == stream_link::Event::Open as i32 => {
                     push_record(&mut applied, number, record);
-                    self.open(number, link, &mut applied);
+                    self.open(number, link, writer, &mut applied);
                 }
                 _ => push_record(&mut applied, number, record),
             }
@@ -294,6 +316,7 @@ impl FollowState {
         }
         self.close_descendants(number, &mut applied);
         let source = self.remove(number);
+        self.forget(|entry| entry.parent == number);
         applied.items.push(link_item(
             number,
             LinkState {
@@ -347,8 +370,27 @@ impl FollowState {
         true
     }
 
-    /// Opens the stream an OPEN that source `number` read names, or says why not.
-    fn open(&mut self, number: u32, link: StreamLink, applied: &mut Applied) {
+    /// Opens the stream of an OPEN that source `number` read, or says why not. `writer` is the
+    /// producer and the attempt that wrote the OPEN.
+    fn open(
+        &mut self,
+        number: u32,
+        link: StreamLink,
+        writer: (String, i64),
+        applied: &mut Applied,
+    ) {
+        if self.resume(number, &link, &writer, applied) {
+            return;
+        }
+        // Another OPEN of the name replaces what the withdrawn attempt opened.
+        self.forget(|entry| {
+            entry.parent == number
+                && !entry.with_ancestor
+                && entry
+                    .link
+                    .as_ref()
+                    .is_some_and(|open| open.name == link.name)
+        });
         let holder = self.source(number).expect("the source reads");
         let holder_stream = holder.stream.clone().unwrap_or_default();
         let depth = holder.depth + 1;
@@ -400,6 +442,8 @@ impl FollowState {
             stream: Some(stream),
             cursor: link.after.clone(),
             link: Some(link.clone()),
+            producer_id: writer.0,
+            attempt: writer.1,
             ..Default::default()
         });
         self.note(child, applied);
@@ -422,6 +466,7 @@ impl FollowState {
         }
         self.close_descendants(number, applied);
         let source = self.remove(number);
+        self.forget(|entry| entry.parent == number);
         applied.items.push(link_item(
             number,
             LinkState {
@@ -431,6 +476,152 @@ impl FollowState {
             },
         ));
         self.release(source.parent, number, applied);
+    }
+
+    /// Ends each segment that source `number` opened from the attempt `superseded` withdraws.
+    /// The match is on that one attempt, since the earlier completed tasks of a Workflow producer
+    /// stay valid.
+    fn withdraw(&mut self, number: u32, superseded: &Supersession, applied: &mut Applied) {
+        let children: Vec<u32> = self
+            .sources
+            .iter()
+            .filter(|source| {
+                source.number != 0
+                    && source.parent == number
+                    && !source.producer_id.is_empty()
+                    && source.producer_id == superseded.producer_id
+                    && source.attempt == superseded.previous_attempt
+            })
+            .map(|source| source.number)
+            .collect();
+        for child in children {
+            self.pause(child, false, applied);
+        }
+        // A dropped entry makes a later OPEN read its segment from `after` again.
+        while self.withdrawn.len() > self.max_open as usize {
+            let oldest = self.withdrawn.remove(0).number;
+            self.forget(|entry| entry.parent == oldest);
+        }
+    }
+
+    /// Moves source `number` and every source it opened to the withdrawn list, with `DONE` and
+    /// reason `withdrawn`. Each keeps its cursor and read state.
+    fn pause(&mut self, number: u32, with_ancestor: bool, applied: &mut Applied) {
+        self.note(number, applied);
+        let children: Vec<u32> = self
+            .sources
+            .iter()
+            .filter(|source| source.number != 0 && source.parent == number)
+            .map(|source| source.number)
+            .collect();
+        for child in children {
+            self.pause(child, true, applied);
+        }
+        let mut source = self.remove(number);
+        source.with_ancestor = with_ancestor;
+        applied.items.push(link_item(
+            number,
+            LinkState {
+                kind: link_state::Kind::Done as i32,
+                link: source.link.clone(),
+                reason: "withdrawn".to_string(),
+                ..Default::default()
+            },
+        ));
+        self.withdrawn.push(source);
+    }
+
+    /// Resumes the withdrawn segment that the same OPEN by the same producer opened, with every
+    /// source that ended with it. Answers whether it did.
+    fn resume(
+        &mut self,
+        number: u32,
+        link: &StreamLink,
+        writer: &(String, i64),
+        applied: &mut Applied,
+    ) -> bool {
+        let holder_namespace = self
+            .source(number)
+            .and_then(|holder| holder.stream.as_ref())
+            .map(|stream| stream.namespace.clone())
+            .unwrap_or_default();
+        let key = stream_key(&link_address(link, &holder_namespace));
+        let Some(at) = self.withdrawn.iter().position(|entry| {
+            entry.parent == number
+                && !entry.with_ancestor
+                && !writer.0.is_empty()
+                && entry.producer_id == writer.0
+                && entry.stream.as_ref().map(stream_key) == Some(key.clone())
+                && entry
+                    .link
+                    .as_ref()
+                    .is_some_and(|open| open.name == link.name && open.after == link.after)
+        }) else {
+            return false;
+        };
+        if self
+            .sources
+            .iter()
+            .any(|source| source.stream.as_ref().map(stream_key) == Some(key.clone()))
+        {
+            return false;
+        }
+        let mut entry = self.withdrawn.remove(at);
+        entry.attempt = writer.1;
+        let mut resumed = vec![entry.number];
+        self.sources.push(entry);
+        let mut next = 0;
+        while next < resumed.len() {
+            let parent = resumed[next];
+            next += 1;
+            while let Some(at) = self
+                .withdrawn
+                .iter()
+                .position(|entry| entry.with_ancestor && entry.parent == parent)
+            {
+                let mut entry = self.withdrawn.remove(at);
+                entry.with_ancestor = false;
+                resumed.push(entry.number);
+                self.sources.push(entry);
+            }
+        }
+        for source in resumed {
+            self.note(source, applied);
+            let link = self.source(source).and_then(|source| source.link.clone());
+            applied.items.push(link_item(
+                source,
+                LinkState {
+                    kind: link_state::Kind::Opened as i32,
+                    link,
+                    reason: "resumed".to_string(),
+                    ..Default::default()
+                },
+            ));
+        }
+        true
+    }
+
+    /// Drops each withdrawn entry that `drop` picks, and every entry that ended with it or that
+    /// it opened, since nothing can resume them.
+    fn forget(&mut self, drop: impl Fn(&SourceState) -> bool) {
+        let mut gone: Vec<u32> = self
+            .withdrawn
+            .iter()
+            .filter(|entry| drop(entry))
+            .map(|entry| entry.number)
+            .collect();
+        while let Some(number) = gone.pop() {
+            self.withdrawn.retain(|entry| {
+                if entry.number == number {
+                    return false;
+                }
+                if entry.parent == number {
+                    gone.push(entry.number);
+                    return false;
+                }
+                true
+            });
+        }
     }
 
     fn close_descendants(&mut self, number: u32, applied: &mut Applied) {
@@ -854,27 +1045,534 @@ mod tests {
         assert_eq!(items, ["0:1", "1:OPENED", "1:1", "1:SKIPPED:cycle"]);
     }
 
-    #[test]
-    fn a_superseded_link_stays_open() {
-        let mut state = new_state();
-        let supersession = ReadRecord {
-            cursor: cursor("r", 1),
-            record: Some(read_record::Record::Superseded(Supersession::default())),
+    /// `record` as written by attempt `attempt` of producer `producer`.
+    fn by(producer: &str, attempt: i64, mut record: ReadRecord) -> ReadRecord {
+        if let Some(read_record::Record::Stored(stored)) = &mut record.record {
+            stored.producer_id = producer.to_string();
+            stored.attempt = attempt;
+        }
+        record
+    }
+
+    fn superseded(
+        stream: &str,
+        at: u64,
+        producer: &str,
+        previous: i64,
+        attempt: i64,
+    ) -> ReadRecord {
+        ReadRecord {
+            cursor: cursor(stream, at),
+            record: Some(read_record::Record::Superseded(Supersession {
+                topic: "events".to_string(),
+                producer_id: producer.to_string(),
+                previous_attempt: previous,
+                attempt,
+            })),
             stale: false,
-        };
+        }
+    }
+
+    /// An attempt of a Workflow run's producer, as the reader numbers task attempts.
+    fn task(started: i64, attempt: i64) -> i64 {
+        started << 16 | attempt
+    }
+
+    #[test]
+    fn an_activity_retry_that_writes_the_same_open_resumes_the_segment() {
+        // A1. The retry writes the OPEN again, and the Workflow joins the child later.
+        let mut state = new_state();
+        let items = run(
+            &mut state,
+            vec![
+                (
+                    0,
+                    page(vec![
+                        by("act", 1, data("r", 1)),
+                        by("act", 1, open("r", 2, "b", "child")),
+                    ]),
+                ),
+                (1, page(vec![data("t", 1), data("t", 2)])),
+                (0, page(vec![superseded("r", 2, "act", 1, 2)])),
+            ],
+        );
+        assert_eq!(
+            items,
+            [
+                "0:1",
+                "0:2",
+                "1:OPENED",
+                "1:1",
+                "1:2",
+                "0:SUPERSEDED",
+                "1:DONE:withdrawn"
+            ]
+        );
+        assert_eq!(state.readable(), [0], "the child pauses");
+        let items = run(
+            &mut state,
+            vec![
+                (
+                    0,
+                    page(vec![
+                        by("act", 2, data("r", 3)),
+                        by("act", 2, open("r", 4, "b", "child")),
+                        by("@run", task(9, 1), join("r", 5, "b", &cursor("t", 3))),
+                    ]),
+                ),
+                (1, page(vec![data("t", 3), data("t", 4)])),
+                (0, page(vec![data("r", 6)])),
+            ],
+        );
+        assert_eq!(
+            items,
+            [
+                "0:3",
+                "0:4",
+                "1:OPENED:resumed",
+                "1:3",
+                "1:DONE",
+                "0:5",
+                "0:6"
+            ],
+            "the child reads on from its cursor, and no child record shows twice"
+        );
+        assert_eq!(state.readable(), [0]);
+    }
+
+    #[test]
+    fn an_activity_retry_with_no_open_or_another_one_ends_the_segment() {
+        // A2. The retry writes no OPEN, then an OPEN of another name opens the same child.
+        let mut state = new_state();
+        let items = run(
+            &mut state,
+            vec![
+                (0, page(vec![by("act", 1, open("r", 1, "b", "child"))])),
+                (1, page(vec![data("t", 1)])),
+                (
+                    0,
+                    page(vec![
+                        superseded("r", 1, "act", 1, 2),
+                        by("act", 2, data("r", 2)),
+                        by("act", 2, open("r", 3, "c", "child")),
+                    ]),
+                ),
+                (2, page(vec![data("t", 1)])),
+            ],
+        );
+        assert_eq!(
+            items,
+            [
+                "0:1",
+                "1:OPENED",
+                "1:1",
+                "0:SUPERSEDED",
+                "1:DONE:withdrawn",
+                "0:2",
+                "0:3",
+                "2:OPENED",
+                "2:1",
+            ],
+            "the other OPEN opens with no SKIPPED:open"
+        );
+        assert_eq!(state.readable(), [0, 2]);
+    }
+
+    #[test]
+    fn another_open_of_the_name_drops_the_withdrawn_segment() {
+        let mut state = new_state();
+        let items = run(
+            &mut state,
+            vec![
+                (0, page(vec![by("act", 1, open("r", 1, "b", "child"))])),
+                (1, page(vec![data("t", 1)])),
+                (
+                    0,
+                    page(vec![
+                        superseded("r", 1, "act", 1, 2),
+                        by("other", 1, open("r", 2, "b", "child")),
+                        by("act", 2, open("r", 3, "b", "child")),
+                    ]),
+                ),
+            ],
+        );
+        // The first OPEN comes from another producer, so it opens the child from `after`, and
+        // the retry's OPEN then finds the child open.
+        assert_eq!(
+            items,
+            [
+                "0:1",
+                "1:OPENED",
+                "1:1",
+                "0:SUPERSEDED",
+                "1:DONE:withdrawn",
+                "0:2",
+                "2:OPENED",
+                "0:3",
+                "0:SKIPPED:open",
+            ]
+        );
+        assert!(state.withdrawn.is_empty());
+    }
+
+    #[test]
+    fn a_failed_task_that_reruns_the_same_open_resumes_the_segment() {
+        // W1. The new task attempt takes the same path and writes the OPEN again.
+        let mut state = new_state();
+        let items = run(
+            &mut state,
+            vec![
+                (
+                    0,
+                    page(vec![by("@run", task(5, 1), open("r", 1, "b", "child"))]),
+                ),
+                (1, page(vec![data("t", 1)])),
+                (
+                    0,
+                    page(vec![
+                        superseded("r", 1, "@run", task(5, 1), task(5, 2)),
+                        by("@run", task(5, 2), open("r", 2, "b", "child")),
+                    ]),
+                ),
+                (1, page(vec![data("t", 2)])),
+            ],
+        );
+        assert_eq!(
+            items,
+            [
+                "0:1",
+                "1:OPENED",
+                "1:1",
+                "0:SUPERSEDED",
+                "1:DONE:withdrawn",
+                "0:2",
+                "1:OPENED:resumed",
+                "1:2",
+            ]
+        );
+        // The resumed segment belongs to the new attempt now.
+        let items = run(
+            &mut state,
+            vec![(
+                0,
+                page(vec![superseded("r", 2, "@run", task(5, 2), task(5, 3))]),
+            )],
+        );
+        assert_eq!(items, ["0:SUPERSEDED", "1:DONE:withdrawn"]);
+    }
+
+    #[test]
+    fn a_failed_task_that_takes_another_path_ends_the_segment() {
+        // W2.
+        let mut state = new_state();
+        let items = run(
+            &mut state,
+            vec![
+                (
+                    0,
+                    page(vec![by("@run", task(5, 1), open("r", 1, "b", "child"))]),
+                ),
+                (1, page(vec![data("t", 1)])),
+                (
+                    0,
+                    done(page(vec![
+                        superseded("r", 1, "@run", task(5, 1), task(5, 2)),
+                        by("@run", task(5, 2), data("r", 2)),
+                    ])),
+                ),
+                (1, page(vec![data("t", 2)])),
+            ],
+        );
+        assert_eq!(
+            items,
+            [
+                "0:1",
+                "1:OPENED",
+                "1:1",
+                "0:SUPERSEDED",
+                "1:DONE:withdrawn",
+                "0:2"
+            ]
+        );
+        assert!(
+            state.done(),
+            "a withdrawn segment does not keep the follow open"
+        );
+    }
+
+    #[test]
+    fn a_withdrawn_local_activity_call_ends_the_segment() {
+        // L1. The failed task's call does not run again, and the next task writes other records.
+        let call = "@run/la-3";
+        let (before, after) = (task(5, 1) << 8 | 1, task(9, 1) << 8);
+        let mut state = new_state();
+        let items = run(
+            &mut state,
+            vec![
+                (0, page(vec![by(call, before, open("r", 1, "b", "child"))])),
+                (1, page(vec![data("t", 1)])),
+                (
+                    0,
+                    page(vec![
+                        superseded("r", 1, call, before, after),
+                        by("@run", task(9, 1), data("r", 2)),
+                    ]),
+                ),
+            ],
+        );
+        assert_eq!(
+            items,
+            [
+                "0:1",
+                "1:OPENED",
+                "1:1",
+                "0:SUPERSEDED",
+                "1:DONE:withdrawn",
+                "0:2"
+            ]
+        );
+        assert_eq!(state.readable(), [0]);
+    }
+
+    #[test]
+    fn an_earlier_tasks_open_stays_open() {
+        // Only the attempt the SUPERSEDED withdraws loses its OPENs.
+        let mut state = new_state();
         let items = run(
             &mut state,
             vec![(
                 0,
                 page(vec![
-                    open("r", 1, "tool", "tool"),
-                    supersession,
-                    data("r", 2),
+                    by("@run", task(3, 1), open("r", 1, "a", "first")),
+                    by("@run", task(5, 1), open("r", 2, "b", "second")),
+                    superseded("r", 2, "@run", task(5, 1), task(5, 2)),
                 ]),
             )],
         );
-        assert_eq!(items, ["0:1", "1:OPENED", "0:SUPERSEDED", "0:2"]);
+        assert_eq!(
+            items,
+            [
+                "0:1",
+                "1:OPENED",
+                "0:2",
+                "2:OPENED",
+                "0:SUPERSEDED",
+                "2:DONE:withdrawn"
+            ]
+        );
         assert_eq!(state.readable(), [0, 1]);
+    }
+
+    #[test]
+    fn a_withdrawn_join_stays_in_effect() {
+        // J1. The JOIN held the root, so the segment ended before the SUPERSEDED.
+        let mut state = new_state();
+        let items = run(
+            &mut state,
+            vec![
+                (
+                    0,
+                    page(vec![
+                        by("@run", task(5, 1), open("r", 1, "b", "child")),
+                        by("@run", task(5, 1), join("r", 2, "b", "")),
+                    ]),
+                ),
+                (1, done(page(vec![data("t", 1)]))),
+                (
+                    0,
+                    page(vec![
+                        superseded("r", 2, "@run", task(5, 1), task(5, 2)),
+                        by("@run", task(5, 2), data("r", 3)),
+                    ]),
+                ),
+            ],
+        );
+        assert_eq!(
+            items,
+            [
+                "0:1",
+                "1:OPENED",
+                "1:1",
+                "1:DONE",
+                "0:2",
+                "0:SUPERSEDED",
+                "0:3"
+            ]
+        );
+        assert!(state.withdrawn.is_empty());
+    }
+
+    #[test]
+    fn a_join_of_a_withdrawn_open_passes_as_a_record() {
+        // J2. The JOIN finds no open segment and does not take the withdrawn one back.
+        let mut state = new_state();
+        let items = run(
+            &mut state,
+            vec![
+                (0, page(vec![by("act", 1, open("r", 1, "b", "child"))])),
+                (
+                    0,
+                    page(vec![
+                        superseded("r", 1, "act", 1, 2),
+                        by("act", 2, data("r", 2)),
+                        by("@run", task(9, 1), join("r", 3, "b", "")),
+                        data("r", 4),
+                    ]),
+                ),
+            ],
+        );
+        assert_eq!(
+            items,
+            [
+                "0:1",
+                "1:OPENED",
+                "0:SUPERSEDED",
+                "1:DONE:withdrawn",
+                "0:2",
+                "0:3",
+                "0:4"
+            ]
+        );
+        assert_eq!(state.readable(), [0], "the JOIN does not stop the root");
+    }
+
+    #[test]
+    fn a_stale_open_does_not_resume_a_withdrawn_segment() {
+        let mut state = new_state();
+        let items = run(
+            &mut state,
+            vec![
+                (0, page(vec![by("act", 1, open("r", 1, "b", "child"))])),
+                (1, page(vec![data("t", 1)])),
+                (
+                    0,
+                    page(vec![
+                        superseded("r", 1, "act", 1, 2),
+                        by("act", 2, data("r", 2)),
+                        stale(by("act", 1, open("r", 3, "b", "child"))),
+                    ]),
+                ),
+            ],
+        );
+        assert_eq!(
+            items,
+            [
+                "0:1",
+                "1:OPENED",
+                "1:1",
+                "0:SUPERSEDED",
+                "1:DONE:withdrawn",
+                "0:2",
+                "0:3"
+            ]
+        );
+        assert_eq!(
+            state.withdrawn.len(),
+            1,
+            "the entry waits for the retry's OPEN"
+        );
+        let items = run(
+            &mut state,
+            vec![
+                (0, page(vec![by("act", 2, open("r", 4, "b", "child"))])),
+                (1, page(vec![data("t", 2)])),
+            ],
+        );
+        assert_eq!(items, ["0:4", "1:OPENED:resumed", "1:2"]);
+    }
+
+    #[test]
+    fn a_follow_resumed_while_the_segment_pauses_resumes_it_at_its_cursor() {
+        let mut state = new_state();
+        run(
+            &mut state,
+            vec![
+                (0, page(vec![by("act", 1, open("r", 1, "b", "child"))])),
+                (1, page(vec![data("t", 1), data("t", 2)])),
+                (0, page(vec![superseded("r", 1, "act", 1, 2)])),
+            ],
+        );
+        let saved = state.encode_to_vec();
+        let mut state = FollowState::decode_from(&saved).unwrap();
+        assert_eq!(state.withdrawn.len(), 1);
+        assert_eq!(state.readable(), [0]);
+        let items = run(
+            &mut state,
+            vec![(0, page(vec![by("act", 2, open("r", 2, "b", "child"))]))],
+        );
+        assert_eq!(items, ["0:2", "1:OPENED:resumed"]);
+        let (_, at, _) = state.read_input(1).unwrap();
+        assert_eq!(at, cursor("t", 2));
+    }
+
+    #[test]
+    fn a_withdrawn_segment_pauses_and_resumes_with_the_streams_it_opened() {
+        let mut state = new_state();
+        let items = run(
+            &mut state,
+            vec![
+                (0, page(vec![by("act", 1, open("r", 1, "b", "child"))])),
+                (1, page(vec![open("t", 1, "g", "grandchild")])),
+                (2, page(vec![data("g", 1)])),
+                (0, page(vec![superseded("r", 1, "act", 1, 2)])),
+            ],
+        );
+        assert_eq!(
+            items,
+            [
+                "0:1",
+                "1:OPENED",
+                "1:1",
+                "2:OPENED",
+                "2:1",
+                "0:SUPERSEDED",
+                "2:DONE:withdrawn",
+                "1:DONE:withdrawn",
+            ]
+        );
+        let items = run(
+            &mut state,
+            vec![
+                (0, page(vec![by("act", 2, open("r", 2, "b", "child"))])),
+                (2, page(vec![data("g", 2)])),
+            ],
+        );
+        assert_eq!(
+            items,
+            ["0:2", "1:OPENED:resumed", "2:OPENED:resumed", "2:2"]
+        );
+        assert_eq!(state.readable(), [0, 1, 2]);
+    }
+
+    #[test]
+    fn the_withdrawn_list_keeps_at_most_max_open_entries() {
+        let mut state = FollowState::new(root(), "", 0, 1);
+        let items = run(
+            &mut state,
+            vec![
+                (0, page(vec![by("act", 1, open("r", 1, "a", "x"))])),
+                (0, page(vec![superseded("r", 1, "act", 1, 2)])),
+                (0, page(vec![by("other", 1, open("r", 2, "b", "y"))])),
+                (0, page(vec![superseded("r", 2, "other", 1, 2)])),
+                (0, page(vec![by("act", 2, open("r", 3, "a", "x"))])),
+            ],
+        );
+        // The oldest entry was dropped, so the retry reads its segment from `after` again.
+        assert_eq!(
+            items,
+            [
+                "0:1",
+                "1:OPENED",
+                "0:SUPERSEDED",
+                "1:DONE:withdrawn",
+                "0:2",
+                "2:OPENED",
+                "0:SUPERSEDED",
+                "2:DONE:withdrawn",
+                "0:3",
+                "3:OPENED",
+            ]
+        );
     }
 
     fn stale(mut record: ReadRecord) -> ReadRecord {

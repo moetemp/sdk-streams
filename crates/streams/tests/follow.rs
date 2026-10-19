@@ -581,6 +581,77 @@ async fn a_stale_open_after_the_join_opens_nothing(streams: Option<Streams>) {
     assert_eq!(shape(&streams.follow_to_end(1, 0).await), order);
 }
 
+/// Activity attempt 1 sends `m1` and opens the child. Attempt 2 sends `m2` and writes the same
+/// OPEN again, and the Workflow joins the child at its third record.
+async fn an_activity_retry_that_writes_the_same_open_resumes_the_segment(streams: Option<Streams>) {
+    let Some(streams) = streams else { return };
+    use stream_link::Event::Open;
+    let (agent, child) = (streams.agent_stream(), streams.workflow_stream("child"));
+    streams
+        .append(
+            &child,
+            1,
+            vec![data("c1"), data("c2"), data("c3"), data("c4")],
+        )
+        .await;
+    let until = streams.cursor_at(&child, 3).await;
+    streams
+        .append_as(
+            &agent,
+            "act",
+            1,
+            vec![data("m1"), link(Open, Some(&child), "b")],
+        )
+        .await;
+    streams
+        .append_as(
+            &agent,
+            "act",
+            2,
+            vec![data("m2"), link(Open, Some(&child), "b")],
+        )
+        .await;
+    streams
+        .append_as(&agent, "wf", 1, vec![join_until("b", until), data("r")])
+        .await;
+    streams.close(&agent).await;
+    let order = shape(&streams.follow_to_end(100, 0).await);
+    assert_eq!(
+        order,
+        [
+            "m1",
+            "EVENT_OPEN:b",
+            "KIND_OPENED:b",
+            "SUPERSEDED",
+            "KIND_DONE:b:withdrawn",
+            "m2",
+            "EVENT_OPEN:b",
+            "KIND_OPENED:b:resumed",
+            "c1",
+            "c2",
+            "c3",
+            "KIND_DONE:b",
+            "EVENT_JOIN:b",
+            "r",
+        ]
+    );
+    // A follower that resumes after each record reads the child between the two OPENs, and it
+    // still shows each child record once.
+    let one_by_one = shape(&streams.follow_to_end(1, 0).await);
+    for record in ["c1", "c2", "c3"] {
+        let count = one_by_one.iter().filter(|item| *item == record).count();
+        assert_eq!(count, 1, "{record} in {one_by_one:?}");
+    }
+    assert!(!one_by_one.contains(&"c4".to_string()));
+    let pause = one_by_one
+        .iter()
+        .position(|item| item == "KIND_DONE:b:withdrawn");
+    let resume = one_by_one
+        .iter()
+        .position(|item| item == "KIND_OPENED:b:resumed");
+    assert!(pause < resume && pause.is_some(), "{one_by_one:?}");
+}
+
 /// Every Workflow is `Running` but `missing`, which Temporal doesn't know.
 struct Missing;
 
@@ -646,6 +717,7 @@ macro_rules! all_follow_cases {
             a_missing_child_is_unavailable_after_the_grace,
             a_follow_resumes_only_on_its_root,
             a_stale_open_after_the_join_opens_nothing,
+            an_activity_retry_that_writes_the_same_open_resumes_the_segment,
         );
     };
 }
