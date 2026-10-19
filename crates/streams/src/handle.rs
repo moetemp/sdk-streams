@@ -690,7 +690,7 @@ impl Streams {
 }
 
 /// The address of a stream this release keeps, checked.
-fn address(stream: Option<&StreamAddress>) -> StreamResult<&StreamAddress> {
+pub(crate) fn address(stream: Option<&StreamAddress>) -> StreamResult<&StreamAddress> {
     let stream =
         stream.ok_or_else(|| StreamError::invalid_argument("a stream call needs its stream"))?;
     if stream.owner_kind != StreamOwnerKind::Workflow as i32 {

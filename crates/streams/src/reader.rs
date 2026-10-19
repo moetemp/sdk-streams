@@ -129,7 +129,7 @@ pub(crate) struct ReadState {
     producers: HashMap<String, Tracked>,
     /// Set by the first call, so later calls don't look up the resume record again.
     #[prost(bool, tag = "2")]
-    started: bool,
+    pub(crate) started: bool,
     /// The first run of the chain the read follows, so later calls don't resolve it again.
     #[prost(string, tag = "3")]
     pub(crate) first_run_id: String,

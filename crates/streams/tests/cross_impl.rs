@@ -193,6 +193,7 @@ fn json_record(value: &Value) -> AppendRecord {
         kind: StreamRecordKind::Data as i32,
         content_hash: Sha256::digest(payload.encode_to_vec()).to_vec(),
         body: Some(payload),
+        ..Default::default()
     }
 }
 

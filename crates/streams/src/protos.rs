@@ -2,6 +2,8 @@
 //! the generated code names a type in another package by a path relative to it.
 
 #![allow(missing_docs)]
+// The generated code sizes its enums by the protos, not by hand.
+#![allow(clippy::large_enum_variant)]
 
 pub mod coresdk {
     pub mod streams {
