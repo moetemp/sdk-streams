@@ -14,9 +14,9 @@ linked stream's segment ends at `until`, or at the stream's end when `until` is 
 reads a stream and the streams it links in one order. Order within each stream is kept, a linked
 stream's records come after its OPEN, and the records after a JOIN come after the segment ended.
 The answer's `state` resumes the follow, so a client or an Activity loses nothing and repeats
-nothing. A link names a Workflow's stream in the same namespace. A follow reads links 4 deep and
-16 open at once by default, and it skips a link past a limit, a link back to an open stream and a
-link to another endpoint. A linked stream it can't read is unavailable, and the follow goes on
+nothing. A link names a Workflow's stream. A follow reads links 4 deep and 16 open at once by
+default, and it skips a link past a limit, a link back to an open stream and a link to another
+namespace or endpoint. A linked stream it can't read is unavailable, and the follow goes on
 without it.
 
 ## Stage pins
