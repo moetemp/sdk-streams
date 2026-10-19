@@ -229,10 +229,12 @@ impl FollowState {
             let link = match &record.record {
                 Some(read_record::Record::Stored(stored)) => {
                     applied.consumed += 1;
+                    // A stale LINK comes from an older attempt after the read gave a newer one. It
+                    // is not the current answer, so it opens and joins nothing.
                     stored
                         .link
                         .clone()
-                        .filter(|_| stored.kind == StreamRecordKind::Link as i32)
+                        .filter(|_| stored.kind == StreamRecordKind::Link as i32 && !record.stale)
                 }
                 _ => {
                     push_record(&mut applied, number, record);
@@ -941,6 +943,66 @@ mod tests {
         );
         assert_eq!(items, ["0:1", "1:OPENED", "0:SUPERSEDED", "0:2"]);
         assert_eq!(state.readable(), [0, 1]);
+    }
+
+    fn stale(mut record: ReadRecord) -> ReadRecord {
+        record.stale = true;
+        record
+    }
+
+    #[test]
+    fn a_stale_open_after_the_join_opens_nothing() {
+        // Attempt 2 opened turn 1 and the Workflow joined it. Then attempt 1's late OPEN of the
+        // same turn came in, and turn 2 opened the same child again.
+        let mut state = new_state();
+        let items = run(
+            &mut state,
+            vec![
+                (
+                    0,
+                    page(vec![
+                        open("r", 1, "h#1", "child"),
+                        join("r", 2, "h#1", &cursor("t", 1)),
+                    ]),
+                ),
+                (1, page(vec![data("t", 1)])),
+                (
+                    0,
+                    page(vec![
+                        stale(open("r", 3, "h#1", "child")),
+                        open("r", 4, "h#2", "child"),
+                        join("r", 5, "h#2", &cursor("t", 2)),
+                    ]),
+                ),
+                (2, page(vec![data("t", 2)])),
+            ],
+        );
+        assert_eq!(
+            items,
+            [
+                "0:1", "1:OPENED", "1:1", "1:DONE", "0:2", "0:3", "0:4", "2:OPENED", "2:2",
+                "2:DONE", "0:5",
+            ]
+        );
+        assert_eq!(state.readable(), [0]);
+    }
+
+    #[test]
+    fn a_stale_join_joins_nothing() {
+        let mut state = new_state();
+        let items = run(
+            &mut state,
+            vec![(
+                0,
+                page(vec![
+                    open("r", 1, "tool", "tool"),
+                    stale(join("r", 2, "tool", "")),
+                    data("r", 3),
+                ]),
+            )],
+        );
+        assert_eq!(items, ["0:1", "1:OPENED", "0:2", "0:3"]);
+        assert_eq!(state.readable(), [0, 1], "the root holds no JOIN");
     }
 
     #[test]
