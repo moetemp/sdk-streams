@@ -125,6 +125,32 @@ impl Streams {
             .await;
     }
 
+    /// Appends one batch as attempt `attempt` of producer `producer`.
+    async fn append_as(
+        &self,
+        stream: &StreamAddress,
+        producer: &str,
+        attempt: i64,
+        records: Vec<AppendRecord>,
+    ) {
+        let _: temporalio_streams::proto::AppendResponse = self
+            .call(
+                "Append",
+                AppendRequest {
+                    stream: Some(stream.clone()),
+                    producer: Some(Producer::Named(NamedProducer {
+                        producer_id: producer.to_string(),
+                        attempt,
+                        ..Default::default()
+                    })),
+                    sequence: 1,
+                    digest: vec![attempt as u8; 32],
+                    records,
+                },
+            )
+            .await;
+    }
+
     async fn close(&self, stream: &StreamAddress) {
         let _: temporalio_streams::proto::CloseResponse = self
             .call(
@@ -482,6 +508,79 @@ async fn a_missing_child_is_unavailable_after_the_grace(streams: Option<Streams>
     );
 }
 
+/// Activity attempt 2 sends turn 1 and its OPEN, and the Workflow joins turn 1. Then attempt 1's
+/// late append of the same OPEN comes in, and turn 2 opens the same child from turn 1's end.
+async fn a_stale_open_after_the_join_opens_nothing(streams: Option<Streams>) {
+    let Some(streams) = streams else { return };
+    use stream_link::Event::Open;
+    let (agent, child) = (streams.agent_stream(), streams.workflow_stream("child"));
+    streams
+        .append(&child, 1, vec![data("t1"), data("t2")])
+        .await;
+    let (end_1, end_2) = (
+        streams.cursor_at(&child, 1).await,
+        streams.cursor_at(&child, 2).await,
+    );
+    let open = |name: &str, after: &str| {
+        let mut open = link(Open, Some(&child), name);
+        open.link.as_mut().unwrap().after = after.to_string();
+        open
+    };
+    streams
+        .append_as(&agent, "turn-1", 2, vec![data("m1"), open("h#1", "")])
+        .await;
+    streams
+        .append_as(&agent, "wf", 1, vec![join_until("h#1", end_1.clone())])
+        .await;
+    streams
+        .append_as(&agent, "turn-1", 1, vec![data("late"), open("h#1", "")])
+        .await;
+    streams
+        .append_as(&agent, "turn-2", 1, vec![data("m2"), open("h#2", &end_1)])
+        .await;
+    streams
+        .append(&agent, 2, vec![join_until("h#2", end_2), data("r2")])
+        .await;
+    streams.close(&agent).await;
+    let whole = streams.follow_to_end(100, 0).await;
+    let late: Vec<_> = whole
+        .iter()
+        .flat_map(|(_, answer)| answer.records.iter())
+        .filter_map(|item| match &item.item {
+            Some(followed_record::Item::Record(record)) if record.stale => Some(record),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(
+        late.len(),
+        2,
+        "the late DATA and the late OPEN read as stale"
+    );
+    let order = shape(&whole);
+    assert_eq!(
+        order,
+        [
+            "m1",
+            "EVENT_OPEN:h#1",
+            "KIND_OPENED:h#1",
+            "t1",
+            "KIND_DONE:h#1",
+            "EVENT_JOIN:h#1",
+            "late",
+            "EVENT_OPEN:h#1",
+            "m2",
+            "EVENT_OPEN:h#2",
+            "KIND_OPENED:h#2",
+            "t2",
+            "KIND_DONE:h#2",
+            "EVENT_JOIN:h#2",
+            "r2",
+        ]
+    );
+    // A follower that resumes after each record gets the same order.
+    assert_eq!(shape(&streams.follow_to_end(1, 0).await), order);
+}
+
 /// Every Workflow is `Running` but `missing`, which Temporal doesn't know.
 struct Missing;
 
@@ -546,6 +645,7 @@ macro_rules! all_follow_cases {
             a_link_back_to_an_open_stream_is_a_cycle,
             a_missing_child_is_unavailable_after_the_grace,
             a_follow_resumes_only_on_its_root,
+            a_stale_open_after_the_join_opens_nothing,
         );
     };
 }
