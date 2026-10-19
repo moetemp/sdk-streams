@@ -19,6 +19,9 @@ default, and it skips a link past a limit, a link back to an open stream and a l
 namespace or endpoint. A linked stream it can't read is unavailable, and the follow goes on
 without it.
 
+A follow reads a stale LINK as a plain record. An older attempt wrote it after the read gave a
+newer attempt, so it opens and joins nothing.
+
 ## Stage pins
 
 The crate depends on `temporalio-common` and `temporalio-client` from one sdk-rust commit per
