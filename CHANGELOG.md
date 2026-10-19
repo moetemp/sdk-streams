@@ -63,3 +63,6 @@
   `state`, and `ReadResponse.start_cursor`.
 - A follow reads a stale LINK as a plain record. It opens and joins nothing, so a late OPEN from an
   older attempt can't open a segment again after its JOIN.
+- A SUPERSEDED ends each segment that the withdrawn attempt opened, with DONE and reason
+  `withdrawn`. The same OPEN from a later attempt resumes it at its cursor, with OPENED and reason
+  `resumed`.
