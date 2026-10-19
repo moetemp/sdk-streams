@@ -42,3 +42,8 @@
 - Took the notification log, the stream driver, the archive tier and the PostgreSQL store out of
   the main chain. Producers notify per append through `NotifyingStore`. The parts come back as an
   optional layer.
+- Added LINK records. `AppendRecord.link` and `OutputRecord.link` carry a `StreamLink` that names a
+  Workflow's stream with the stream API's `StreamReference`. The batch digest takes each link field,
+  and a batch with no link keeps its digest.
+- Added `Follow`, which reads a stream and the streams it links in one order and resumes from its
+  `state`, and `ReadResponse.start_cursor`.
