@@ -510,5 +510,57 @@
       },
       "superseded": false
     }
+  ],
+  "batch_digests": [
+    {
+      "label": "a DATA and a FINISH, with no link",
+      "topic": "events",
+      "records": [
+        {
+          "kind": 1,
+          "content_hash": "0fedef6303aa64433946fdcc1ecf2d2c1c7b2e9ef5d6d95f246a83ee323a1c37"
+        },
+        {
+          "kind": 2
+        }
+      ],
+      "digest": "d207335dea3a01370b29dfe7f8ce95161f72d92f186d515fc784ae56bff81479"
+    },
+    {
+      "label": "an OPEN of a child Workflow's stream and its JOIN, between two DATA records",
+      "topic": "events",
+      "records": [
+        {
+          "kind": 1,
+          "content_hash": "0fedef6303aa64433946fdcc1ecf2d2c1c7b2e9ef5d6d95f246a83ee323a1c37"
+        },
+        {
+          "kind": 4,
+          "link": {
+            "event": 1,
+            "stream": {
+              "owner_kind": 1,
+              "workflow_id": "agent-child",
+              "topic": "turn_events"
+            },
+            "name": "child#1",
+            "after": "redis:3f2a:1700000000000-0"
+          }
+        },
+        {
+          "kind": 4,
+          "link": {
+            "event": 2,
+            "name": "child#1",
+            "until": "redis:3f2a:1700000000123-4"
+          }
+        },
+        {
+          "kind": 1,
+          "content_hash": "af4d40574b03ed170239985231ebf5ec83b196c220caa28643fd1408fed6f4ec"
+        }
+      ],
+      "digest": "6e676c245a23317a136640a5a46fbc1f3d767447e9ac8b7822831d070384ce23"
+    }
   ]
 }
