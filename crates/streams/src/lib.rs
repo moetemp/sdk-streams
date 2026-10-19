@@ -34,7 +34,8 @@ pub use self::redis::{RedisStore, RedisStoreOptions};
 pub use close::{CHAIN_LOG, append_batch, close_chain, close_topic};
 pub use connection::connect_stream_service;
 pub use conventions::{
-    CONTENT_HASH_KEY, MAX_TOPIC_BYTES, METADATA_ENCODING, check_topic, content_hash_text,
+    CONTENT_HASH_KEY, MAX_LINK_NAME_BYTES, MAX_TOPIC_BYTES, METADATA_ENCODING, check_link,
+    check_topic, content_hash_text,
 };
 pub use cursor::{BEGINNING, END, cursor_position, mint_cursor, stream_hash};
 pub use error::{StreamError, StreamResult};

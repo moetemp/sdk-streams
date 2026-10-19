@@ -3,7 +3,7 @@
 //! gives, as the activation's `WorkflowTaskHistoryInfo` names it.
 
 use crate::{
-    OwnerClient, RunClose, StreamError, StreamResult, StreamStore, append_batch,
+    OwnerClient, RunClose, StreamError, StreamResult, StreamStore, append_batch, check_link,
     check_record_limit, check_topic, close_chain,
     proto::{
         AppendRecord, ChainId, OutputRecord, PublishWorkflowTaskRequest,
@@ -124,6 +124,9 @@ fn check_record(record: &OutputRecord) -> Result<(), String> {
         return Err("has no topic".to_string());
     }
     check_topic(&record.topic)?;
+    if record.link.is_some() != (record.kind == StreamRecordKind::Link as i32) {
+        return Err("has a link and is not LINK, or is LINK without a link".to_string());
+    }
     match StreamRecordKind::try_from(record.kind) {
         Ok(StreamRecordKind::Data) => {
             if record.body.is_none() {
@@ -142,7 +145,27 @@ fn check_record(record: &OutputRecord) -> Result<(), String> {
                 return Err("is FINISH with a body".to_string());
             }
         }
-        _ => return Err(format!("has kind {}, not DATA or FINISH", record.kind)),
+        Ok(StreamRecordKind::Link) => {
+            check_link(record.link.as_ref().expect("checked above"))?;
+            let hash_fits = if record.body.is_some() {
+                record.content_hash.len() == CONTENT_HASH_BYTES
+            } else {
+                record.content_hash.is_empty()
+            };
+            if !hash_fits {
+                return Err(format!(
+                    "is LINK with a {}-byte content hash, which a body needs as the \
+                     {CONTENT_HASH_BYTES}-byte SHA-256 of its plaintext and no body leaves empty",
+                    record.content_hash.len()
+                ));
+            }
+        }
+        _ => {
+            return Err(format!(
+                "has kind {}, not DATA, FINISH or LINK",
+                record.kind
+            ));
+        }
     }
     Ok(())
 }
@@ -401,7 +424,7 @@ impl WorkflowOutput {
                 topic
                     .records
                     .iter()
-                    .map(|r| (r.kind, r.content_hash.as_slice())),
+                    .map(|r| (r.kind, r.content_hash.as_slice(), r.link.as_ref())),
             ),
             records,
         };
@@ -569,6 +592,7 @@ impl WorkflowOutput {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::proto::{StreamLink, stream_link};
     use temporalio_common::protos::temporal::api::common::v1::Payload;
 
     fn data(topic: &str, hash: u8) -> OutputRecord {
@@ -703,6 +727,24 @@ mod tests {
             (short_hash, "record 1 is DATA with a 3-byte content hash"),
             (finish_with_body, "record 1 is FINISH with a body"),
             (unspecified, "record 1 has kind 0"),
+            (
+                OutputRecord {
+                    link: Some(join("x")),
+                    ..data("t", 1)
+                },
+                "has a link and is not LINK",
+            ),
+            (
+                link_record("t", StreamLink::default()),
+                "a link needs a name",
+            ),
+            (
+                OutputRecord {
+                    content_hash: vec![1; 32],
+                    ..link_record("t", join("x"))
+                },
+                "is LINK with a 32-byte content hash",
+            ),
         ] {
             let error = output_by_topic(
                 vec![data("t", 9), record],
@@ -713,5 +755,34 @@ mod tests {
             assert_eq!(error.kind, StreamFailureKind::InvalidArgument);
             assert!(error.message.contains(expected), "{expected}: {error}");
         }
+    }
+
+    fn join(name: &str) -> StreamLink {
+        StreamLink {
+            event: stream_link::Event::Join as i32,
+            name: name.to_string(),
+            ..Default::default()
+        }
+    }
+
+    fn link_record(topic: &str, link: StreamLink) -> OutputRecord {
+        OutputRecord {
+            topic: topic.to_string(),
+            kind: StreamRecordKind::Link as i32,
+            link: Some(link),
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn a_link_is_a_record_of_its_topic_like_any_other() {
+        let topics = output_by_topic(
+            vec![data("t", 1), link_record("t", join("child#1"))],
+            &mut HashMap::new(),
+            crate::MAX_BATCH_BYTES,
+        )
+        .unwrap();
+        assert_eq!(topics.len(), 1);
+        assert_eq!(topics[0].records[1].link, Some(join("child#1")));
     }
 }
