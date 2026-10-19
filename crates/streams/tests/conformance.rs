@@ -419,6 +419,7 @@ fn encoded(value: &str, ciphertext: &[u8]) -> AppendRecord {
             ..Default::default()
         }),
         content_hash: hash(value),
+        ..Default::default()
     }
 }
 

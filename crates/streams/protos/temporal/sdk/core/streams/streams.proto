@@ -28,6 +28,10 @@ service StreamService {
   // Drops the dedupe state of one producer attempt on one stream. Safe only once the attempt's
   // last append returned, since a retry of that append would then land twice.
   rpc RetireProducer(RetireProducerRequest) returns (RetireProducerResponse);
+  // Reads a stream and the streams it links, in one order. Order within each stream is kept. A
+  // linked stream's records come after its OPEN, and the linking stream's records after a JOIN
+  // come after the linked stream reached the JOIN's point. Lang passes `state` back to resume.
+  rpc Follow(FollowRequest) returns (FollowResponse);
   // What the store can do beyond the log every store gives, and its limits.
   rpc DescribeStore(DescribeStoreRequest) returns (DescribeStoreResponse);
   // Appends what one live activation of a Workflow published. Lang calls it before it completes
@@ -137,12 +141,14 @@ message ActivityProducer {
 // One record lang appends.
 message AppendRecord {
   temporal.sdk.streams.v1.StreamRecordKind kind = 1;
-  // Set on DATA only, after lang's payload codec and external storage.
+  // Set on DATA, and optional on LINK, after lang's payload codec and external storage.
   temporal.api.common.v1.Payload body = 2;
   // The SHA-256 of the body as the payload converter made it, before the codec. A codec that
   // encrypts with a fresh nonce makes a retry's bytes differ, so a retry is recognized by this.
   // Empty when there is no body.
   bytes content_hash = 3;
+  // Set on LINK only. A LINK's body is optional.
+  temporal.sdk.streams.v1.StreamLink link = 4;
 }
 
 message AppendRequest {
@@ -216,6 +222,83 @@ message ReadResponse {
   // The owner's chain ended and the read delivered every record the stream retains. No later
   // call returns a record.
   bool done = 4;
+  // The cursor this answer reads strictly after, with `$end` resolved. A Follow that cuts a page
+  // at a gate reads it again from here.
+  string start_cursor = 12;
+}
+
+message FollowRequest {
+  // The root stream.
+  StreamAddress stream = 1;
+  // The root cursor, on the first call. Later calls resume from `state` and ignore it.
+  string after = 2;
+  // The `state` of the previous answer. Empty on the first call.
+  bytes state = 3;
+  // How long to wait for a record when no source has one. The service waits at most 60 seconds.
+  google.protobuf.Duration wait = 4;
+  // How many stored records one answer holds at most, across all sources. Zero uses 100. The
+  // service answers with at most 1,000.
+  uint32 max_records = 5;
+  // How deep links are followed. The root is depth zero. Zero uses 4. The first call's limits
+  // hold for the whole follow, and `state` keeps them.
+  uint32 max_depth = 6;
+  // How many linked streams are open at once. Zero uses 16.
+  uint32 max_open = 7;
+  // Jetty adds fields 8 and 9 for Workflow followers.
+}
+
+message FollowedRecord {
+  // The source the item belongs to. Zero is the root. A SKIPPED link names the source that holds
+  // the link.
+  uint32 source = 1;
+  oneof item {
+    ReadRecord record = 2;
+    LinkState link_state = 3;
+  }
+}
+
+// What happened to a link, as the follower saw it.
+message LinkState {
+  enum Kind {
+    KIND_UNSPECIFIED = 0;
+    // The linked stream is open, and its records follow.
+    KIND_OPENED = 1;
+    // The linked stream's segment ended: the stream closed, or it reached the JOIN's `until`.
+    KIND_DONE = 2;
+    // The linked stream can't be read. `error` says why. The follow goes on without it.
+    KIND_UNAVAILABLE = 3;
+    // The link was not followed. `reason` says why.
+    KIND_SKIPPED = 4;
+  }
+  Kind kind = 1;
+  temporal.sdk.streams.v1.StreamLink link = 2;
+  // Jetty adds fields 3 and 4 for the close outcome on DONE.
+  // Set on UNAVAILABLE.
+  StreamFailure error = 5;
+  // Set on SKIPPED: `depth`, `limit`, `cycle`, `open` or `endpoint`.
+  string reason = 6;
+}
+
+// A source that an answer's records name.
+message FollowSource {
+  uint32 number = 1;
+  // The source that holds the source's link. Zero for the root and its links.
+  uint32 parent = 2;
+  uint32 depth = 3;
+  StreamAddress stream = 4;
+  // The link's name. Empty for the root.
+  string name = 5;
+}
+
+message FollowResponse {
+  repeated FollowedRecord records = 1;
+  // The composite position: every source's cursor and read state, and the gates. Opaque to lang.
+  bytes state = 2;
+  // The root ended and every linked segment ended. No later call returns a record.
+  bool done = 3;
+  // Each source that `records` names.
+  repeated FollowSource sources = 4;
+  // Jetty adds fields 5 to 9 for Workflow followers and their replay.
 }
 
 message LatestRequest {
@@ -416,14 +499,16 @@ message PublishWorkflowTaskRequest {
 // One record a Workflow published.
 message OutputRecord {
   string topic = 1;
-  // DATA or FINISH.
+  // DATA, FINISH or LINK.
   temporal.sdk.streams.v1.StreamRecordKind kind = 2;
-  // The value on DATA, after lang's payload codec. Absent on FINISH.
+  // The value on DATA, after lang's payload codec. Absent on FINISH. Optional on LINK.
   temporal.api.common.v1.Payload body = 3;
-  // The SHA-256 of the body as the payload converter made it, before the codec. Set on DATA. The
-  // service builds each topic's batch digest from these, so a repeat of a batch matches whatever
-  // the codec made of the bodies.
+  // The SHA-256 of the body as the payload converter made it, before the codec. Set with a body.
+  // The service builds each topic's batch digest from these, so a repeat of a batch matches
+  // whatever the codec made of the bodies.
   bytes content_hash = 4;
+  // Set on LINK only.
+  temporal.sdk.streams.v1.StreamLink link = 5;
 }
 
 enum WorkflowTerminalCommand {

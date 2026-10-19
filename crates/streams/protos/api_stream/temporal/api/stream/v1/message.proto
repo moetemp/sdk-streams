@@ -1,0 +1,32 @@
+syntax = "proto3";
+
+package temporal.api.stream.v1;
+
+option go_package = "go.temporal.io/api/stream/v1;stream";
+option java_package = "io.temporal.api.stream.v1";
+option java_multiple_files = true;
+option java_outer_classname = "MessageProto";
+option ruby_package = "Temporalio::Api::Stream::V1";
+option csharp_namespace = "Temporalio.Api.Stream.V1";
+
+import "temporal/api/enums/v1/stream.proto";
+
+// Names one stream within a namespace: its owner and its topic.
+message StreamReference {
+    temporal.api.enums.v1.StreamOwnerKind owner_kind = 1;
+    // The owning Workflow, for `STREAM_OWNER_KIND_WORKFLOW`. The Workflow that scheduled the
+    // owning Activity, for `STREAM_OWNER_KIND_WORKFLOW_ACTIVITY`. Empty for other kinds.
+    string workflow_id = 2;
+    // For `STREAM_OWNER_KIND_WORKFLOW`, the id of the first run in the owning Workflow's run
+    // chain. The stream notifier is keyed by it, so one notifier serves the stream across the
+    // chain's runs, and a stream that reuses the Workflow id in a new chain gets a notifier of its
+    // own. For `STREAM_OWNER_KIND_ACTIVITY`, the id of the owning Activity run. For
+    // `STREAM_OWNER_KIND_WORKFLOW_ACTIVITY`, the id of the run that scheduled the Activity, not
+    // the chain's first run. An empty run id is refused.
+    string run_id = 3;
+    // The stream's topic within its owner.
+    string topic = 4;
+    // The owning standalone Activity, for `STREAM_OWNER_KIND_ACTIVITY`. The owning Activity's id
+    // in the scheduling run, for `STREAM_OWNER_KIND_WORKFLOW_ACTIVITY`. Empty for other kinds.
+    string activity_id = 5;
+}

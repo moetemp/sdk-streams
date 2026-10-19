@@ -481,7 +481,7 @@ pub(crate) async fn read_with(
     }
     let mut closed = page.closed;
     let mut records = Vec::with_capacity(page.records.len());
-    let mut previous = start;
+    let mut previous = start.clone();
     let mut withdrawn = Vec::new();
     for stored in page.records {
         let cursor = mint_cursor(store.name(), &target.stream_hash, &stored.position);
@@ -550,6 +550,7 @@ pub(crate) async fn read_with(
             cursor: previous,
             state: Vec::new(),
             done: false,
+            start_cursor: start,
         },
         closed,
     ))
@@ -636,6 +637,7 @@ fn parse(bytes: &[u8]) -> Result<StreamRecord, String> {
         Ok(
             StreamRecordKind::Data
             | StreamRecordKind::Finish
+            | StreamRecordKind::Link
             | StreamRecordKind::Close
             | StreamRecordKind::Topic,
         ) => {}

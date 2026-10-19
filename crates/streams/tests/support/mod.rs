@@ -43,6 +43,7 @@ pub fn records_on(topic: &str, values: &[&str]) -> Vec<OutputRecord> {
                 ..Default::default()
             }),
             content_hash: vec![value.as_bytes()[0]; 32],
+            ..Default::default()
         })
         .collect()
 }

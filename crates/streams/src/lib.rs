@@ -57,6 +57,6 @@ pub use workflow::{STREAM_RETRY_BITS, stream_attempt};
 pub mod proto {
     pub use crate::protos::{
         coresdk::streams::*,
-        temporal::sdk::streams::v1::{StreamRecord, StreamRecordKind},
+        temporal::sdk::streams::v1::{StreamLink, StreamRecord, StreamRecordKind, stream_link},
     };
 }

@@ -376,6 +376,7 @@ impl WorkflowOutput {
                     kind: record.kind,
                     body: record.body.clone(),
                     content_hash: record.content_hash.clone(),
+                    link: record.link.clone(),
                 };
                 stored_append_record(&topic.topic, &producer_id, run.attempt, sequence, &append)
                     .map(|mut stored| {
@@ -579,6 +580,7 @@ mod tests {
                 ..Default::default()
             }),
             content_hash: vec![hash; CONTENT_HASH_BYTES],
+            ..Default::default()
         }
     }
 

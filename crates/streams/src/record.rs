@@ -237,6 +237,7 @@ mod tests {
             kind: StreamRecordKind::Data as i32,
             body: Some(body()),
             content_hash: vec![hash; HASH_LENGTH],
+            ..Default::default()
         }
     }
 

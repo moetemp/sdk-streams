@@ -10,6 +10,20 @@ pub mod coresdk {
 }
 
 pub mod temporal {
+    /// The stream API types that links name, which sdk-rust does not vendor. Its other API types
+    /// come from `temporalio-common`.
+    pub mod api {
+        pub mod stream {
+            pub mod v1 {
+                include!(concat!(env!("OUT_DIR"), "/temporal.api.stream.v1.rs"));
+            }
+        }
+        pub mod enums {
+            pub mod v1 {
+                include!(concat!(env!("OUT_DIR"), "/temporal.api.enums.v1.rs"));
+            }
+        }
+    }
     pub mod sdk {
         pub mod streams {
             pub mod v1 {
@@ -50,6 +64,7 @@ mod stream_record_envelope {
             producer_id: "p".to_string(),
             attempt: 2,
             sequence: 3,
+            link: None,
             task_started_event_id: 0,
             completed_tasks: vec![],
         }
@@ -77,6 +92,7 @@ mod stream_record_envelope {
         assert_eq!(StreamRecordKind::Unspecified as i32, 0);
         assert_eq!(StreamRecordKind::Data as i32, 1);
         assert_eq!(StreamRecordKind::Finish as i32, 2);
+        assert_eq!(StreamRecordKind::Link as i32, 4);
         assert_eq!(
             StreamRecordKind::try_from(3),
             Err(prost::UnknownEnumValue(3))
