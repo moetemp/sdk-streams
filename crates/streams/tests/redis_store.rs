@@ -612,3 +612,87 @@ async fn a_stale_producer_cant_close_the_stream() {
         target.close(&client(2)).await.unwrap();
     }
 }
+
+#[tokio::test]
+async fn a_wait_for_replicas_holds_only_the_durable_connection() {
+    let targets = support::stores_with(|mut options| {
+        options.durable_connection = true;
+        options
+    })
+    .await;
+    for target in targets {
+        target.create(Owner::Client).await;
+        let durable = target.store.durable().expect("a durable connection");
+        let (namespace, stream) = (target.namespace.clone(), target.stream.clone());
+        let waiter = tokio::spawn(async move {
+            durable
+                .wait_replicas(&namespace, &stream, 1, Duration::from_millis(800))
+                .await
+        });
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        let started = std::time::Instant::now();
+        append(&target, &client(1), 1, &["a"]).await.unwrap();
+        assert!(
+            started.elapsed() < Duration::from_millis(400),
+            "{:?}",
+            started.elapsed()
+        );
+        assert_eq!(waiter.await.unwrap().unwrap(), 0);
+        assert!(target.store.durable().unwrap().durable().is_none());
+    }
+}
+
+#[tokio::test]
+async fn c_with_no_attempt_withdraws_by_started_time() {
+    for target in stores().await {
+        target.create(Owner::Workflow).await;
+        let run = Run::new("r1");
+        target
+            .flush(&run.task_at(8, 1, 200), None, &[], &["D1"])
+            .await
+            .unwrap();
+        target
+            .flush(&run.task_at(8, 2, 300), None, &[], &["D2"])
+            .await
+            .unwrap();
+        let mut c = run.done(8);
+        c.attempt = 0;
+        c.started_time = Some(Timestamp {
+            seconds: 300,
+            nanos: 0,
+        });
+        target
+            .flush(&run.task(14, 1), Some(c), &[], &["E"])
+            .await
+            .unwrap();
+        assert_eq!(target.visible().await, ["D2", "E"]);
+    }
+}
+
+#[tokio::test]
+async fn an_append_whose_ids_would_not_fit_an_offset_is_refused_before_it_writes() {
+    for target in stores().await {
+        target.create(Owner::Client).await;
+        let mut conn = target.raw().await;
+        // An entry a millisecond ahead of the server clock, with the last 20-bit sequence.
+        let ahead = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_millis()
+            + 60_000;
+        let _: String = redis::cmd("XADD")
+            .arg(target.keys().log())
+            .arg(format!("{ahead}-1048570"))
+            .arg("x")
+            .arg("y")
+            .query_async(&mut conn)
+            .await
+            .unwrap();
+        let error = append(&target, &client(1), 1, &["a"; 10])
+            .await
+            .unwrap_err();
+        assert_eq!(error.reason, Reason::Storage);
+        let length: i64 = conn.xlen(target.keys().log()).await.unwrap();
+        assert_eq!(length, 1);
+    }
+}

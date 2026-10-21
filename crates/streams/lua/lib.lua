@@ -83,6 +83,16 @@ local function started(task_key)
   return tonumber(string.sub(task_key, 1, 16), 16)
 end
 
+-- Whether a task key at c's started id is a lower attempt than c. Core gives c with attempt 0
+-- when it no longer has c's attempt. The attempts of one task start in time order, so the
+-- started time decides then.
+local function below_completed(key, c)
+  if string.sub(c, 18, 25) == '00000000' then
+    return string.sub(key, 27) < string.sub(c, 27)
+  end
+  return key < c
+end
+
 -- The Workflow withdrawal rule over the run's task index, for task t with the previous
 -- completed task c. It answers the task keys it withdraws and the ones that stay. A task at or
 -- before c that stays completed, so the index drops it.
@@ -100,7 +110,7 @@ local function withdraw_tasks(index, t, c, failed)
   for _, key in ipairs(index) do
     local s = started(key)
     if failed_set[s] or (cs < s and s < ts) or (s == ts and key < t)
-        or (c ~= '' and s == cs and key < c) then
+        or (c ~= '' and s == cs and below_completed(key, c)) then
       table.insert(withdrawn, key)
     elseif c == '' or key > c then
       table.insert(kept, key)
@@ -141,6 +151,21 @@ local function withdraw_run(meta, run)
   end
   redis.call('HSET', meta, 'wr|' .. run, '1')
   return redis.call('HGET', meta, 'run|' .. run) ~= false
+end
+
+-- Refuses a write whose entry ids would not fit an offset, which packs the sequence part in 20
+-- bits. Redis numbers the entries of one millisecond from the newest id on, so this happens
+-- only when a clock steps back under a very busy Stream.
+local function check_ids_fit(log, now, count)
+  local newest = redis.call('XREVRANGE', log, '+', '-', 'COUNT', 1)
+  if #newest == 0 then
+    return nil
+  end
+  local ms, seq = string.match(newest[1][1], '^(%d+)-(%d+)$')
+  if tonumber(ms) >= now and tonumber(seq) + count >= 1048576 then
+    return refuse('STORAGE', 'the entry ids of this millisecond would not fit an offset')
+  end
+  return nil
 end
 
 local function add(log, fields)

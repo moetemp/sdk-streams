@@ -39,6 +39,10 @@ message BufferWorkflowCallsRequest {
     // run, so the first one on each Stream withdraws the previous run's Records.
     string withdraw_run = 2;
     repeated WorkflowCall calls = 3;
+    // Set on the run's last call when the server goes on with the Run Chain, which is a failure
+    // that the retry policy retries, or any cron run. The crate then skips the closes that have
+    // `when_run_closes`.
+    bool chain_continues = 4;
 }
 
 message WorkflowCall {
