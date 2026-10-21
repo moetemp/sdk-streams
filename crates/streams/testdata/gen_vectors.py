@@ -163,12 +163,11 @@ def withdraws(supersession, record):
             and producer["id"] == supersession["producer_id"]
             and epoch_key(old) < epoch_key(new)
         )
-    run = supersession["producer_id"][len("wf:"):]
     if producer["kind"] == "workflow":
         if producer["id"] != supersession["producer_id"]:
             return False
     elif producer["kind"] == "local_activity":
-        if part(producer.get("run_id", "")) != run:
+        if producer.get("run_id", "") != supersession["run_id"]:
             return False
     else:
         return False
@@ -221,7 +220,7 @@ def withdrawal_examples():
                       "withdraws": expected})
 
     def sup(task, c=None, failed=(), withdraw_run=None, run=r1):
-        s = {"producer_kind": "workflow", "producer_id": "wf:" + part(run),
+        s = {"producer_kind": "workflow", "producer_id": "wf:" + part(run), "run_id": run,
              "epoch": task["epoch"], "failed_tasks": list(failed)}
         if c:
             s["previous_completed_task"] = c
@@ -273,7 +272,7 @@ def withdrawal_examples():
     case("e6 r1's Activity Record goes", s, act, True)
     case("e6 r2's own earlier Record of t stays", s, wf("r2", 3), False)
     # An Activity retry withdraws only its own earlier attempt.
-    s = {"producer_kind": "activity", "producer_id": act["id"],
+    s = {"producer_kind": "activity", "producer_id": act["id"], "run_id": r1,
          "epoch": {"attempt_scheduled_time": [130, 0], "attempt": 2}}
     case("an Activity retry withdraws attempt 1", s, act, True)
     other = dict(act, id="act:" + join(r1, "b", "s"))

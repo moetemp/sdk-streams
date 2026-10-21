@@ -4,6 +4,7 @@
     "supersession": {
       "producer_kind": "workflow",
       "producer_id": "wf:r1",
+      "run_id": "r1",
       "epoch": {
         "task_started_event_id": 11,
         "task_attempt": 1,
@@ -46,6 +47,7 @@
     "supersession": {
       "producer_kind": "workflow",
       "producer_id": "wf:r1",
+      "run_id": "r1",
       "epoch": {
         "task_started_event_id": 11,
         "task_attempt": 1,
@@ -88,6 +90,7 @@
     "supersession": {
       "producer_kind": "workflow",
       "producer_id": "wf:r1",
+      "run_id": "r1",
       "epoch": {
         "task_started_event_id": 11,
         "task_attempt": 1,
@@ -130,6 +133,7 @@
     "supersession": {
       "producer_kind": "workflow",
       "producer_id": "wf:r1",
+      "run_id": "r1",
       "epoch": {
         "task_started_event_id": 8,
         "task_attempt": 1,
@@ -172,6 +176,7 @@
     "supersession": {
       "producer_kind": "workflow",
       "producer_id": "wf:r1",
+      "run_id": "r1",
       "epoch": {
         "task_started_event_id": 8,
         "task_attempt": 1,
@@ -214,6 +219,7 @@
     "supersession": {
       "producer_kind": "workflow",
       "producer_id": "wf:r1",
+      "run_id": "r1",
       "epoch": {
         "task_started_event_id": 8,
         "task_attempt": 3,
@@ -254,6 +260,7 @@
     "supersession": {
       "producer_kind": "workflow",
       "producer_id": "wf:r1",
+      "run_id": "r1",
       "epoch": {
         "task_started_event_id": 8,
         "task_attempt": 3,
@@ -294,6 +301,7 @@
     "supersession": {
       "producer_kind": "workflow",
       "producer_id": "wf:r1",
+      "run_id": "r1",
       "epoch": {
         "task_started_event_id": 9,
         "task_attempt": 1,
@@ -334,6 +342,7 @@
     "supersession": {
       "producer_kind": "workflow",
       "producer_id": "wf:r1",
+      "run_id": "r1",
       "epoch": {
         "task_started_event_id": 14,
         "task_attempt": 1,
@@ -374,6 +383,7 @@
     "supersession": {
       "producer_kind": "workflow",
       "producer_id": "wf:r1",
+      "run_id": "r1",
       "epoch": {
         "task_started_event_id": 14,
         "task_attempt": 1,
@@ -414,6 +424,7 @@
     "supersession": {
       "producer_kind": "workflow",
       "producer_id": "wf:r1",
+      "run_id": "r1",
       "epoch": {
         "task_started_event_id": 14,
         "task_attempt": 1,
@@ -454,6 +465,7 @@
     "supersession": {
       "producer_kind": "workflow",
       "producer_id": "wf:r1",
+      "run_id": "r1",
       "epoch": {
         "task_started_event_id": 14,
         "task_attempt": 1,
@@ -494,6 +506,7 @@
     "supersession": {
       "producer_kind": "workflow",
       "producer_id": "wf:r1",
+      "run_id": "r1",
       "epoch": {
         "task_started_event_id": 11,
         "task_attempt": 1,
@@ -537,6 +550,7 @@
     "supersession": {
       "producer_kind": "workflow",
       "producer_id": "wf:r1",
+      "run_id": "r1",
       "epoch": {
         "task_started_event_id": 11,
         "task_attempt": 1,
@@ -579,6 +593,7 @@
     "supersession": {
       "producer_kind": "workflow",
       "producer_id": "wf:r2",
+      "run_id": "r2",
       "epoch": {
         "task_started_event_id": 3,
         "task_attempt": 1,
@@ -612,6 +627,7 @@
     "supersession": {
       "producer_kind": "workflow",
       "producer_id": "wf:r2",
+      "run_id": "r2",
       "epoch": {
         "task_started_event_id": 3,
         "task_attempt": 1,
@@ -644,6 +660,7 @@
     "supersession": {
       "producer_kind": "workflow",
       "producer_id": "wf:r2",
+      "run_id": "r2",
       "epoch": {
         "task_started_event_id": 3,
         "task_attempt": 1,
@@ -677,6 +694,7 @@
     "supersession": {
       "producer_kind": "activity",
       "producer_id": "act:r1:a:s",
+      "run_id": "r1",
       "epoch": {
         "attempt_scheduled_time": [
           130,
@@ -706,6 +724,7 @@
     "supersession": {
       "producer_kind": "activity",
       "producer_id": "act:r1:a:s",
+      "run_id": "r1",
       "epoch": {
         "attempt_scheduled_time": [
           130,

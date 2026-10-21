@@ -79,6 +79,8 @@ message Supersession {
     repeated int64 failed_tasks = 5;
     // Workflow retry only. The previous run. Every Record whose Producer carries it is withdrawn.
     string withdraw_run = 6;
+    // The run of the Producer, so nobody parses the id. Empty for a client.
+    string run_id = 7;
 }
 
 // An offset is the Redis entry id packed as ms << 20 | seq. It is ordered and unique in one
