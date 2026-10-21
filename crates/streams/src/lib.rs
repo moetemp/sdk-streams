@@ -20,6 +20,7 @@ mod server {
     include!("../tests/support/server.rs");
 }
 mod service;
+mod workflow;
 
 pub use error::{Reason, StreamError, StreamResult};
 pub use extension::{EXTENSION_NAME, ExtensionOptions, RedisStreamExtension};

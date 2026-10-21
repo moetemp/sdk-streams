@@ -4,16 +4,18 @@ use crate::{
     StreamError, StreamResult,
     metrics::Metrics,
     proto::{
-        AppendRecordsRequest, CloseStreamRequest, DescribeStreamRequest, ReadRecordsRequest,
-        RedisStreamConfig,
+        AppendRecordsRequest, BufferWorkflowCallsRequest, BufferWorkflowCallsResponse,
+        CloseStreamRequest, DescribeStreamRequest, DrainClosesRequest, DrainClosesResponse,
+        ReadRecordsRequest, RedisStreamConfig,
     },
     redis::{RedisStore, RedisStoreOptions},
     service::StreamService,
+    workflow::{FlushOptions, WorkflowHooks, WorkflowRuns},
 };
 use prost::Message;
 use std::{sync::Arc, time::Duration};
 use temporalio_common::telemetry::metrics::TemporalMeter;
-use temporalio_sdk_core::{ExtensionError, WorkerExtension};
+use temporalio_sdk_core::{ExtensionError, WorkerExtension, WorkflowTaskInterceptor};
 use tokio::sync::OnceCell;
 
 /// The name of the extension, for logs and for a bridge that selects an extension by name.
@@ -69,20 +71,51 @@ fn duration(value: Option<prost_types::Duration>) -> Option<Duration> {
     (!duration.is_zero()).then_some(duration)
 }
 
-/// The Stream runtime on Redis, as a Worker extension.
-///
-/// It connects on its first call that needs Redis, so a bridge can build it with no runtime.
-/// One extension serves every Worker and client of a plugin.
-pub struct RedisStreamExtension {
+/// What the extension and its Workflow Task interceptor share.
+pub(crate) struct Shared {
     options: ExtensionOptions,
     metrics: Metrics,
     service: OnceCell<Arc<StreamService>>,
+    pub(crate) runs: WorkflowRuns,
+}
+
+impl Shared {
+    /// The service, which connects to Redis on its first use. A failed connect is tried again
+    /// on the next call.
+    pub(crate) async fn service(&self) -> StreamResult<&Arc<StreamService>> {
+        self.service
+            .get_or_try_init(|| async {
+                let store = RedisStore::connect(self.options.store.clone()).await?;
+                Ok(Arc::new(StreamService {
+                    store: Arc::new(store),
+                    metrics: self.metrics.clone(),
+                }))
+            })
+            .await
+    }
+
+    pub(crate) fn flush_options(&self) -> FlushOptions {
+        FlushOptions {
+            durable_writes: self.options.durable_writes,
+            durable_timeout: self.options.durable_timeout,
+        }
+    }
+}
+
+/// The Stream runtime on Redis, as a Worker extension.
+///
+/// It connects on its first call that needs Redis, so a bridge can build it with no runtime,
+/// and a Workflow that never publishes never needs Redis. One extension serves every Worker and
+/// client of a plugin.
+pub struct RedisStreamExtension {
+    shared: Arc<Shared>,
+    hooks: Arc<WorkflowHooks>,
 }
 
 impl std::fmt::Debug for RedisStreamExtension {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("RedisStreamExtension")
-            .field("options", &self.options)
+            .field("options", &self.shared.options)
             .finish_non_exhaustive()
     }
 }
@@ -91,11 +124,16 @@ impl RedisStreamExtension {
     /// Builds the extension. It counts on `meter`, lang's runtime meter, when given.
     pub fn new(options: ExtensionOptions, meter: Option<TemporalMeter>) -> Arc<Self> {
         let meter = meter.unwrap_or_else(TemporalMeter::no_op);
-        Arc::new(Self {
+        let shared = Arc::new(Shared {
             options,
             metrics: Metrics::new(&meter),
             service: OnceCell::new(),
-        })
+            runs: WorkflowRuns::default(),
+        });
+        let hooks = Arc::new(WorkflowHooks {
+            shared: shared.clone(),
+        });
+        Arc::new(Self { shared, hooks })
     }
 
     /// Builds the extension from an encoded [RedisStreamConfig].
@@ -110,19 +148,21 @@ impl RedisStreamExtension {
 
     /// The options the extension runs with.
     pub fn options(&self) -> &ExtensionOptions {
-        &self.options
+        &self.shared.options
     }
 
-    pub(crate) async fn service(&self) -> StreamResult<&Arc<StreamService>> {
-        self.service
-            .get_or_try_init(|| async {
-                let store = RedisStore::connect(self.options.store.clone()).await?;
-                Ok(Arc::new(StreamService {
-                    store: Arc::new(store),
-                    metrics: self.metrics.clone(),
-                }))
-            })
-            .await
+    /// Runs one synchronous method on encoded input. It never waits on I/O.
+    pub fn dispatch(&self, method: &str, input: &[u8]) -> Result<Vec<u8>, ExtensionError> {
+        let output = match method {
+            "BufferWorkflowCalls" => {
+                self.shared
+                    .runs
+                    .buffer(decode::<BufferWorkflowCallsRequest>(input)?)?;
+                BufferWorkflowCallsResponse {}.encode_to_vec()
+            }
+            _ => return Err(ExtensionError::unknown_method(method)),
+        };
+        Ok(output)
     }
 
     /// Runs one asynchronous method on encoded input.
@@ -131,7 +171,16 @@ impl RedisStreamExtension {
         method: &str,
         input: &[u8],
     ) -> Result<Vec<u8>, ExtensionError> {
-        let service = self.service().await?;
+        if method == "DrainCloses" {
+            let request = decode::<DrainClosesRequest>(input)?;
+            let timeout = duration(request.timeout).unwrap_or(Duration::from_secs(10));
+            let pending = self.shared.runs.drain(timeout).await;
+            return Ok(DrainClosesResponse {
+                pending: pending as i32,
+            }
+            .encode_to_vec());
+        }
+        let service = self.shared.service().await?;
         let output = match method {
             "CreateStream" => service.create_stream(decode(input)?).await?.encode_to_vec(),
             "AppendRecords" => service
@@ -166,8 +215,12 @@ impl WorkerExtension for RedisStreamExtension {
         EXTENSION_NAME
     }
 
-    fn call(&self, method: &str, _input: &[u8]) -> Result<Vec<u8>, ExtensionError> {
-        Err(ExtensionError::unknown_method(method))
+    fn workflow_task_interceptor(&self) -> Option<Arc<dyn WorkflowTaskInterceptor>> {
+        Some(self.hooks.clone())
+    }
+
+    fn call(&self, method: &str, input: &[u8]) -> Result<Vec<u8>, ExtensionError> {
+        self.dispatch(method, input)
     }
 
     async fn call_async(&self, method: String, input: Vec<u8>) -> Result<Vec<u8>, ExtensionError> {
