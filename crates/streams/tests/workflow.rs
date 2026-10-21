@@ -90,9 +90,12 @@ fn time(seconds: u64) -> SystemTime {
 }
 
 impl Run {
+    /// A Workflow's ref, with the owner fields that lang fills.
     fn stream_ref(&self) -> Option<StreamRef> {
         Some(StreamRef {
             id: self.stream.clone(),
+            workflow_id: self.workflow_id.clone(),
+            first_execution_run_id: self.first_run_id.clone(),
         })
     }
 

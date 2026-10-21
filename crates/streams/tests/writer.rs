@@ -134,6 +134,7 @@ impl Case {
             namespace: self.namespace.clone(),
             stream: Some(StreamRef {
                 id: self.stream.clone(),
+                ..Default::default()
             }),
             producer: Some(producer),
             ..Default::default()
@@ -173,6 +174,7 @@ impl Case {
                 namespace: self.namespace.clone(),
                 stream: Some(StreamRef {
                     id: self.stream.clone(),
+                    ..Default::default()
                 }),
                 wait: millis(wait_ms),
                 ..Default::default()
@@ -276,6 +278,7 @@ async fn a_failed_flush_fails_the_flush_and_every_later_publish() {
             namespace: case.namespace.clone(),
             stream: Some(StreamRef {
                 id: case.stream.clone(),
+                ..Default::default()
             }),
             producer: Some(client()),
             ..Default::default()
