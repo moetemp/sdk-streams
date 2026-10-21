@@ -127,9 +127,17 @@ impl WorkflowRuns {
 
     /// Waits up to `timeout` for the closes that are still going out. Answers how many are left.
     pub(crate) async fn drain(&self, timeout: Duration) -> usize {
+        /// Opens the tracker again also when the caller drops the drain, for example when
+        /// lang cancels it at shutdown.
+        struct Reopen<'a>(&'a TaskTracker);
+        impl Drop for Reopen<'_> {
+            fn drop(&mut self) {
+                self.0.reopen();
+            }
+        }
         self.closes.close();
+        let _reopen = Reopen(&self.closes);
         let _ = tokio::time::timeout(timeout, self.closes.wait()).await;
-        self.closes.reopen();
         self.closes.len()
     }
 }

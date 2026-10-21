@@ -573,3 +573,35 @@ async fn a_task_with_no_started_time_fails_its_flush() {
         assert!(error.message.contains("started time"), "{}", error.message);
     }
 }
+
+#[tokio::test]
+async fn calls_after_a_drain_still_answer() {
+    for run in runs().await {
+        run.activation(vec![
+            run.create(),
+            run.publish(&["a"]),
+            run.close(false, None),
+        ])
+        .unwrap();
+        run.complete(&run.task(3, 1), true).await.unwrap();
+        for _ in 0..2 {
+            run.drain().await;
+            let read = tokio::time::timeout(Duration::from_secs(5), run.read())
+                .await
+                .expect("a call after the drain answered");
+            assert!(read.done);
+            // A close after the drain still goes out in the background.
+            run.activation(vec![run.create(), run.close(false, None)])
+                .unwrap();
+            run.complete(&run.task(6, 1).after(3), true).await.unwrap();
+        }
+        run.drain().await;
+        // A drain that the caller drops halfway leaves the extension as it was.
+        let drain = DrainClosesRequest { timeout: None }.encode_to_vec();
+        let dropped = run.ext.call_async("DrainCloses".to_string(), drain);
+        let _ = tokio::time::timeout(Duration::from_millis(1), dropped).await;
+        let read = tokio::time::timeout(Duration::from_secs(5), run.read()).await;
+        assert!(read.expect("a call after a dropped drain answered").done);
+        run.drain().await;
+    }
+}
