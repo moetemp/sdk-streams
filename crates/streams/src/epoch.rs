@@ -66,6 +66,11 @@ pub fn compare_epochs(a: &ProducerEpoch, b: &ProducerEpoch) -> Ordering {
     epoch_key(a).cmp(&epoch_key(b))
 }
 
+/// The started-time part of a task key.
+fn time_key(task: &WorkflowTaskEpoch) -> [String; 2] {
+    time_fields(task.started_time.as_ref())
+}
+
 fn compare_tasks(a: &WorkflowTaskEpoch, b: &WorkflowTaskEpoch) -> Ordering {
     task_key(a).cmp(&task_key(b))
 }
@@ -118,7 +123,15 @@ pub fn withdraws(supersession: &Supersession, record: &StreamRecord) -> bool {
     let lower_at = |at: &WorkflowTaskEpoch| {
         started == at.started_event_id && compare_tasks(&old, at) == Ordering::Less
     };
-    lower_at(&task) || completed.is_some_and(lower_at)
+    // Core gives c with attempt 0 when it no longer has c's attempt. The attempts of one task
+    // start in time order, so the started time still tells the lower ones.
+    let lower_at_completed = |c: &WorkflowTaskEpoch| {
+        if c.attempt > 0 {
+            return lower_at(c);
+        }
+        started == c.started_event_id && time_key(&old) < time_key(c)
+    };
+    lower_at(&task) || completed.is_some_and(lower_at_completed)
 }
 
 /// Whether a Producer is the Workflow run `workflow_producer_id`, or one of its Local
