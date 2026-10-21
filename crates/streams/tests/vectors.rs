@@ -165,6 +165,7 @@ fn the_appendix_e_withdrawals_match() {
                 .map(|list| list.iter().map(|v| v.as_i64().unwrap()).collect())
                 .unwrap_or_default(),
             withdraw_run: s["withdraw_run"].as_str().unwrap_or_default().to_string(),
+            run_id: s["run_id"].as_str().unwrap_or_default().to_string(),
         };
         let p = &case["record"]["producer"];
         let record = StreamRecord {
