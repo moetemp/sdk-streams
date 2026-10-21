@@ -8,16 +8,22 @@
 
 pub mod epoch;
 mod error;
+mod extension;
 pub mod ids;
+mod metrics;
 pub mod offset;
 pub mod protos;
+mod record;
 pub mod redis;
 #[cfg(test)]
 mod server {
     include!("../tests/support/server.rs");
 }
+mod service;
 
 pub use error::{Reason, StreamError, StreamResult};
+pub use extension::{EXTENSION_NAME, ExtensionOptions, RedisStreamExtension};
+pub use service::{MAX_RECORDS, MAX_WAIT};
 
 /// The protos lang and the crate exchange.
 pub mod proto {
