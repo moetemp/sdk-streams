@@ -25,8 +25,8 @@ use tokio::time::Instant;
 use tokio_util::task::TaskTracker;
 use tracing::warn;
 
-/// How long before the task's deadline the flush gives up, so Core still fails the task in
-/// time.
+/// How long before the task's deadline the flush gives up at most, so it fails with its own
+/// error before Core's deadline does.
 const DEADLINE_MARGIN: Duration = Duration::from_millis(200);
 /// The first backoff of a Store call that failed. It doubles on each try.
 const FIRST_BACKOFF: Duration = Duration::from_millis(50);
@@ -237,9 +237,10 @@ impl StreamService {
             ));
         }
         let started = std::time::Instant::now();
-        let deadline = Instant::from_std(task.deadline)
-            .checked_sub(DEADLINE_MARGIN)
-            .unwrap_or_else(Instant::now);
+        // A Local Activity heartbeat completion comes late in the task, with little time left,
+        // so the margin is at most a quarter of what is left.
+        let left = Instant::from_std(task.deadline).saturating_duration_since(Instant::now());
+        let deadline = Instant::now() + left - DEADLINE_MARGIN.min(left / 4);
         let mut order: Vec<String> = vec![];
         let mut streams: HashMap<String, StreamCalls> = HashMap::new();
         let mut closes = vec![];
