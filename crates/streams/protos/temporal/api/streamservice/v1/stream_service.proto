@@ -179,6 +179,9 @@ message ReadRecordsRequest {
     // End the read with an IDLE Record when no new Record comes for this long. Empty never
     // ends on idle. The facade counts it across reads, since one read waits at most 60 s.
     google.protobuf.Duration idle_timeout = 9;
+    // Also read the Topics that start with one of these. A Record passes when its Topic is in
+    // topics or starts with a prefix. Both empty reads every Topic.
+    repeated string topic_prefixes = 10;
 }
 
 message ReadRecordsResponse {

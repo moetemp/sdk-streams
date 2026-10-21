@@ -233,7 +233,10 @@ impl StreamService {
                 ),
             ));
         }
-        let topics = request.topics;
+        let topics = TopicFilter {
+            topics: request.topics,
+            prefixes: request.topic_prefixes,
+        };
         // Where the next scan starts. A scan that finds only other Topics moves it on, so the
         // wait after it doesn't wake for the same entries.
         let mut cursor = from;
@@ -299,7 +302,7 @@ impl StreamService {
         state: &StreamState,
         from: i64,
         max: usize,
-        topics: &[String],
+        topics: &TopicFilter,
     ) -> StreamResult<(Option<ReadRecordsResponse>, i64)> {
         // A read past the close gives the close Record again, so every read ends with it.
         if let Some(closed_at) = state.closed_at.filter(|at| from > *at) {
@@ -362,7 +365,7 @@ impl StreamService {
                     done = true;
                     break;
                 }
-                if topics.is_empty() || topics.contains(&record.topic) {
+                if topics.passes(&record.topic) {
                     records.push(record);
                 }
                 if records.len() >= max {
@@ -379,6 +382,21 @@ impl StreamService {
             done,
         };
         Ok((Some(page), next))
+    }
+}
+
+/// Which Topics a read gives. A `Superseded` item passes every filter, so the page adds it
+/// before the filter runs.
+pub(crate) struct TopicFilter {
+    topics: Vec<String>,
+    prefixes: Vec<String>,
+}
+
+impl TopicFilter {
+    fn passes(&self, topic: &str) -> bool {
+        (self.topics.is_empty() && self.prefixes.is_empty())
+            || self.topics.iter().any(|t| t == topic)
+            || self.prefixes.iter().any(|p| topic.starts_with(p.as_str()))
     }
 }
 
@@ -432,5 +450,25 @@ impl Flagged for crate::redis::Appended {
 impl Flagged for crate::redis::Closed {
     fn flagged(&self) -> bool {
         self.flagged
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_topic_passes_by_exact_name_or_by_prefix() {
+        let filter = |topics: &[&str], prefixes: &[&str]| TopicFilter {
+            topics: topics.iter().map(|t| t.to_string()).collect(),
+            prefixes: prefixes.iter().map(|p| p.to_string()).collect(),
+        };
+        assert!(filter(&[], &[]).passes("any"));
+        let both = filter(&["turns"], &["tool/"]);
+        assert!(both.passes("turns"));
+        assert!(both.passes("tool/search"));
+        assert!(!both.passes("turns/1"));
+        assert!(!both.passes("tool"));
+        assert!(filter(&[], &[""]).passes("x"));
     }
 }
