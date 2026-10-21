@@ -18,7 +18,7 @@ use redis::{
     Value,
     cluster_routing::{Route, RoutingInfo, SingleNodeRoutingInfo, SlotAddr},
 };
-use std::time::Duration;
+use std::{sync::Arc, time::Duration};
 use tokio::time::Instant;
 
 /// The format version this crate writes. A Stream with a higher one refuses writes.
@@ -48,6 +48,9 @@ pub struct RedisStoreOptions {
     pub blocking_reads_per_node: usize,
     /// How long a short call waits for its answer.
     pub response_timeout: Duration,
+    /// Opens a second connection for flushes that wait for replicas. See
+    /// [RedisStore::durable].
+    pub durable_connection: bool,
 }
 
 impl RedisStoreOptions {
@@ -61,6 +64,7 @@ impl RedisStoreOptions {
             safety_ttl: Duration::from_secs(90 * 24 * 60 * 60),
             blocking_reads_per_node: 256,
             response_timeout: Duration::from_secs(5),
+            durable_connection: false,
         }
     }
 }
@@ -200,12 +204,14 @@ pub struct Entry {
 }
 
 /// The Redis Store.
+#[derive(Clone)]
 pub struct RedisStore {
     shared: Shared,
-    blocking: BlockingPool,
+    blocking: Arc<BlockingPool>,
     prefix: String,
     retention: Duration,
     safety_ttl: Duration,
+    durable: Option<Shared>,
 }
 
 impl std::fmt::Debug for RedisStore {
@@ -247,12 +253,33 @@ impl RedisStore {
             options.response_timeout,
         )
         .mapped()?;
+        let durable = if options.durable_connection {
+            let shared = Shared::connect(&options.urls, options.cluster, options.response_timeout)
+                .await
+                .mapped()?;
+            Some(shared)
+        } else {
+            None
+        };
         Ok(Self {
             shared,
-            blocking,
+            blocking: Arc::new(blocking),
             prefix: options.key_prefix,
             retention: options.retention,
             safety_ttl: options.safety_ttl,
+            durable,
+        })
+    }
+
+    /// The Store on the connection for flushes that wait for replicas, or `None` without one.
+    /// `WAIT` holds the connection it runs on, and only that connection's own writes count, so
+    /// those flushes write and wait on a connection of their own.
+    pub fn durable(&self) -> Option<RedisStore> {
+        let shared = self.durable.clone()?;
+        Some(Self {
+            shared,
+            durable: None,
+            ..self.clone()
         })
     }
 
