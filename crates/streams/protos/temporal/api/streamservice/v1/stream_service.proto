@@ -1,0 +1,199 @@
+// Draft for the Brook v2 API proposal. It backs stream-service.wit in the same directory.
+// For the draft, every message and enum is in one package. A real change would split them
+// into temporal/api/stream/v1, temporal/api/enums/v1 and temporal/api/streamservice/v1.
+syntax = "proto3";
+
+package temporal.api.streamservice.v1;
+
+import "google/protobuf/duration.proto";
+import "google/protobuf/timestamp.proto";
+import "temporal/api/common/v1/message.proto";
+import "temporal/api/failure/v1/message.proto";
+
+// Identifies one Stream. The id is opaque to callers.
+message StreamRef {
+    string id = 1;
+}
+
+enum ProducerKind {
+    PRODUCER_KIND_UNSPECIFIED = 0;
+    PRODUCER_KIND_WORKFLOW = 1;
+    PRODUCER_KIND_LOCAL_ACTIVITY = 2;
+    PRODUCER_KIND_ACTIVITY = 3;
+    PRODUCER_KIND_CLIENT = 4;
+    PRODUCER_KIND_STANDALONE_ACTIVITY = 5;
+}
+
+// The ordered attempt of a Producer. Compared in this order: task_started_event_id,
+// task_attempt, task_started_time, attempt_scheduled_time, attempt. A field that a kind does
+// not use is empty and compares as zero. A timestamp compares seconds, then nanos.
+message ProducerEpoch {
+    // Workflow and Local Activity: the (dispatching) Workflow Task.
+    int64 task_started_event_id = 1;
+    int32 task_attempt = 2;
+    // Tells a reused started event id apart, for example after a dropped speculative task.
+    google.protobuf.Timestamp task_started_time = 5;
+    // Activity: when the server scheduled this attempt. A reset makes it later.
+    google.protobuf.Timestamp attempt_scheduled_time = 3;
+    // Activity, Local Activity and client attempt.
+    int32 attempt = 4;
+}
+
+message Producer {
+    ProducerKind kind = 1;
+    string id = 2;
+    ProducerEpoch epoch = 3;
+    // The run of the Producer, so nobody parses the id. Empty for a client.
+    string run_id = 4;
+}
+
+message WorkflowTaskEpoch {
+    int64 started_event_id = 1;
+    int32 attempt = 2;
+    google.protobuf.Timestamp started_time = 3;
+}
+
+message AppendRecord {
+    // Empty is the default Topic.
+    string topic = 1;
+    temporal.api.common.v1.Payload body = 2;
+}
+
+enum StreamRecordKind {
+    STREAM_RECORD_KIND_UNSPECIFIED = 0;
+    STREAM_RECORD_KIND_DATA = 1;
+    // Lua flags the first batch of a new epoch. The read makes this Record from the flag.
+    STREAM_RECORD_KIND_SUPERSEDED = 2;
+    STREAM_RECORD_KIND_CLOSE = 3;
+    // The last Record of a read that saw no new Record for idle_timeout. Its offset is the
+    // newest offset read + 1, the place to resume from.
+    STREAM_RECORD_KIND_IDLE = 4;
+}
+
+message Supersession {
+    ProducerKind producer_kind = 1;
+    string producer_id = 2;
+    ProducerEpoch epoch = 3;
+    // Workflow only.
+    WorkflowTaskEpoch previous_completed_task = 4;
+    repeated int64 failed_tasks = 5;
+    // Workflow retry only. The previous run. Every Record whose Producer carries it is withdrawn.
+    string withdraw_run = 6;
+}
+
+// An offset is the Redis entry id packed as ms << 20 | seq. It is ordered and unique in one
+// Stream, and it is sparse: offsets have gaps, so they don't count Records. Zero is never an
+// offset. A read names its Stream, so the read checks the offset against that Stream.
+message StreamRecord {
+    StreamRecordKind kind = 1;
+    int64 offset = 2;
+    string topic = 3;
+    Producer producer = 4;
+    temporal.api.common.v1.Payload body = 5;
+    Supersession supersession = 6;
+    temporal.api.common.v1.Payload close_result = 7;
+    temporal.api.failure.v1.Failure close_failure = 8;
+}
+
+// Idempotent for one id and one Retention. ALREADY_EXISTS for another Retention.
+message CreateStreamRequest {
+    string namespace = 1;
+    // Required from Workflow code.
+    string stream_id = 2;
+    // The age after which a Record is dropped. Empty is the Store default.
+    google.protobuf.Duration retention = 3;
+    // Workflow only. A retry run's first create: the previous run, whose Records it withdraws.
+    string withdraw_run = 4;
+}
+
+enum StreamStatus {
+    STREAM_STATUS_UNSPECIFIED = 0;
+    STREAM_STATUS_OPEN = 1;
+    STREAM_STATUS_CLOSED = 2;
+    STREAM_STATUS_EXPIRED = 3;
+}
+
+message CreateStreamResponse {
+    StreamRef stream = 1;
+    bool created = 2;
+    StreamStatus status = 3;
+}
+
+// FAILED_PRECONDITION if closed, fenced, or if the Stream's meta has a higher format version v
+// (detail stream_format_too_new). NOT_FOUND if absent.
+message AppendRecordsRequest {
+    string namespace = 1;
+    StreamRef stream = 2;
+    // Required outside a Workflow. In a Workflow the transport sets it.
+    Producer producer = 3;
+    // The batch number in this epoch. With the Producer and epoch it is the dedupe key.
+    int64 sequence = 4;
+    repeated AppendRecord records = 5;
+    // Workflow only. The failed tasks are those since this run's last flush to this Stream.
+    WorkflowTaskEpoch previous_completed_task = 6;
+    repeated int64 failed_tasks = 7;
+    // Workflow only. A retry run's first batch: the previous run, whose Records it withdraws.
+    string withdraw_run = 8;
+}
+
+message AppendRecordsResponse {
+    int64 first_offset = 1;
+    int64 last_offset = 2;
+}
+
+message CloseStreamRequest {
+    string namespace = 1;
+    StreamRef stream = 2;
+    Producer producer = 3;
+    temporal.api.common.v1.Payload result = 4;
+    temporal.api.failure.v1.Failure failure = 5;
+    // Workflow only.
+    WorkflowTaskEpoch previous_completed_task = 6;
+    repeated int64 failed_tasks = 7;
+}
+
+message CloseStreamResponse {
+}
+
+enum ReadStart {
+    READ_START_UNSPECIFIED = 0;
+    READ_START_BEGINNING = 1;
+    READ_START_END = 2;
+}
+
+message ReadRecordsRequest {
+    string namespace = 1;
+    StreamRef stream = 2;
+    // Start at this offset. Zero uses start. INVALID_ARGUMENT if past the newest offset + 1.
+    int64 from_offset = 3;
+    ReadStart start = 4;
+    // Empty reads every Topic in one order.
+    repeated string topics = 5;
+    int32 max_records = 6;
+    google.protobuf.Duration wait = 7;
+    // How long to wait for a Stream that nobody created yet. Empty fails at once with
+    // NOT_FOUND. At most 60 s.
+    google.protobuf.Duration create_wait = 8;
+    // End the read with an IDLE Record when no new Record comes for this long. Empty never
+    // ends on idle. The facade counts it across reads, since one read waits at most 60 s.
+    google.protobuf.Duration idle_timeout = 9;
+}
+
+message ReadRecordsResponse {
+    repeated StreamRecord records = 1;
+    // The from_offset of the next read: the newest offset read + 1.
+    int64 next_offset = 2;
+    bool done = 3;
+}
+
+message DescribeStreamRequest {
+    string namespace = 1;
+    StreamRef stream = 2;
+}
+
+message DescribeStreamResponse {
+    StreamStatus status = 1;
+    // Zero when the Stream has no Record.
+    int64 last_offset = 2;
+    google.protobuf.Duration retention = 3;
+}
