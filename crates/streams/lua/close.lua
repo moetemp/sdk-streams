@@ -21,6 +21,11 @@ if run ~= '' and redis.call('HGET', meta, 'wr|' .. run) then
   return refuse('FENCED', 'a Workflow retry withdrew the run of the Producer')
 end
 
+refused = check_ids_fit(log, now, 1)
+if refused then
+  return refused
+end
+
 -- A Workflow close has no epoch fence. The run's next task may flush before the close of the
 -- task before it goes out, and that close is still valid. Any other Producer is fenced as its
 -- appends are, so a stale attempt can't close the Stream.

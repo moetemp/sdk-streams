@@ -54,6 +54,11 @@ if local_activity and (contains(words(redis.call('HGET', meta, 'wt|' .. run)), t
   return refuse('FENCED', 'a Superseded item withdrew the Workflow Task of the call')
 end
 
+refused = check_ids_fit(log, now, records + 1)
+if refused then
+  return refused
+end
+
 -- The batch goes in. First find what it withdraws, then write.
 local flagged = false
 local index_field, withdrawn_field = 'ti|' .. run, 'wt|' .. run
