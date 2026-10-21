@@ -193,10 +193,12 @@ def withdraws(supersession, record):
         return True
     if started == t_started and old_key < t_key:
         return True
-    if c:
-        c_key = task_key(c["started_event_id"], c.get("attempt", 0),
-                         tuple(c.get("started_time", (0, 0))))
-        if started == c_started and old_key < c_key:
+    if c and started == c_started:
+        c_time = tuple(c.get("started_time", (0, 0)))
+        if c.get("attempt", 0) == 0:
+            # Core gives attempt 0 when it no longer has c's attempt, so the time decides.
+            return tuple(old.get("task_started_time", (0, 0))) < c_time
+        if old_key < task_key(c["started_event_id"], c["attempt"], c_time):
             return True
     return False
 
@@ -250,6 +252,11 @@ def withdrawal_examples():
     s = sup(wf(r1, 14), completed(5))
     case("e5 D between c and t goes", s, wf(r1, 11, attempt=2), True)
     case("e5 a Record at c stays", s, wf(r1, 5), False)
+    # c with attempt 0: an earlier attempt at c's started id goes, c itself stays.
+    s = sup(wf(r1, 14), {"started_event_id": 8, "attempt": 0, "started_time": [300, 0]})
+    case("c attempt 0, an earlier attempt at c goes", s, wf(r1, 8, attempt=1, time=(200, 0)),
+         True)
+    case("c attempt 0, c itself stays", s, wf(r1, 8, attempt=2, time=(300, 0)), False)
     # A Local Activity of a withdrawn task goes with it.
     la = {"kind": "local_activity", "id": "la:" + join(r1, "k"), "run_id": r1,
           "epoch": {"task_started_event_id": 5, "task_attempt": 1,

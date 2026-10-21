@@ -59,6 +59,7 @@ impl ExtensionOptions {
         if let Some(timeout) = duration(config.response_timeout) {
             store.response_timeout = timeout;
         }
+        store.durable_connection = config.durable_writes > 0;
         Ok(Self {
             store,
             durable_writes: config.durable_writes.max(0) as u32,
@@ -273,6 +274,7 @@ mod tests {
         assert_eq!(options.store.safety_ttl, Duration::from_secs(90 * 86_400));
         assert_eq!(options.store.blocking_reads_per_node, 256);
         assert_eq!(options.durable_writes, 2);
+        assert!(options.store.durable_connection);
         assert_eq!(options.durable_timeout, Duration::from_secs(1));
         assert!(ExtensionOptions::from_config(RedisStreamConfig::default()).is_err());
     }
