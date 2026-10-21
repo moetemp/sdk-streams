@@ -11,10 +11,8 @@ use crate::{
         ProducerKind, WorkflowCall, WorkflowTaskEpoch, workflow_call::Call,
     },
     record::{close_record, data_record, supersession},
-    redis::{
-        Batch, CreateOutcome, MAX_BATCH_BYTES, MAX_RECORD_BYTES, Owner, RedisStore, Withdrawal,
-    },
     service::StreamService,
+    store::{Batch, CreateOutcome, MAX_BATCH_BYTES, MAX_RECORD_BYTES, Owner, Store, Withdrawal},
 };
 use parking_lot::Mutex;
 use std::{collections::HashMap, sync::Arc, time::Duration};
@@ -281,9 +279,9 @@ impl StreamService {
             }
         }
         let durable = (options.durable_writes > 0)
-            .then(|| self.store.durable())
+            .then(|| self.store.durable_store())
             .flatten();
-        let store = durable.as_ref().unwrap_or(&self.store);
+        let store: &dyn Store = durable.as_deref().unwrap_or(self.store.as_ref());
         let flush = async {
             for id in &order {
                 let calls = streams.remove(id).unwrap_or_default();
@@ -315,7 +313,7 @@ impl StreamService {
 
     async fn flush_stream(
         &self,
-        store: &RedisStore,
+        store: &dyn Store,
         task: &WorkflowTaskCompletionInfo,
         id: &str,
         calls: StreamCalls,
@@ -412,7 +410,7 @@ impl StreamService {
     }
 
     async fn wait_durable(
-        store: &RedisStore,
+        store: &dyn Store,
         task: &WorkflowTaskCompletionInfo,
         id: &str,
         options: FlushOptions,

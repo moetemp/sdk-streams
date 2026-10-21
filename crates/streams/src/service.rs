@@ -13,7 +13,7 @@ use crate::{
         StreamRecordKind, StreamRef, StreamStatus, Supersession,
     },
     record::{close_record, data_records, supersession},
-    redis::{Batch, CreateOutcome, FORMAT_VERSION, Owner, RedisStore, StreamState, Withdrawal},
+    store::{Batch, CreateOutcome, FORMAT_VERSION, Owner, Store, StreamState, Withdrawal},
 };
 use prost::Message;
 use std::{sync::Arc, time::Duration};
@@ -30,7 +30,7 @@ const CREATE_POLL: Duration = Duration::from_millis(100);
 
 /// The Stream service on one Store.
 pub(crate) struct StreamService {
-    pub(crate) store: Arc<RedisStore>,
+    pub(crate) store: Arc<dyn Store>,
     pub(crate) metrics: Metrics,
 }
 

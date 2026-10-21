@@ -8,18 +8,17 @@ use std::{
     sync::Arc,
     time::{Duration, Instant},
 };
-use support::server_url;
 use temporalio_common::protos::temporal::api::common::v1::Payload;
 use temporalio_sdk_core::{ExtensionError, WorkerExtension};
 use temporalio_streams::{
-    ExtensionOptions, RedisStreamExtension,
+    RedisStreamExtension,
     ids::{activity_producer_id, client_producer_id},
     proto::{
         AppendRecord, AppendRecordsRequest, AppendRecordsResponse, CloseStreamRequest,
         CloseStreamResponse, CreateStreamRequest, CreateStreamResponse, DescribeStreamRequest,
         DescribeStreamResponse, Producer, ProducerEpoch, ProducerKind, ReadRecordsRequest,
-        ReadRecordsResponse, ReadStart, RedisStreamConfig, StreamErrorDetails, StreamRecordKind,
-        StreamRef, StreamStatus,
+        ReadRecordsResponse, ReadStart, StreamErrorDetails, StreamRecordKind, StreamRef,
+        StreamStatus,
     },
 };
 use tonic::Code;
@@ -42,29 +41,17 @@ fn unique() -> String {
 }
 
 async fn cases() -> Vec<Case> {
-    let mut cases = vec![];
-    for (variable, cluster) in [
-        ("STREAMS_REDIS_URL", false),
-        ("STREAMS_REDIS_CLUSTER_URL", true),
-    ] {
-        let Some(url) = server_url(variable) else {
-            continue;
-        };
-        let config = RedisStreamConfig {
-            urls: vec![url],
-            cluster,
-            key_prefix: "streams-test".to_string(),
-            ..Default::default()
-        };
-        let options = ExtensionOptions::from_config(config).unwrap();
-        let unique = unique();
-        cases.push(Case {
-            ext: RedisStreamExtension::new(options, None),
-            namespace: format!("ns-{unique}"),
-            stream: format!("s-{unique}"),
-        });
-    }
-    cases
+    support::extensions(|_| {}, true)
+        .into_iter()
+        .map(|ext| {
+            let unique = unique();
+            Case {
+                ext,
+                namespace: format!("ns-{unique}"),
+                stream: format!("s-{unique}"),
+            }
+        })
+        .collect()
 }
 
 async fn call<Req: Message, Resp: Message + Default>(

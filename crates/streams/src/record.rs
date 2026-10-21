@@ -5,7 +5,7 @@ use crate::{
     proto::{
         AppendRecord, Producer, StreamRecord, StreamRecordKind, Supersession, WorkflowTaskEpoch,
     },
-    redis::{MAX_BATCH_BYTES, MAX_RECORD_BYTES},
+    store::{MAX_BATCH_BYTES, MAX_RECORD_BYTES},
 };
 use prost::Message;
 use temporalio_common::protos::temporal::api::{common::v1::Payload, failure::v1::Failure};

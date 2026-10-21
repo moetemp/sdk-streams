@@ -10,6 +10,7 @@ pub mod epoch;
 mod error;
 mod extension;
 pub mod ids;
+pub mod memory;
 mod metrics;
 pub mod offset;
 pub mod protos;
@@ -20,11 +21,15 @@ mod server {
     include!("../tests/support/server.rs");
 }
 mod service;
+pub mod store;
 mod workflow;
 mod writer;
 
 pub use error::{Reason, StreamError, StreamResult};
-pub use extension::{EXTENSION_NAME, ExtensionOptions, RedisStreamExtension};
+pub use extension::{
+    EXTENSION_NAME, ExtensionOptions, MEMORY_EXTENSION_NAME, MemoryStreamExtension,
+    RedisStreamExtension, StreamExtension,
+};
 pub use service::{MAX_RECORDS, MAX_WAIT};
 
 /// The protos lang and the crate exchange.
