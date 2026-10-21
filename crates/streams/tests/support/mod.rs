@@ -167,6 +167,7 @@ pub(crate) fn supersession(producer: &Producer, withdrawal: &Withdrawal<'_>) -> 
         previous_completed_task: withdrawal.previous_completed.copied(),
         failed_tasks: withdrawal.failed_tasks.to_vec(),
         withdraw_run: withdrawal.withdraw_run.to_string(),
+        run_id: producer.run_id.clone(),
     }
     .encode_to_vec()
 }

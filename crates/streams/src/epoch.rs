@@ -4,9 +4,8 @@
 //! hex fields in the order of comparison. A plain string comparison of two keys then orders the
 //! epochs field by field. The shared vectors in `testdata/epochs.json` pin the keys.
 
-use crate::{
-    ids::run_of_workflow_producer,
-    proto::{Producer, ProducerEpoch, ProducerKind, StreamRecord, Supersession, WorkflowTaskEpoch},
+use crate::proto::{
+    Producer, ProducerEpoch, ProducerKind, StreamRecord, Supersession, WorkflowTaskEpoch,
 };
 use prost_types::Timestamp;
 use std::{
@@ -107,7 +106,7 @@ pub fn withdraws(supersession: &Supersession, record: &StreamRecord) -> bool {
             && producer.id == supersession.producer_id
             && compare_epochs(old, epoch) == Ordering::Less;
     }
-    if !of_run(producer, &supersession.producer_id) {
+    if !of_run(producer, supersession) {
         return false;
     }
     let (task, old) = (task_of(epoch), task_of(old));
@@ -134,16 +133,13 @@ pub fn withdraws(supersession: &Supersession, record: &StreamRecord) -> bool {
     lower_at(&task) || completed.is_some_and(lower_at_completed)
 }
 
-/// Whether a Producer is the Workflow run `workflow_producer_id`, or one of its Local
+/// Whether a Producer is the Workflow run of a `Superseded` item, or one of its Local
 /// Activities.
-fn of_run(producer: &Producer, workflow_producer_id: &str) -> bool {
+fn of_run(producer: &Producer, supersession: &Supersession) -> bool {
     let kind = ProducerKind::try_from(producer.kind).unwrap_or_default();
     match kind {
-        ProducerKind::Workflow => producer.id == workflow_producer_id,
-        ProducerKind::LocalActivity => {
-            run_of_workflow_producer(workflow_producer_id).as_deref()
-                == Some(producer.run_id.as_str())
-        }
+        ProducerKind::Workflow => producer.id == supersession.producer_id,
+        ProducerKind::LocalActivity => producer.run_id == supersession.run_id,
         _ => false,
     }
 }
