@@ -5,10 +5,10 @@ use crate::{
     metrics::Metrics,
     proto::{
         AppendRecordsRequest, BufferWorkflowCallsRequest, BufferWorkflowCallsResponse,
-        CloseStreamRequest, CloseWriterRequest, CloseWriterResponse, DescribeStreamRequest,
-        DrainClosesRequest, DrainClosesResponse, FlushWriterRequest, FlushWriterResponse,
-        OpenWriterRequest, OpenWriterResponse, PublishRequest, PublishResponse, ReadRecordsRequest,
-        RedisStreamConfig,
+        CloseStreamRequest, CloseWriterRequest, CloseWriterResponse, CloseWritersRequest,
+        CloseWritersResponse, DescribeStreamRequest, DrainClosesRequest, DrainClosesResponse,
+        FlushWriterRequest, FlushWriterResponse, OpenWriterRequest, OpenWriterResponse,
+        PublishRequest, PublishResponse, ReadRecordsRequest, RedisStreamConfig,
     },
     redis::{RedisStore, RedisStoreOptions},
     service::StreamService,
@@ -222,6 +222,14 @@ impl RedisStreamExtension {
                 let request = decode::<FlushWriterRequest>(input)?;
                 let last_offset = self.shared.writers.flush(request.writer_id).await?;
                 FlushWriterResponse { last_offset }.encode_to_vec()
+            }
+            "CloseWriters" => {
+                decode::<CloseWritersRequest>(input)?;
+                let failed = self.shared.writers.close_all().await;
+                CloseWritersResponse {
+                    failed: failed as i32,
+                }
+                .encode_to_vec()
             }
             "CloseWriter" => {
                 let request = decode::<CloseWriterRequest>(input)?;

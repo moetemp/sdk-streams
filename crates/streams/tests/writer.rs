@@ -387,3 +387,29 @@ async fn a_reopen_of_a_closed_writer_goes_on_with_its_sequence() {
         assert_eq!(case.visible().await, ["1", "2"]);
     }
 }
+
+#[tokio::test]
+async fn closing_every_writer_flushes_them_all() {
+    for case in cases().await {
+        let a = case
+            .open(client(), |r| r.batch_interval = millis(60_000))
+            .await;
+        let b = case
+            .open(activity(1), |r| r.batch_interval = millis(60_000))
+            .await;
+        case.publish(a, &["a"], false).unwrap();
+        case.publish(b, &["b"], false).unwrap();
+        let closed: temporalio_streams::proto::CloseWritersResponse = case
+            .call(
+                "CloseWriters",
+                temporalio_streams::proto::CloseWritersRequest {},
+            )
+            .await
+            .unwrap();
+        assert_eq!(closed.failed, 0);
+        let mut texts = case.visible().await;
+        texts.sort();
+        assert_eq!(texts, ["a", "b"]);
+        assert!(case.publish(a, &["x"], false).is_err());
+    }
+}

@@ -308,6 +308,18 @@ impl Writers {
         self.get(id)?.flush().await
     }
 
+    /// Closes every open writer. Answers how many failed their last flush.
+    pub(crate) async fn close_all(&self) -> usize {
+        let ids: Vec<u64> = self.open.lock().keys().copied().collect();
+        let mut failed = 0;
+        for id in ids {
+            if self.close(id).await.is_err() {
+                failed += 1;
+            }
+        }
+        failed
+    }
+
     /// Flushes, then drops the writer.
     pub(crate) async fn close(&self, id: u64) -> StreamResult<i64> {
         let writer = self.get(id)?;
