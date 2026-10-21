@@ -566,3 +566,43 @@ async fn a_read_of_an_expired_open_stream_fails_instead_of_waiting() {
         assert_eq!(reason(&error), "stream_invalid");
     }
 }
+
+#[tokio::test]
+async fn a_prefix_filter_reads_the_topics_under_it_and_keeps_superseded_items() {
+    for case in cases().await {
+        case.create(None).await.unwrap();
+        case.append(activity(1, 10), 1, vec![record("tool/a", "old")])
+            .await
+            .unwrap();
+        case.append(
+            activity(2, 20),
+            1,
+            vec![
+                record("turns", "t1"),
+                record("tool/a", "a1"),
+                record("tools", "s1"),
+                record("tool/b", "b1"),
+            ],
+        )
+        .await
+        .unwrap();
+        let read = case
+            .read(ReadRecordsRequest {
+                topics: vec!["turns".to_string()],
+                topic_prefixes: vec!["tool/".to_string()],
+                ..Default::default()
+            })
+            .await
+            .unwrap();
+        assert_eq!(texts(&read), ["old", "<superseded>", "t1", "a1", "b1"]);
+        // A filter that matches nothing scans the log and moves the offset on.
+        let none = case
+            .read(ReadRecordsRequest {
+                topic_prefixes: vec!["nothing/".to_string()],
+                ..Default::default()
+            })
+            .await
+            .unwrap();
+        assert_eq!(texts(&none), ["<superseded>"]);
+    }
+}

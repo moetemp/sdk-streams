@@ -23,3 +23,5 @@
   `CloseWriter`. A writer flushes every `batch_interval`, at once on `force_flush`, and refuses a
   publish past its buffer limit. A writer of an Activity attempt above 1 first sends an empty
   batch, so the new epoch withdraws the earlier attempt's Records.
+- Added `topic_prefixes` (field 10) to `ReadRecordsRequest`. A Record passes when its Topic is in
+  `topics` or starts with a prefix.
