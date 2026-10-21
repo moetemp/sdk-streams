@@ -2,7 +2,7 @@
 //! Store in tests. Both keep the same rules, which the Lua scripts state.
 
 use crate::{
-    StreamResult,
+    Reason, StreamError, StreamResult,
     proto::{Producer, WorkflowTaskEpoch},
 };
 use std::{sync::Arc, time::Duration};
@@ -151,9 +151,91 @@ pub struct Entry {
     pub supersession: Option<Vec<u8>>,
 }
 
+/// What a Store does atomically beyond the log. The service checks a capability before a
+/// call that needs it, so a Store that lacks one refuses that call cleanly instead of giving
+/// weaker guarantees in silence.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct Capabilities(u8);
+
+impl Capabilities {
+    /// Each append checks the Producer's epoch and its last `sequence` before it writes.
+    pub const PRODUCER_FENCE: Self = Self(1);
+    /// Each append flags the first batch of a new epoch that withdraws, keeps the run's task
+    /// index and refuses a Local Activity of a withdrawn task.
+    pub const WITHDRAWAL: Self = Self(1 << 1);
+    /// A retry run's first write withdraws the previous run and fences its Producers.
+    pub const RUN_FENCE: Self = Self(1 << 2);
+    /// A close writes the close Record and every later append is refused.
+    pub const CLOSE: Self = Self(1 << 3);
+    /// A write can wait until replicas have it, for `durable_writes`.
+    pub const REPLICA_WAIT: Self = Self(1 << 4);
+    /// An open Workflow-owned Stream keeps the safety TTL, not the Retention.
+    pub const SAFETY_TTL: Self = Self(1 << 5);
+    /// Every capability.
+    pub const ALL: Self = Self((1 << 6) - 1);
+
+    const NAMES: [(Self, &'static str); 6] = [
+        (Self::PRODUCER_FENCE, "producer_fence"),
+        (Self::WITHDRAWAL, "withdrawal"),
+        (Self::RUN_FENCE, "run_fence"),
+        (Self::CLOSE, "close"),
+        (Self::REPLICA_WAIT, "replica_wait"),
+        (Self::SAFETY_TTL, "safety_ttl"),
+    ];
+
+    /// Both sets.
+    pub const fn union(self, other: Self) -> Self {
+        Self(self.0 | other.0)
+    }
+
+    /// This set without the other one.
+    pub const fn without(self, other: Self) -> Self {
+        Self(self.0 & !other.0)
+    }
+
+    /// Whether every capability of `other` is in this set.
+    pub const fn contains(self, other: Self) -> bool {
+        self.0 & other.0 == other.0
+    }
+
+    /// The names of the capabilities in this set.
+    pub fn names(self) -> Vec<&'static str> {
+        Self::NAMES
+            .iter()
+            .filter(|(capability, _)| self.contains(*capability))
+            .map(|(_, name)| *name)
+            .collect()
+    }
+
+    /// Refuses a call that needs a capability this set lacks, and names the missing ones.
+    pub fn require(self, needed: Self) -> StreamResult<()> {
+        let missing = needed.without(self);
+        if missing == Self::default() {
+            return Ok(());
+        }
+        Err(unsupported(&missing.names().join(", ")))
+    }
+}
+
+fn unsupported(capability: &str) -> StreamError {
+    StreamError::new(
+        Reason::Unsupported,
+        format!("The Store lacks the capability {capability}"),
+    )
+}
+
 /// The calls of a Store. Each one is atomic, as one Lua script is on Redis.
+///
+/// The required calls are the log contract: a create key, an atomic batch append, an ordered
+/// read with the Stream's state, stable offsets, prefix Retention and a wait for the next
+/// entry. An append applies the rules of the capabilities the Store declares. The optional
+/// calls refuse by default.
 #[async_trait::async_trait]
 pub trait Store: Send + Sync + 'static {
+    /// What the Store does atomically beyond the log. It has no default, so a Store that wraps
+    /// another one must say what it forwards.
+    fn capabilities(&self) -> Capabilities;
+
     /// The Retention of a Stream that its create gives none.
     fn default_retention(&self) -> Duration;
 
@@ -167,23 +249,13 @@ pub trait Store: Send + Sync + 'static {
         withdrawal: &Withdrawal<'_>,
     ) -> StreamResult<Created>;
 
-    /// Appends one batch.
+    /// Appends one batch whole, or nothing of it.
     async fn append(
         &self,
         namespace: &str,
         stream_id: &str,
         batch: &Batch<'_>,
     ) -> StreamResult<Appended>;
-
-    /// Closes a Stream with an encoded close Record.
-    async fn close(
-        &self,
-        namespace: &str,
-        stream_id: &str,
-        producer: &Producer,
-        record: &[u8],
-        withdrawal: &Withdrawal<'_>,
-    ) -> StreamResult<Closed>;
 
     /// Reads the Stream's state and up to `count` entries from `from`, inclusive. Zero reads
     /// from the start of the log.
@@ -205,18 +277,56 @@ pub trait Store: Send + Sync + 'static {
         deadline: Instant,
     ) -> StreamResult<bool>;
 
+    /// Closes a Stream with an encoded close Record. Needs [Capabilities::CLOSE].
+    async fn close(
+        &self,
+        _namespace: &str,
+        _stream_id: &str,
+        _producer: &Producer,
+        _record: &[u8],
+        _withdrawal: &Withdrawal<'_>,
+    ) -> StreamResult<Closed> {
+        Err(unsupported("close"))
+    }
+
     /// Waits until `replicas` replicas have this process's writes to the Stream. Answers how
-    /// many have them.
+    /// many have them. Needs [Capabilities::REPLICA_WAIT].
     async fn wait_replicas(
         &self,
-        namespace: &str,
-        stream_id: &str,
-        replicas: u32,
-        timeout: Duration,
-    ) -> StreamResult<i64>;
+        _namespace: &str,
+        _stream_id: &str,
+        _replicas: u32,
+        _timeout: Duration,
+    ) -> StreamResult<i64> {
+        Err(unsupported("replica_wait"))
+    }
 
     /// The Store for flushes that wait for replicas, if it has one of its own.
     fn durable_store(&self) -> Option<Arc<dyn Store>> {
         None
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_missing_capability_is_refused_by_name() {
+        let some = Capabilities::PRODUCER_FENCE.union(Capabilities::CLOSE);
+        some.require(Capabilities::CLOSE).unwrap();
+        let error = some
+            .require(Capabilities::CLOSE.union(Capabilities::REPLICA_WAIT))
+            .unwrap_err();
+        assert_eq!(error.reason, Reason::Unsupported);
+        assert!(error.message.ends_with("replica_wait"), "{}", error.message);
+        assert_eq!(Capabilities::ALL.names().len(), 6);
+        assert_eq!(
+            Capabilities::ALL
+                .without(Capabilities::REPLICA_WAIT)
+                .names()
+                .len(),
+            5
+        );
     }
 }

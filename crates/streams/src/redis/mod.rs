@@ -15,7 +15,7 @@ use crate::{
     ids::{StreamKeys, encode_part},
     offset::{entry_id_of_offset, offset_of_entry_id},
     proto::{Producer, ProducerKind},
-    store::Store,
+    store::{Capabilities, Store},
 };
 use conn::{BlockingPool, Shared};
 use errors::Mapped;
@@ -396,6 +396,11 @@ impl RedisStore {
 
 #[async_trait::async_trait]
 impl Store for RedisStore {
+    // Every rule is in the Lua scripts.
+    fn capabilities(&self) -> Capabilities {
+        Capabilities::ALL
+    }
+
     fn default_retention(&self) -> Duration {
         self.retention
     }

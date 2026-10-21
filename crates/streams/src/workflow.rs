@@ -12,7 +12,10 @@ use crate::{
     },
     record::{close_record, data_record, supersession},
     service::StreamService,
-    store::{Batch, CreateOutcome, MAX_BATCH_BYTES, MAX_RECORD_BYTES, Owner, Store, Withdrawal},
+    store::{
+        Batch, Capabilities, CreateOutcome, MAX_BATCH_BYTES, MAX_RECORD_BYTES, Owner, Store,
+        Withdrawal,
+    },
 };
 use parking_lot::Mutex;
 use std::{collections::HashMap, sync::Arc, time::Duration};
@@ -282,6 +285,30 @@ impl StreamService {
             .then(|| self.store.durable_store())
             .flatten();
         let store: &dyn Store = durable.as_deref().unwrap_or(self.store.as_ref());
+        // All checks come before the first write, so a Store that lacks a capability fails the
+        // task with nothing written.
+        let mut needed = Capabilities::default();
+        for calls in streams.values() {
+            if !calls.creates.is_empty() {
+                needed = needed.union(Capabilities::SAFETY_TTL);
+            }
+            if !calls.records.is_empty() {
+                needed = needed.union(Capabilities::PRODUCER_FENCE.union(Capabilities::WITHDRAWAL));
+            }
+        }
+        if !withdraw_run.is_empty() && !streams.is_empty() {
+            needed = needed.union(Capabilities::RUN_FENCE);
+        }
+        if !closes.is_empty() {
+            needed = needed.union(Capabilities::CLOSE);
+        }
+        if options.durable_writes > 0 {
+            needed = needed.union(Capabilities::REPLICA_WAIT);
+        }
+        if let Err(error) = store.capabilities().require(needed) {
+            self.metrics.flush_failed();
+            return Err(error);
+        }
         let flush = async {
             for id in &order {
                 let calls = streams.remove(id).unwrap_or_default();

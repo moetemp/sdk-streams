@@ -40,6 +40,8 @@ pub enum Reason {
     BufferFull,
     /// No writer has the id.
     UnknownWriter,
+    /// The Store lacks a capability that the call needs.
+    Unsupported,
 }
 
 impl Reason {
@@ -59,6 +61,7 @@ impl Reason {
             Reason::Storage => "stream_storage",
             Reason::BufferFull => "stream_buffer_full",
             Reason::UnknownWriter => "stream_unknown_writer",
+            Reason::Unsupported => "stream_unsupported",
         }
     }
 
@@ -73,6 +76,7 @@ impl Reason {
             Reason::Offset | Reason::TooLarge | Reason::Invalid => Code::InvalidArgument,
             Reason::Storage => Code::Unavailable,
             Reason::BufferFull => Code::ResourceExhausted,
+            Reason::Unsupported => Code::Unimplemented,
         }
     }
 }
