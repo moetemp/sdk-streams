@@ -121,6 +121,7 @@ impl Case {
     fn stream(&self) -> Option<StreamRef> {
         Some(StreamRef {
             id: self.stream.clone(),
+            ..Default::default()
         })
     }
 
@@ -420,7 +421,10 @@ async fn a_quiet_read_ends_with_an_idle_record_and_a_long_poll_wakes_on_append()
             tokio::time::sleep(Duration::from_millis(150)).await;
             let request = AppendRecordsRequest {
                 namespace,
-                stream: Some(StreamRef { id: stream }),
+                stream: Some(StreamRef {
+                    id: stream,
+                    ..Default::default()
+                }),
                 producer: Some(client(1)),
                 sequence: 2,
                 records: vec![record("", "2")],
@@ -591,5 +595,46 @@ async fn a_prefix_filter_reads_the_topics_under_it_and_keeps_superseded_items() 
             .await
             .unwrap();
         assert_eq!(texts(&none), ["<superseded>"]);
+    }
+}
+
+#[tokio::test]
+async fn a_ref_with_the_owner_fields_and_one_without_reach_the_same_stream() {
+    for case in cases().await {
+        case.create(None).await.unwrap();
+        let owned = Some(StreamRef {
+            id: case.stream.clone(),
+            workflow_id: "agent-1".to_string(),
+            first_execution_run_id: "run-1".to_string(),
+        });
+        // Owner fields that don't match the id change nothing either.
+        let other = Some(StreamRef {
+            id: case.stream.clone(),
+            workflow_id: "someone-else".to_string(),
+            first_execution_run_id: String::new(),
+        });
+        for (sequence, stream) in [(1, owned.clone()), (2, case.stream()), (3, other)] {
+            let request = AppendRecordsRequest {
+                namespace: case.namespace.clone(),
+                stream,
+                producer: Some(client(1)),
+                sequence,
+                records: vec![record("", &sequence.to_string())],
+                ..Default::default()
+            };
+            let _: AppendRecordsResponse = call(&case.ext, "AppendRecords", request).await.unwrap();
+        }
+        let read = |stream: Option<StreamRef>| ReadRecordsRequest {
+            namespace: case.namespace.clone(),
+            stream,
+            ..Default::default()
+        };
+        let plain: ReadRecordsResponse = call(&case.ext, "ReadRecords", read(case.stream()))
+            .await
+            .unwrap();
+        let with_owner: ReadRecordsResponse =
+            call(&case.ext, "ReadRecords", read(owned)).await.unwrap();
+        assert_eq!(texts(&plain), ["1", "2", "3"]);
+        assert_eq!(plain, with_owner);
     }
 }

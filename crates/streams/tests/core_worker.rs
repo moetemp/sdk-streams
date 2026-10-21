@@ -133,6 +133,7 @@ fn publish(stream: &str, text: &str) -> WorkflowCall {
         call: Some(Call::Append(AppendRecordsRequest {
             stream: Some(StreamRef {
                 id: stream.to_string(),
+                ..Default::default()
             }),
             records: vec![AppendRecord {
                 topic: String::new(),
@@ -275,7 +276,10 @@ async fn the_local_activity_heartbeat_completion_flushes_the_first_task() {
                 "AppendRecords",
                 AppendRecordsRequest {
                     namespace,
-                    stream: Some(StreamRef { id: stream.clone() }),
+                    stream: Some(StreamRef {
+                        id: stream.clone(),
+                        ..Default::default()
+                    }),
                     producer: Some(producer),
                     sequence: 1,
                     records: vec![AppendRecord {
@@ -298,7 +302,10 @@ async fn the_local_activity_heartbeat_completion_flushes_the_first_task() {
 
         let close = WorkflowCall {
             call: Some(Call::Close(CloseStreamRequest {
-                stream: Some(StreamRef { id: stream.clone() }),
+                stream: Some(StreamRef {
+                    id: stream.clone(),
+                    ..Default::default()
+                }),
                 ..Default::default()
             })),
             when_run_closes: true,
@@ -338,7 +345,10 @@ async fn the_local_activity_heartbeat_completion_flushes_the_first_task() {
             "ReadRecords",
             ReadRecordsRequest {
                 namespace,
-                stream: Some(StreamRef { id: stream.clone() }),
+                stream: Some(StreamRef {
+                    id: stream.clone(),
+                    ..Default::default()
+                }),
                 ..Default::default()
             },
         )

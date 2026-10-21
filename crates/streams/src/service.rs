@@ -98,6 +98,7 @@ impl StreamService {
         Ok(CreateStreamResponse {
             stream: Some(StreamRef {
                 id: request.stream_id,
+                ..Default::default()
             }),
             created: created.outcome == CreateOutcome::Created,
             status: status as i32,

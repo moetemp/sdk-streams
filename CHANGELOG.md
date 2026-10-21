@@ -28,3 +28,5 @@
 - Added `MemoryStreamExtension` (`temporalio-streams-memory`), the Stream runtime on an in-process
   memory Store for tests. A `Store` trait has the calls of the Redis and memory Stores, and one
   test suite runs on both.
+- Added `workflow_id` (2) and `first_execution_run_id` (3) to `StreamRef`. A Workflow's ref sets
+  them, and the Store keys on `id` only.
