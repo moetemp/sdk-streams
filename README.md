@@ -14,7 +14,7 @@ commit must equal the `sdk-core` submodule commit of the sdk-python stage that l
 
 | Stage | sdk-streams branch | sdk-rust branch |
 |---|---|---|
-| Brook v3 | `moe/brook/v3/s1-protos-and-ids` and up | `moe/brook/v3/c4-local-activity-workflow-task` `d05afbad` |
+| Brook v3 | `moe/brook/v3/s1-protos-and-ids` and up | `moe/brook/v3/c4-local-activity-workflow-task` `3a9203ac` |
 
 ## Linking from a lang bridge
 
