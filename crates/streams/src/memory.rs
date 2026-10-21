@@ -9,8 +9,8 @@ use crate::{
     offset::{entry_id_of_offset, offset_of_entry_id},
     proto::{Producer, ProducerKind},
     store::{
-        Appended, Batch, Closed, CreateOutcome, Created, Entry, FORMAT_VERSION, Owner, Store,
-        StreamState, TOMBSTONE, Withdrawal,
+        Appended, Batch, Capabilities, Closed, CreateOutcome, Created, Entry, FORMAT_VERSION,
+        Owner, Store, StreamState, TOMBSTONE, Withdrawal,
     },
 };
 use parking_lot::Mutex;
@@ -383,6 +383,11 @@ fn offsets(first: &str, last: &str) -> StreamResult<Option<(i64, i64)>> {
 
 #[async_trait::async_trait]
 impl Store for MemoryStore {
+    // A process has no replicas to wait for.
+    fn capabilities(&self) -> Capabilities {
+        Capabilities::ALL.without(Capabilities::REPLICA_WAIT)
+    }
+
     fn default_retention(&self) -> Duration {
         self.retention
     }
@@ -804,17 +809,6 @@ impl Store for MemoryStore {
                 return Ok(false);
             }
         }
-    }
-
-    async fn wait_replicas(
-        &self,
-        _namespace: &str,
-        _stream_id: &str,
-        _replicas: u32,
-        _timeout: Duration,
-    ) -> StreamResult<i64> {
-        // A process has no replicas.
-        Ok(0)
     }
 }
 

@@ -13,7 +13,9 @@ use crate::{
         StreamRecordKind, StreamRef, StreamStatus, Supersession,
     },
     record::{close_record, data_records, supersession},
-    store::{Batch, CreateOutcome, FORMAT_VERSION, Owner, Store, StreamState, Withdrawal},
+    store::{
+        Batch, Capabilities, CreateOutcome, FORMAT_VERSION, Owner, Store, StreamState, Withdrawal,
+    },
 };
 use prost::Message;
 use std::{sync::Arc, time::Duration};
@@ -114,6 +116,10 @@ impl StreamService {
         if request.sequence < 1 {
             return Err(StreamError::invalid("The sequence must be 1 or more"));
         }
+        // Without the fence and the flag, a copy or a stale batch would reach Readers.
+        self.store
+            .capabilities()
+            .require(Capabilities::PRODUCER_FENCE.union(Capabilities::WITHDRAWAL))?;
         let records = data_records(producer, request.records)?;
         let bytes = supersession(producer, None, &[], "");
         let batch = Batch {
@@ -150,6 +156,7 @@ impl StreamService {
     ) -> StreamResult<CloseStreamResponse> {
         let id = stream_id(request.stream.as_ref())?;
         let producer = outside_producer(request.producer.as_ref())?;
+        self.store.capabilities().require(Capabilities::CLOSE)?;
         let record = close_record(producer, request.result, request.failure);
         let bytes = supersession(producer, None, &[], "");
         let withdrawal = Withdrawal {

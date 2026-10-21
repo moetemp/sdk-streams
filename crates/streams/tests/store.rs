@@ -11,7 +11,7 @@ use temporalio_streams::{
     Reason,
     ids::{activity_producer_id, client_producer_id},
     proto::{Producer, ProducerEpoch, ProducerKind},
-    store::{Batch, CreateOutcome, Owner, Withdrawal},
+    store::{Batch, Capabilities, CreateOutcome, Owner, Withdrawal},
 };
 
 fn activity(run: &str, attempt: i32, scheduled: i64) -> Producer {
@@ -535,9 +535,17 @@ async fn a_blocked_read_wakes_on_an_append_and_a_wait_for_replicas_ends() {
                 0,
                 Duration::from_millis(100),
             )
-            .await
-            .unwrap();
-        assert_eq!(replicas, 0);
+            .await;
+        // A Store with no replica wait refuses it by name.
+        if target
+            .store
+            .capabilities()
+            .contains(Capabilities::REPLICA_WAIT)
+        {
+            assert_eq!(replicas.unwrap(), 0);
+        } else {
+            assert_eq!(replicas.unwrap_err().reason, Reason::Unsupported);
+        }
     }
 }
 

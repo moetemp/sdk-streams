@@ -30,3 +30,5 @@
   test suite runs on both.
 - Added `workflow_id` (2) and `first_execution_run_id` (3) to `StreamRef`. A Workflow's ref sets
   them, and the Store keys on `id` only.
+- Split `Store` into the required log calls and capability calls. A call that needs a
+  capability the Store lacks fails with UNIMPLEMENTED and the reason `stream_unsupported`.
