@@ -1,0 +1,130 @@
+syntax = "proto3";
+
+// The messages of the crate's own extension calls, next to the five Stream service operations.
+// Lang sends them through the bridge's generic extension call, by the method name in each
+// comment. Field numbers are part of the contract with every SDK.
+package temporal.sdk.streams.v1;
+
+import "google/protobuf/duration.proto";
+import "temporal/api/streamservice/v1/stream_service.proto";
+
+// The settings of the Redis Stream extension. Lang builds it from the plugin options.
+message RedisStreamConfig {
+    // One URL, or the seed URLs of a cluster. Credentials and TLS come from the URL.
+    repeated string urls = 1;
+    bool cluster = 2;
+    // Empty is `temporal-streams`.
+    string key_prefix = 3;
+    // The default Retention of a new Stream. Empty is 7 days.
+    google.protobuf.Duration retention = 4;
+    // How long an open Workflow-owned Stream stays after its last write. Empty is 90 days.
+    google.protobuf.Duration safety_ttl = 5;
+    // When above zero, each Workflow flush runs `WAIT durable_writes <durable_timeout>`.
+    int32 durable_writes = 6;
+    // Empty is 1 s.
+    google.protobuf.Duration durable_timeout = 7;
+    // Zero is 256.
+    int32 blocking_reads_per_node = 8;
+    // Empty is 5 s.
+    google.protobuf.Duration response_timeout = 9;
+}
+
+// Method `BufferWorkflowCalls`, synchronous. Lang calls it at the end of each Activation of a
+// run, with the calls that Workflow code made in that Activation, in order. On replay, lang
+// sends only the creates and the closes. The crate writes the buffer in `before_complete` and
+// sends the closes in `after_complete`.
+message BufferWorkflowCallsRequest {
+    string run_id = 1;
+    // A retry run only: the previous run. The crate puts it on each create and append of the
+    // run, so the first one on each Stream withdraws the previous run's Records.
+    string withdraw_run = 2;
+    repeated WorkflowCall calls = 3;
+    // Set on the run's last call when the server goes on with the Run Chain, which is a failure
+    // that the retry policy retries, or any cron run. The crate then skips the closes that have
+    // `when_run_closes`.
+    bool chain_continues = 4;
+}
+
+message WorkflowCall {
+    oneof call {
+        temporal.api.streamservice.v1.CreateStreamRequest create = 1;
+        // The crate sets the Producer, the sequence and the History facts.
+        temporal.api.streamservice.v1.AppendRecordsRequest append = 2;
+        // The crate sets the Producer and the History facts.
+        temporal.api.streamservice.v1.CloseStreamRequest close = 3;
+    }
+    // For a close only: send it only when the server accepts a completion that closes the run.
+    // `auto_close` sets it.
+    bool when_run_closes = 4;
+}
+
+message BufferWorkflowCallsResponse {
+}
+
+// Method `OpenWriter`, asynchronous. A buffered writer for an Activity or a client Producer.
+message OpenWriterRequest {
+    string namespace = 1;
+    temporal.api.streamservice.v1.StreamRef stream = 2;
+    temporal.api.streamservice.v1.Producer producer = 3;
+    // How often the writer flushes. Empty is 100 ms.
+    google.protobuf.Duration batch_interval = 4;
+    // A flush sends at most this many Records in one batch. Zero is 1000.
+    int32 max_batch_size = 5;
+    // How long a flush retries a Store failure. Empty is 10 s.
+    google.protobuf.Duration max_retry_duration = 6;
+    // A publish past this many buffered Records fails with `stream_buffer_full`. Zero is 10000.
+    int32 max_buffered_records = 7;
+}
+
+message OpenWriterResponse {
+    uint64 writer_id = 1;
+}
+
+// Method `Publish`, synchronous. Adds encoded Records to a writer's buffer.
+message PublishRequest {
+    uint64 writer_id = 1;
+    repeated temporal.api.streamservice.v1.AppendRecord records = 2;
+    // Start a flush at once.
+    bool force_flush = 3;
+}
+
+message PublishResponse {
+}
+
+// Method `FlushWriter`, asynchronous. Waits until the Records published so far are in the Store.
+message FlushWriterRequest {
+    uint64 writer_id = 1;
+}
+
+message FlushWriterResponse {
+    // The offset of the newest Record the writer wrote. Zero if it wrote none.
+    int64 last_offset = 1;
+}
+
+// Method `CloseWriter`, asynchronous. Flushes, then drops the writer. It doesn't close the
+// Stream.
+message CloseWriterRequest {
+    uint64 writer_id = 1;
+}
+
+message CloseWriterResponse {
+    int64 last_offset = 1;
+}
+
+// Method `DrainCloses`, asynchronous. Waits for the closes that `after_complete` started, for
+// example at Worker shutdown.
+message DrainClosesRequest {
+    // Empty is 10 s.
+    google.protobuf.Duration timeout = 1;
+}
+
+message DrainClosesResponse {
+    // The closes still running when the timeout passed.
+    int32 pending = 1;
+}
+
+// The details of a failed call, in the error's details bytes.
+message StreamErrorDetails {
+    // A token for lang, such as `stream_closed`, `stream_fenced` or `stream_format_too_new`.
+    string reason = 1;
+}

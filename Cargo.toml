@@ -1,0 +1,35 @@
+[workspace]
+members = ["crates/streams"]
+resolver = "3"
+
+[workspace.package]
+license = "MIT"
+license-file = "LICENSE.txt"
+
+[workspace.dependencies]
+prost = "0.14"
+# The well-known types the sdk-rust crates use, under the name the generated code expects.
+prost-types = { version = "0.7", package = "prost-wkt-types" }
+serde_json = "1.0"
+thiserror = "2"
+tonic = { version = "0.14.6", default-features = false }
+tonic-prost-build = "0.14.6"
+
+# One sdk-rust commit for every sdk-rust crate. It must equal the `sdk-core` submodule commit of
+# the sdk-python stage that links this crate. Keep the URL in this exact form, with no `.git`,
+# since a lang's `[patch]` key must match it byte for byte.
+[workspace.dependencies.temporalio-common]
+git = "https://github.com/moetemp/sdk-rust"
+rev = "3a9203ac7cb15171097d7f58e80b648f517ea658"
+default-features = false
+
+[workspace.dependencies.temporalio-sdk-core]
+git = "https://github.com/moetemp/sdk-rust"
+rev = "3a9203ac7cb15171097d7f58e80b648f517ea658"
+default-features = false
+
+[workspace.lints.rust]
+unreachable_pub = "warn"
+
+[workspace.lints.clippy]
+dbg_macro = "warn"
