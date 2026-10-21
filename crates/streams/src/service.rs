@@ -23,6 +23,8 @@ use tokio::time::Instant;
 pub const MAX_WAIT: Duration = Duration::from_secs(60);
 /// The most Records one read gives.
 pub const MAX_RECORDS: usize = 1000;
+/// The most log entries one page scans.
+const MAX_SCAN: usize = 10 * MAX_RECORDS;
 /// How often a read looks again for a Stream that nobody created yet.
 const CREATE_POLL: Duration = Duration::from_millis(100);
 
@@ -108,6 +110,9 @@ impl StreamService {
     ) -> StreamResult<AppendRecordsResponse> {
         let id = stream_id(request.stream.as_ref())?;
         let producer = outside_producer(request.producer.as_ref())?;
+        if request.sequence < 1 {
+            return Err(StreamError::invalid("The sequence must be 1 or more"));
+        }
         let records = data_records(producer, request.records)?;
         let bytes = supersession(producer, None, &[], "");
         let batch = Batch {
@@ -319,11 +324,14 @@ impl StreamService {
         let mut records = vec![];
         let mut next = from;
         let mut done = false;
-        while records.len() < max && !done {
+        // A Topic filter can skip many entries, so one page scans a bounded number of them.
+        let mut scanned = 0;
+        while records.len() < max && !done && scanned < MAX_SCAN {
             let (_, entries) = self.store.read(namespace, id, start, max).await?;
             if entries.is_empty() {
                 break;
             }
+            scanned += entries.len();
             for entry in entries {
                 if entry.offset < retained {
                     if from > 0 {
@@ -395,8 +403,12 @@ fn idle_response(next_offset: i64) -> ReadRecordsResponse {
 
 /// Fails a read whose Records the Retention or the expiry removed, so a gap never passes in
 /// silence. A read from the start of the Stream has no gap.
+///
+/// An open Stream that expired gets no more Records, so a read of it fails as well, or the
+/// Reader would wait on it for good.
 fn check_expiry(state: &StreamState, from: i64) -> StreamResult<()> {
-    if (state.expired() && state.newest >= from.max(1)) || (from > 0 && state.trimmed >= from) {
+    let open_tombstone = state.expired() && state.closed_at.is_none();
+    if open_tombstone || (from > 0 && state.trimmed >= from) {
         return Err(expired());
     }
     Ok(())

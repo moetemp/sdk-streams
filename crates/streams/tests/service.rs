@@ -540,3 +540,29 @@ async fn an_unknown_method_is_unimplemented() {
         );
     }
 }
+
+#[tokio::test]
+async fn a_read_of_an_expired_open_stream_fails_instead_of_waiting() {
+    for case in cases().await {
+        case.create(millis(300)).await.unwrap();
+        case.append(client(1), 1, vec![record("", "1")])
+            .await
+            .unwrap();
+        tokio::time::sleep(Duration::from_millis(400)).await;
+        for from_offset in [0, 1] {
+            let started = Instant::now();
+            let error = case
+                .read(ReadRecordsRequest {
+                    from_offset,
+                    wait: millis(5000),
+                    ..Default::default()
+                })
+                .await
+                .unwrap_err();
+            assert_eq!(reason(&error), "stream_expired");
+            assert!(started.elapsed() < Duration::from_secs(2));
+        }
+        let error = case.append(client(1), 0, vec![]).await.unwrap_err();
+        assert_eq!(reason(&error), "stream_invalid");
+    }
+}
