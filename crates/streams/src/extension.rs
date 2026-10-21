@@ -5,12 +5,15 @@ use crate::{
     metrics::Metrics,
     proto::{
         AppendRecordsRequest, BufferWorkflowCallsRequest, BufferWorkflowCallsResponse,
-        CloseStreamRequest, DescribeStreamRequest, DrainClosesRequest, DrainClosesResponse,
-        ReadRecordsRequest, RedisStreamConfig,
+        CloseStreamRequest, CloseWriterRequest, CloseWriterResponse, DescribeStreamRequest,
+        DrainClosesRequest, DrainClosesResponse, FlushWriterRequest, FlushWriterResponse,
+        OpenWriterRequest, OpenWriterResponse, PublishRequest, PublishResponse, ReadRecordsRequest,
+        RedisStreamConfig,
     },
     redis::{RedisStore, RedisStoreOptions},
     service::StreamService,
     workflow::{FlushOptions, WorkflowHooks, WorkflowRuns},
+    writer::Writers,
 };
 use prost::Message;
 use std::{sync::Arc, time::Duration};
@@ -76,6 +79,7 @@ pub(crate) struct Shared {
     metrics: Metrics,
     service: OnceCell<Arc<StreamService>>,
     pub(crate) runs: WorkflowRuns,
+    writers: Writers,
 }
 
 impl Shared {
@@ -128,6 +132,7 @@ impl RedisStreamExtension {
             metrics: Metrics::new(&meter),
             service: OnceCell::new(),
             runs: WorkflowRuns::default(),
+            writers: Writers::default(),
         });
         let hooks = Arc::new(WorkflowHooks {
             shared: shared.clone(),
@@ -158,6 +163,15 @@ impl RedisStreamExtension {
                     .runs
                     .buffer(decode::<BufferWorkflowCallsRequest>(input)?)?;
                 BufferWorkflowCallsResponse {}.encode_to_vec()
+            }
+            "Publish" => {
+                let request = decode::<PublishRequest>(input)?;
+                self.shared.writers.publish(
+                    request.writer_id,
+                    request.records,
+                    request.force_flush,
+                )?;
+                PublishResponse {}.encode_to_vec()
             }
             _ => return Err(ExtensionError::unknown_method(method)),
         };
@@ -198,6 +212,21 @@ impl RedisStreamExtension {
                 .describe_stream(decode::<DescribeStreamRequest>(input)?)
                 .await?
                 .encode_to_vec(),
+            "OpenWriter" => {
+                let request = decode::<OpenWriterRequest>(input)?;
+                let writer_id = self.shared.writers.open(service, request).await?;
+                OpenWriterResponse { writer_id }.encode_to_vec()
+            }
+            "FlushWriter" => {
+                let request = decode::<FlushWriterRequest>(input)?;
+                let last_offset = self.shared.writers.flush(request.writer_id).await?;
+                FlushWriterResponse { last_offset }.encode_to_vec()
+            }
+            "CloseWriter" => {
+                let request = decode::<CloseWriterRequest>(input)?;
+                let last_offset = self.shared.writers.close(request.writer_id).await?;
+                CloseWriterResponse { last_offset }.encode_to_vec()
+            }
             _ => return Err(ExtensionError::unknown_method(method)),
         };
         Ok(output)

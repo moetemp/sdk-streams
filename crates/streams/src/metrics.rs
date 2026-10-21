@@ -13,6 +13,7 @@ pub(crate) struct Metrics {
     flush_failures: Counter,
     fenced: Counter,
     superseded: Counter,
+    buffer_full: Counter,
     close_retries: Counter,
     records_dropped: Counter,
     blocking_reads_waiting: UpDownCounter,
@@ -54,6 +55,11 @@ impl Metrics {
                 "Superseded flags that the Store set",
                 "",
             )),
+            buffer_full: meter.counter(parameters(
+                "stream_buffer_full",
+                "Publishes refused because a writer's buffer was full",
+                "",
+            )),
             close_retries: meter.counter(parameters(
                 "stream_close_retries",
                 "Close retries after a Workflow Task completion",
@@ -86,6 +92,10 @@ impl Metrics {
 
     pub(crate) fn superseded(&self) {
         self.superseded.add(1, &self.attributes);
+    }
+
+    pub(crate) fn buffer_full(&self) {
+        self.buffer_full.add(1, &self.attributes);
     }
 
     pub(crate) fn close_retried(&self) {
