@@ -111,6 +111,16 @@ message CloseWriterResponse {
     int64 last_offset = 1;
 }
 
+// Method `CloseWriters`, asynchronous. Flushes and drops every open writer, for example when the
+// plugin's client or Worker shuts down, so no flusher task stays behind.
+message CloseWritersRequest {
+}
+
+message CloseWritersResponse {
+    // The writers whose last flush failed.
+    int32 failed = 1;
+}
+
 // Method `DrainCloses`, asynchronous. Waits for the closes that `after_complete` started, for
 // example at Worker shutdown.
 message DrainClosesRequest {

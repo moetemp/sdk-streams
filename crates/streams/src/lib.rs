@@ -21,6 +21,7 @@ mod server {
 }
 mod service;
 mod workflow;
+mod writer;
 
 pub use error::{Reason, StreamError, StreamResult};
 pub use extension::{EXTENSION_NAME, ExtensionOptions, RedisStreamExtension};

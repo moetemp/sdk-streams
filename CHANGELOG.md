@@ -19,3 +19,7 @@
   closes in the background after `after_complete` accepts. `DrainCloses` waits for them. A flush
   splits at the batch limit, drops oversize Records and Records for a Stream that someone else
   closed, and runs `WAIT` with `durable_writes`.
+- Added buffered writers for Activities and clients: `OpenWriter`, `Publish`, `FlushWriter` and
+  `CloseWriter`. A writer flushes every `batch_interval`, at once on `force_flush`, and refuses a
+  publish past its buffer limit. A writer of an Activity attempt above 1 first sends an empty
+  batch, so the new epoch withdraws the earlier attempt's Records.
