@@ -10,3 +10,7 @@
 - Added the Redis Store, with one Lua script per create, append, close and read. The scripts
   fence lower epochs, dedupe resends, flag the first batch that withdraws, keep the task index
   and the withdrawn tasks and runs, and keep the format version, the TTLs and the Retention.
+- Added `RedisStreamExtension`, the Worker extension that serves `CreateStream`,
+  `AppendRecords`, `CloseStream`, `ReadRecords` and `DescribeStream` through `call_async`. A read
+  is a long poll with `create_wait` and `idle_timeout`, filters by Retention, and ends with the
+  close Record or an Idle Record.
