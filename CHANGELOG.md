@@ -14,3 +14,8 @@
   `AppendRecords`, `CloseStream`, `ReadRecords` and `DescribeStream` through `call_async`. A read
   is a long poll with `create_wait` and `idle_timeout`, filters by Retention, and ends with the
   close Record or an Idle Record.
+- Added the Workflow path. Lang hands each Activation's calls to `BufferWorkflowCalls`, the
+  Workflow Task interceptor writes the creates and appends in `before_complete`, and it sends the
+  closes in the background after `after_complete` accepts. `DrainCloses` waits for them. A flush
+  splits at the batch limit, drops oversize Records and Records for a Stream that someone else
+  closed, and runs `WAIT` with `durable_writes`.
