@@ -32,6 +32,12 @@ local outcome = 'exists'
 if stored ~= retention then
   outcome = 'conflict'
 end
+-- An Activity may create the Workflow's default Stream first. The Workflow's create makes it
+-- Workflow-owned, so it keeps the safety TTL while it is open.
+if owner == 'wf' and redis.call('HGET', meta, 'own') ~= 'wf' then
+  redis.call('HSET', meta, 'own', 'wf')
+  refresh(meta, log, now, safety, tombstone)
+end
 local flag = ''
 if withdraw_run(meta, withdrawn_run) then
   local id = add(log, {'s', supersession})

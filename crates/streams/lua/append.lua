@@ -14,6 +14,9 @@ local safety, tombstone = tonumber(ARGV[12]), tonumber(ARGV[13])
 local records = #ARGV - 13
 local workflow, local_activity = kind == '1', kind == '2'
 
+if not sequence or sequence < 1 then
+  return refuse('INVALID', 'the sequence must be 1 or more')
+end
 local now = now_ms()
 local refused = check_live(meta, version, now)
 if refused then
@@ -46,7 +49,8 @@ local newest = redis.call('HGET', meta, 'e' .. suffix)
 if newest and epoch < newest then
   return refuse('FENCED', 'the epoch is lower than the newest one of the Producer')
 end
-if local_activity and contains(words(redis.call('HGET', meta, 'wt|' .. run)), task) then
+if local_activity and (contains(words(redis.call('HGET', meta, 'wt|' .. run)), task)
+    or withdrawn_by_facts(meta, run, task)) then
   return refuse('FENCED', 'a Superseded item withdrew the Workflow Task of the call')
 end
 
@@ -61,6 +65,9 @@ if workflow then
 else
   local holds = redis.call('HGET', meta, 'h' .. suffix)
   flagged = holds ~= false and holds < epoch
+end
+if workflow then
+  keep_facts(meta, run, task, completed, failed)
 end
 if withdraw_run(meta, withdrawn_run) then
   flagged = true

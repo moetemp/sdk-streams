@@ -544,3 +544,71 @@ async fn a_blocked_read_wakes_on_an_append_and_a_wait_for_replicas_ends() {
         assert_eq!(replicas, 0);
     }
 }
+
+#[tokio::test]
+async fn a_sequence_below_one_is_refused() {
+    for target in stores().await {
+        target.create(Owner::Client).await;
+        for sequence in [0, -1] {
+            let error = append(&target, &client(1), sequence, &["x"])
+                .await
+                .unwrap_err();
+            assert_eq!(error.reason, Reason::Invalid);
+        }
+    }
+}
+
+#[tokio::test]
+async fn a_local_activity_of_a_failed_task_that_wrote_nothing_is_fenced() {
+    for target in stores().await {
+        target.create(Owner::Workflow).await;
+        let run = Run::new("r1");
+        target
+            .flush(&run.task(3, 1), None, &[], &["w3"])
+            .await
+            .unwrap();
+        // Task [5] dispatched the call and failed before anything of it went here.
+        target
+            .flush(&run.task(8, 1), Some(run.done(3)), &[5], &["w8"])
+            .await
+            .unwrap();
+        let late = target
+            .batch(&run.local_activity("k", 5, 1, 1), 1, &["late"])
+            .await;
+        assert_eq!(late.unwrap_err().reason, Reason::Fenced);
+        target
+            .batch(&run.local_activity("j", 8, 1, 1), 1, &["la8"])
+            .await
+            .unwrap();
+        assert_eq!(target.visible().await, ["w3", "w8", "la8"]);
+    }
+}
+
+#[tokio::test]
+async fn a_workflow_create_takes_over_a_stream_an_activity_created() {
+    for target in stores().await {
+        target.create(Owner::Client).await;
+        target.create(Owner::Workflow).await;
+        let mut conn = target.raw().await;
+        let own: String = conn.hget(target.keys().meta(), "own").await.unwrap();
+        assert_eq!(own, "wf");
+        let ttl: i64 = conn.pttl(target.keys().meta()).await.unwrap();
+        assert!(
+            ttl > Duration::from_secs(100 * 86_400).as_millis() as i64,
+            "{ttl}"
+        );
+    }
+}
+
+#[tokio::test]
+async fn a_stale_producer_cant_close_the_stream() {
+    for target in stores().await {
+        target.create(Owner::Client).await;
+        append(&target, &client(2), 1, &["a"]).await.unwrap();
+        assert_eq!(
+            target.close(&client(1)).await.unwrap_err().reason,
+            Reason::Fenced
+        );
+        target.close(&client(2)).await.unwrap();
+    }
+}

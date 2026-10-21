@@ -43,6 +43,14 @@ local function refresh(meta, log, now, safety, tombstone)
   end
 end
 
+-- Whether entry id a is below entry id b.
+local function id_below(a, b)
+  local a_ms, a_seq = string.match(a, '^(%d+)-(%d+)$')
+  local b_ms, b_seq = string.match(b, '^(%d+)-(%d+)$')
+  a_ms, b_ms = tonumber(a_ms), tonumber(b_ms)
+  return a_ms < b_ms or (a_ms == b_ms and tonumber(a_seq) < tonumber(b_seq))
+end
+
 -- Drops the Records older than the Retention and keeps the newest dropped id, so a read can
 -- tell expired Records from an empty Stream.
 local function trim(meta, log, now)
@@ -52,7 +60,11 @@ local function trim(meta, log, now)
   end
   local old = redis.call('XREVRANGE', log, '(' .. min .. '-0', '-', 'COUNT', 1)
   if #old > 0 then
-    redis.call('HSET', meta, 'trimmed', old[1][1])
+    -- A clock that steps back must not move the watermark back.
+    local trimmed = redis.call('HGET', meta, 'trimmed')
+    if not trimmed or id_below(trimmed, old[1][1]) then
+      redis.call('HSET', meta, 'trimmed', old[1][1])
+    end
     redis.call('XTRIM', log, 'MINID', min)
   end
 end
@@ -95,6 +107,22 @@ local function withdraw_tasks(index, t, c, failed)
     end
   end
   return withdrawn, kept
+end
+
+-- Keeps the withdrawal facts of the run's newest Workflow batch or close, so a Local Activity
+-- batch of a task that the run withdrew is fenced also when that task wrote nothing here.
+local function keep_facts(meta, run, t, c, failed)
+  redis.call('HSET', meta, 'lf|' .. run, t .. '|' .. c .. '|' .. failed)
+end
+
+local function withdrawn_by_facts(meta, run, task)
+  local facts = redis.call('HGET', meta, 'lf|' .. run)
+  if not facts then
+    return false
+  end
+  local t, c, failed = string.match(facts, '^([^|]*)|([^|]*)|(.*)$')
+  local withdrawn = withdraw_tasks({task}, t, c, failed)
+  return #withdrawn > 0
 end
 
 local function contains(list, value)

@@ -378,7 +378,7 @@ impl RedisStore {
         let keys = self.keys(namespace, stream_id);
         let epoch = producer.epoch.unwrap_or_default();
         let task = match ProducerKind::try_from(producer.kind).unwrap_or_default() {
-            ProducerKind::Workflow => task_key(&task_of(&epoch)),
+            ProducerKind::Workflow | ProducerKind::LocalActivity => task_key(&task_of(&epoch)),
             _ => String::new(),
         };
         let reply: Value = scripts::CLOSE_SCRIPT
@@ -388,6 +388,7 @@ impl RedisStore {
             .arg(producer.kind)
             .arg(&producer.id)
             .arg(encode_run(&producer.run_id))
+            .arg(epoch_key(&epoch))
             .arg(task)
             .arg(
                 withdrawal

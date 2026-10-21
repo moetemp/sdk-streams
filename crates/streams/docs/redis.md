@@ -29,6 +29,7 @@ slot. `CreateStream` writes `:meta`, and the first entry makes `:log`.
 | `h\|<kind>\|<producer id>` | The newest epoch key that still has Records here |
 | `ti\|<run>` | The task keys of the run and its Local Activities that have Records here |
 | `wt\|<run>` | The task keys of the run that a `Superseded` item withdrew |
+| `lf\|<run>` | `<task key>\|<completed task key>\|<failed ids>` of the run's newest Workflow write |
 | `run\|<run>` | Set when a Producer of the run wrote a Record here |
 | `wr\|<run>` | Set when a Workflow retry withdrew the run |
 

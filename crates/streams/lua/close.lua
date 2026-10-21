@@ -1,13 +1,13 @@
 -- Closes the Stream with one close Record.
 --
--- ARGV: format version, kind, Producer id, encoded run id, task key, previous completed task
--- key, failed task ids, Supersession bytes, Tombstone ms, close Record.
+-- ARGV: format version, kind, Producer id, encoded run id, epoch key, task key, previous
+-- completed task key, failed task ids, Supersession bytes, Tombstone ms, close Record.
 --
 -- Answers {'closed' or 'already', close id, '1' when flagged}.
 local meta, log = KEYS[1], KEYS[2]
 local version, kind, producer, run = tonumber(ARGV[1]), ARGV[2], ARGV[3], ARGV[4]
-local task, completed, failed, supersession = ARGV[5], ARGV[6], ARGV[7], ARGV[8]
-local tombstone, record = tonumber(ARGV[9]), ARGV[10]
+local epoch, task, completed, failed = ARGV[5], ARGV[6], ARGV[7], ARGV[8]
+local supersession, tombstone, record = ARGV[9], tonumber(ARGV[10]), ARGV[11]
 
 local now = now_ms()
 local refused = check_live(meta, version, now)
@@ -21,8 +21,19 @@ if run ~= '' and redis.call('HGET', meta, 'wr|' .. run) then
   return refuse('FENCED', 'a Workflow retry withdrew the run of the Producer')
 end
 
--- A close has no epoch fence. The run's next task may flush before a close of the task
--- before it goes out, and that close is still valid.
+-- A Workflow close has no epoch fence. The run's next task may flush before the close of the
+-- task before it goes out, and that close is still valid. Any other Producer is fenced as its
+-- appends are, so a stale attempt can't close the Stream.
+if kind ~= '1' then
+  local newest = redis.call('HGET', meta, 'e|' .. kind .. '|' .. producer)
+  if newest and epoch < newest then
+    return refuse('FENCED', 'the epoch is lower than the newest one of the Producer')
+  end
+  if kind == '2' and (contains(words(redis.call('HGET', meta, 'wt|' .. run)), task)
+      or withdrawn_by_facts(meta, run, task)) then
+    return refuse('FENCED', 'a Superseded item withdrew the Workflow Task of the call')
+  end
+end
 local flagged = false
 local withdrawn = {}
 local index_field, withdrawn_field = 'ti|' .. run, 'wt|' .. run
@@ -31,6 +42,7 @@ if kind == '1' then
   withdrawn, index = withdraw_tasks(words(redis.call('HGET', meta, index_field)), task,
     completed, failed)
   flagged = #withdrawn > 0
+  keep_facts(meta, run, task, completed, failed)
   if #index > 0 then
     redis.call('HSET', meta, index_field, table.concat(index, ' '))
   else

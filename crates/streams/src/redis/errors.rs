@@ -14,6 +14,7 @@ pub(crate) fn stream_error(error: &RedisError) -> StreamError {
         Some("STREAM_FENCED") => Reason::Fenced,
         Some("STREAM_SEQUENCE") => Reason::Sequence,
         Some("STREAM_FORMAT_TOO_NEW") => Reason::FormatTooNew,
+        Some("STREAM_INVALID") => Reason::Invalid,
         // The code as the server wrote it, so the message has the code the Redis docs use.
         Some(code) => {
             return StreamError::storage(format!("Redis refused the call: {code} {detail}"));
@@ -55,6 +56,7 @@ mod tests {
             ("STREAM_FENCED", Reason::Fenced),
             ("STREAM_SEQUENCE", Reason::Sequence),
             ("STREAM_FORMAT_TOO_NEW", Reason::FormatTooNew),
+            ("STREAM_INVALID", Reason::Invalid),
         ] {
             let error = stream_error(&server(code, "why it refused"));
             assert_eq!(
