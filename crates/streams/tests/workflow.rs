@@ -8,7 +8,6 @@ use std::{
     sync::Arc,
     time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
-use support::server_url;
 use temporalio_common::protos::temporal::api::{common::v1::Payload, failure::v1::Failure};
 use temporalio_sdk_core::{
     ExtensionError, RunCloseKind, WorkerExtension, WorkflowTaskCompletionInfo, WorkflowTaskEpoch,
@@ -49,41 +48,34 @@ struct Run {
     stream: String,
 }
 
-async fn runs_with(change: impl Fn(&mut RedisStreamConfig)) -> Vec<Run> {
-    let mut runs = vec![];
-    for (variable, cluster) in [
-        ("STREAMS_REDIS_URL", false),
-        ("STREAMS_REDIS_CLUSTER_URL", true),
-    ] {
-        let Some(url) = server_url(variable) else {
-            continue;
-        };
-        let mut config = RedisStreamConfig {
-            urls: vec![url],
-            cluster,
-            key_prefix: "streams-test".to_string(),
-            ..Default::default()
-        };
-        change(&mut config);
-        let ext = RedisStreamExtension::new(ExtensionOptions::from_config(config).unwrap(), None);
-        let hooks = ext.workflow_task_interceptor().unwrap();
-        let unique = unique();
-        let (workflow_id, run_id) = (format!("wf-{unique}"), format!("run-{unique}"));
-        runs.push(Run {
-            ext,
-            hooks,
-            namespace: format!("ns-{unique}"),
-            stream: default_stream_id(&workflow_id, &run_id),
-            workflow_id,
-            first_run_id: run_id.clone(),
-            run_id,
-        });
-    }
-    runs
+fn runs_on(extensions: Vec<Arc<RedisStreamExtension>>) -> Vec<Run> {
+    extensions
+        .into_iter()
+        .map(|ext| {
+            let hooks = ext.workflow_task_interceptor().unwrap();
+            let unique = unique();
+            let (workflow_id, run_id) = (format!("wf-{unique}"), format!("run-{unique}"));
+            Run {
+                ext,
+                hooks,
+                namespace: format!("ns-{unique}"),
+                stream: default_stream_id(&workflow_id, &run_id),
+                workflow_id,
+                first_run_id: run_id.clone(),
+                run_id,
+            }
+        })
+        .collect()
 }
 
+/// A run on each Redis server that is set, with the config changed by `change`.
+async fn runs_with(change: impl Fn(&mut RedisStreamConfig)) -> Vec<Run> {
+    runs_on(support::extensions(change, false))
+}
+
+/// A run on each Redis server that is set and on the memory Store.
 async fn runs() -> Vec<Run> {
-    runs_with(|_| {}).await
+    runs_on(support::extensions(|_| {}, true))
 }
 
 fn payload(text: &str) -> Option<Payload> {

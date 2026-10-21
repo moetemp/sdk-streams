@@ -5,12 +5,17 @@ mod conn;
 mod errors;
 mod scripts;
 
+pub use crate::store::{
+    Appended, Batch, Closed, CreateOutcome, Created, Entry, FORMAT_VERSION, MAX_BATCH_BYTES,
+    MAX_RECORD_BYTES, Owner, StreamState, TOMBSTONE, Withdrawal,
+};
 use crate::{
     StreamError, StreamResult,
     epoch::{epoch_key, task_key, task_of},
     ids::{StreamKeys, encode_part},
     offset::{entry_id_of_offset, offset_of_entry_id},
-    proto::{Producer, ProducerKind, WorkflowTaskEpoch},
+    proto::{Producer, ProducerKind},
+    store::Store,
 };
 use conn::{BlockingPool, Shared};
 use errors::Mapped;
@@ -20,15 +25,6 @@ use redis::{
 };
 use std::{sync::Arc, time::Duration};
 use tokio::time::Instant;
-
-/// The format version this crate writes. A Stream with a higher one refuses writes.
-pub const FORMAT_VERSION: u32 = 1;
-/// A Record's most bytes on Redis.
-pub const MAX_RECORD_BYTES: usize = 1536 * 1024;
-/// An append's most bytes on Redis.
-pub const MAX_BATCH_BYTES: usize = 4 * 1024 * 1024;
-/// How long the meta outlives the log, so a read can tell an expired Stream from a missing one.
-pub const TOMBSTONE: Duration = Duration::from_secs(30 * 24 * 60 * 60);
 
 /// How to reach Redis and how long Streams live there.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -67,140 +63,6 @@ impl RedisStoreOptions {
             durable_connection: false,
         }
     }
-}
-
-/// Who created a Stream, which decides its TTL while it is open.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum Owner {
-    /// The Stream stays `safety_ttl` after its last write until it closes.
-    Workflow,
-    /// The Stream stays one Retention after its last write.
-    Client,
-}
-
-/// What a create found.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum CreateOutcome {
-    /// The create wrote the key.
-    Created,
-    /// The Stream exists with the same Retention.
-    Exists,
-    /// The Stream exists with another Retention, which stays.
-    Conflict,
-    /// The Stream is closed.
-    Closed,
-    /// The Stream expired, and its Tombstone is still there.
-    Expired,
-}
-
-/// The answer of a create.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct Created {
-    /// What the create found.
-    pub outcome: CreateOutcome,
-    /// The Retention of the Stream, the stored one if it existed.
-    pub retention: Duration,
-    /// Whether the create withdrew a retry run's previous run.
-    pub flagged: bool,
-}
-
-/// The withdrawal facts of a Workflow batch or close, and the `Superseded` item they make.
-#[derive(Debug, Clone, Default)]
-pub struct Withdrawal<'a> {
-    /// The previous completed Workflow Task of the run.
-    pub previous_completed: Option<&'a WorkflowTaskEpoch>,
-    /// The started event ids of the run's failed Workflow Tasks.
-    pub failed_tasks: &'a [i64],
-    /// A retry run's previous run.
-    pub withdraw_run: &'a str,
-    /// The encoded Supersession, which the log keeps when the batch withdraws something.
-    pub supersession: &'a [u8],
-}
-
-/// One batch of one Producer.
-#[derive(Debug, Clone)]
-pub struct Batch<'a> {
-    /// The Producer, with its epoch.
-    pub producer: &'a Producer,
-    /// The batch number in this epoch.
-    pub sequence: i64,
-    /// The encoded Records.
-    pub records: &'a [Vec<u8>],
-    /// What the batch withdraws.
-    pub withdrawal: Withdrawal<'a>,
-}
-
-/// The answer of an append.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct Appended {
-    /// The offsets of the first and the last entry, `None` for an empty batch with no
-    /// `Superseded` item.
-    pub offsets: Option<(i64, i64)>,
-    /// The batch was in the Store, so the offsets are the first answer's.
-    pub resend: bool,
-    /// The batch withdrew earlier Records.
-    pub flagged: bool,
-}
-
-/// The answer of a close.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct Closed {
-    /// The offset of the close Record.
-    pub offset: i64,
-    /// Someone closed the Stream before.
-    pub already: bool,
-    /// The close withdrew earlier Records.
-    pub flagged: bool,
-}
-
-/// The state of a Stream as one read saw it.
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
-pub struct StreamState {
-    /// The meta key exists, live or as a Tombstone.
-    pub exists: bool,
-    /// The format version.
-    pub version: u32,
-    /// The offset of the close Record, if the Stream is closed.
-    pub closed_at: Option<i64>,
-    /// The offset of the newest entry written, zero if none.
-    pub newest: i64,
-    /// The offset of the newest entry that Retention dropped, zero if none.
-    pub trimmed: i64,
-    /// The Retention.
-    pub retention: Duration,
-    /// When the Stream stops taking writes, in ms since 1970.
-    pub expires_ms: i64,
-    /// The server time of the read, in ms since 1970.
-    pub now_ms: i64,
-}
-
-impl StreamState {
-    /// The Stream is a Tombstone.
-    pub fn expired(&self) -> bool {
-        self.exists && self.expires_ms <= self.now_ms
-    }
-
-    /// The offset below which Retention dropped or hides the Records, as of the read.
-    pub fn retained_from(&self) -> i64 {
-        let cut = self.now_ms - self.retention.as_millis() as i64;
-        let hidden = if cut > 0 {
-            cut << crate::offset::SEQ_BITS
-        } else {
-            0
-        };
-        hidden.max(self.trimmed + 1)
-    }
-}
-
-/// One log entry.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct Entry {
-    /// Its offset.
-    pub offset: i64,
-    /// The encoded Record, absent on an entry that only withdraws.
-    pub record: Option<Vec<u8>>,
-    /// The encoded Supersession of a flagged batch.
-    pub supersession: Option<Vec<u8>>,
 }
 
 /// The Redis Store.
@@ -529,6 +391,79 @@ impl RedisStore {
             }
         };
         Ok(reply)
+    }
+}
+
+#[async_trait::async_trait]
+impl Store for RedisStore {
+    fn default_retention(&self) -> Duration {
+        self.retention
+    }
+
+    async fn create(
+        &self,
+        namespace: &str,
+        stream_id: &str,
+        retention: Option<Duration>,
+        owner: Owner,
+        withdrawal: &Withdrawal<'_>,
+    ) -> StreamResult<Created> {
+        RedisStore::create(self, namespace, stream_id, retention, owner, withdrawal).await
+    }
+
+    async fn append(
+        &self,
+        namespace: &str,
+        stream_id: &str,
+        batch: &Batch<'_>,
+    ) -> StreamResult<Appended> {
+        RedisStore::append(self, namespace, stream_id, batch).await
+    }
+
+    async fn close(
+        &self,
+        namespace: &str,
+        stream_id: &str,
+        producer: &Producer,
+        record: &[u8],
+        withdrawal: &Withdrawal<'_>,
+    ) -> StreamResult<Closed> {
+        RedisStore::close(self, namespace, stream_id, producer, record, withdrawal).await
+    }
+
+    async fn read(
+        &self,
+        namespace: &str,
+        stream_id: &str,
+        from: i64,
+        count: usize,
+    ) -> StreamResult<(StreamState, Vec<Entry>)> {
+        RedisStore::read(self, namespace, stream_id, from, count).await
+    }
+
+    async fn wait_after(
+        &self,
+        namespace: &str,
+        stream_id: &str,
+        after: i64,
+        deadline: Instant,
+    ) -> StreamResult<bool> {
+        RedisStore::wait_after(self, namespace, stream_id, after, deadline).await
+    }
+
+    async fn wait_replicas(
+        &self,
+        namespace: &str,
+        stream_id: &str,
+        replicas: u32,
+        timeout: Duration,
+    ) -> StreamResult<i64> {
+        RedisStore::wait_replicas(self, namespace, stream_id, replicas, timeout).await
+    }
+
+    fn durable_store(&self) -> Option<Arc<dyn Store>> {
+        self.durable()
+            .map(|store| Arc::new(store) as Arc<dyn Store>)
     }
 }
 

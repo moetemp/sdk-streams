@@ -8,19 +8,18 @@ use std::{
     sync::Arc,
     time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
-use support::server_url;
 use temporalio_common::protos::temporal::api::common::v1::Payload;
 use temporalio_sdk_core::{ExtensionError, WorkerExtension};
 use temporalio_streams::{
-    ExtensionOptions, RedisStreamExtension,
+    RedisStreamExtension,
     epoch::withdraws,
     ids::{activity_producer_id, client_producer_id},
     proto::{
         AppendRecord, CloseStreamRequest, CloseWriterRequest, CloseWriterResponse,
         CreateStreamRequest, CreateStreamResponse, FlushWriterRequest, FlushWriterResponse,
         OpenWriterRequest, OpenWriterResponse, Producer, ProducerEpoch, ProducerKind,
-        PublishRequest, ReadRecordsRequest, ReadRecordsResponse, RedisStreamConfig,
-        StreamErrorDetails, StreamRecord, StreamRecordKind, StreamRef,
+        PublishRequest, ReadRecordsRequest, ReadRecordsResponse, StreamErrorDetails, StreamRecord,
+        StreamRecordKind, StreamRef,
     },
 };
 use tonic::Code;
@@ -35,26 +34,14 @@ struct Case {
 
 async fn cases() -> Vec<Case> {
     let mut cases = vec![];
-    for (variable, cluster) in [
-        ("STREAMS_REDIS_URL", false),
-        ("STREAMS_REDIS_CLUSTER_URL", true),
-    ] {
-        let Some(url) = server_url(variable) else {
-            continue;
-        };
-        let config = RedisStreamConfig {
-            urls: vec![url],
-            cluster,
-            key_prefix: "streams-test".to_string(),
-            ..Default::default()
-        };
+    for ext in support::extensions(|_| {}, true) {
         let n = NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         let now = SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .unwrap()
             .as_nanos();
         let case = Case {
-            ext: RedisStreamExtension::new(ExtensionOptions::from_config(config).unwrap(), None),
+            ext,
             namespace: format!("ns-{now}-{n}"),
             stream: format!("s-{now}-{n}"),
         };

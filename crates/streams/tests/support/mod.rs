@@ -7,19 +7,22 @@ mod server;
 
 use prost::Message;
 use prost_types::Timestamp;
+use redis::AsyncCommands;
 use std::sync::{
     Arc,
     atomic::{AtomicU64, Ordering},
 };
 use temporalio_streams::{
-    StreamResult,
+    ExtensionOptions, MemoryStreamExtension, StreamExtension, StreamResult,
     epoch::withdraws,
     ids::{StreamKeys, local_activity_producer_id, workflow_producer_id},
+    memory::MemoryStore,
     proto::{
-        Producer, ProducerEpoch, ProducerKind, StreamRecord, StreamRecordKind, Supersession,
-        WorkflowTaskEpoch,
+        Producer, ProducerEpoch, ProducerKind, RedisStreamConfig, StreamRecord, StreamRecordKind,
+        Supersession, WorkflowTaskEpoch,
     },
-    redis::{Appended, Batch, Closed, Entry, Owner, RedisStore, RedisStoreOptions, Withdrawal},
+    redis::{RedisStore, RedisStoreOptions},
+    store::{Appended, Batch, Closed, Entry, Owner, Store, Withdrawal},
 };
 
 pub(crate) use server::server_url;
@@ -28,14 +31,35 @@ static NEXT: AtomicU64 = AtomicU64::new(0);
 
 /// One Stream on one server, fresh for each case.
 pub(crate) struct Target {
-    pub(crate) store: Arc<RedisStore>,
-    pub(crate) url: String,
-    pub(crate) cluster: bool,
+    pub(crate) store: Arc<dyn Store>,
+    pub(crate) backend: Backend,
     pub(crate) namespace: String,
     pub(crate) stream: String,
 }
 
-/// A Store on each server that is set: standalone first, then the cluster.
+/// The Store under a target, for the steps a test takes under the Store's calls.
+pub(crate) enum Backend {
+    Redis {
+        store: Arc<RedisStore>,
+        url: String,
+        cluster: bool,
+    },
+    Memory(Arc<MemoryStore>),
+}
+
+fn unique() -> String {
+    let n = NEXT.fetch_add(1, Ordering::Relaxed);
+    format!(
+        "{}-{n}",
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos()
+    )
+}
+
+/// A Store on each server that is set, standalone first, then the cluster, then the memory
+/// Store.
 pub(crate) async fn stores() -> Vec<Target> {
     stores_with(|options| options).await
 }
@@ -55,23 +79,29 @@ pub(crate) async fn stores_with(
         let mut options = RedisStoreOptions::new(url.clone());
         options.cluster = cluster;
         options.key_prefix = "streams-test".to_string();
-        let store = RedisStore::connect(change(options)).await.unwrap();
-        let n = NEXT.fetch_add(1, Ordering::Relaxed);
-        let unique = format!(
-            "{}-{n}",
-            std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .unwrap()
-                .as_nanos()
-        );
+        let store = Arc::new(RedisStore::connect(change(options)).await.unwrap());
+        let unique = unique();
         targets.push(Target {
-            store: Arc::new(store),
-            url,
-            cluster,
+            store: store.clone(),
+            backend: Backend::Redis {
+                store,
+                url,
+                cluster,
+            },
             namespace: format!("ns-{unique}"),
             stream: format!("wf:{unique}"),
         });
     }
+    // The memory Store runs the same cases, so both Stores keep one set of rules.
+    let defaults = RedisStoreOptions::new(String::new());
+    let memory = Arc::new(MemoryStore::new(defaults.retention, defaults.safety_ttl));
+    let unique = unique();
+    targets.push(Target {
+        store: memory.clone(),
+        backend: Backend::Memory(memory),
+        namespace: format!("ns-{unique}"),
+        stream: format!("wf:{unique}"),
+    });
     targets
 }
 
@@ -201,11 +231,11 @@ impl Target {
             .unwrap();
     }
 
-    /// A plain connection, to change the stored state under the scripts.
-    pub(crate) async fn raw(&self) -> redis::aio::ConnectionManager {
-        // Every key of a Stream is in one slot, so a connection to the slot's node is enough.
-        let url = if self.cluster {
-            let client = redis::cluster::ClusterClient::new(vec![self.url.as_str()]).unwrap();
+    /// A plain connection to the node of the Stream's slot, to change the stored state under
+    /// the scripts.
+    async fn raw(&self, url: &str, cluster: bool) -> redis::aio::ConnectionManager {
+        let url = if cluster {
+            let client = redis::cluster::ClusterClient::new(vec![url]).unwrap();
             let mut conn = client.get_async_connection().await.unwrap();
             let slot: u16 = redis::cmd("CLUSTER")
                 .arg("KEYSLOT")
@@ -220,13 +250,79 @@ impl Target {
                 .unwrap();
             node_of(&shards, slot).expect("a node serves the slot")
         } else {
-            self.url.clone()
+            url.to_string()
         };
         redis::Client::open(url)
             .unwrap()
             .get_connection_manager()
             .await
             .unwrap()
+    }
+
+    /// Sets one meta field under the Store's calls.
+    pub(crate) async fn set_meta(&self, field: &str, value: &str) {
+        match &self.backend {
+            Backend::Redis { url, cluster, .. } => {
+                let mut conn = self.raw(url, *cluster).await;
+                let _: () = conn.hset(self.keys().meta(), field, value).await.unwrap();
+            }
+            Backend::Memory(store) => {
+                store.test_set_meta(&self.namespace, &self.stream, field, value)
+            }
+        }
+    }
+
+    /// One meta field.
+    pub(crate) async fn meta(&self, field: &str) -> Option<String> {
+        match &self.backend {
+            Backend::Redis { url, cluster, .. } => {
+                let mut conn = self.raw(url, *cluster).await;
+                conn.hget(self.keys().meta(), field).await.unwrap()
+            }
+            Backend::Memory(store) => store.test_meta(&self.namespace, &self.stream, field),
+        }
+    }
+
+    /// The ms left on the log and on the meta, as `PTTL` gives them.
+    pub(crate) async fn ttls(&self) -> (i64, i64) {
+        match &self.backend {
+            Backend::Redis { url, cluster, .. } => {
+                let mut conn = self.raw(url, *cluster).await;
+                let log: i64 = conn.pttl(self.keys().log()).await.unwrap();
+                let meta: i64 = conn.pttl(self.keys().meta()).await.unwrap();
+                (log, meta)
+            }
+            Backend::Memory(store) => store.test_ttls(&self.namespace, &self.stream),
+        }
+    }
+
+    /// Adds a log entry with an explicit id, as `XADD <id>`.
+    pub(crate) async fn add_raw_entry(&self, id: &str) {
+        match &self.backend {
+            Backend::Redis { url, cluster, .. } => {
+                let mut conn = self.raw(url, *cluster).await;
+                let _: String = redis::cmd("XADD")
+                    .arg(self.keys().log())
+                    .arg(id)
+                    .arg("x")
+                    .arg("y")
+                    .query_async(&mut conn)
+                    .await
+                    .unwrap();
+            }
+            Backend::Memory(store) => store.test_add_entry(&self.namespace, &self.stream, id),
+        }
+    }
+
+    /// The number of log entries.
+    pub(crate) async fn log_len(&self) -> usize {
+        match &self.backend {
+            Backend::Redis { url, cluster, .. } => {
+                let mut conn = self.raw(url, *cluster).await;
+                conn.xlen(self.keys().log()).await.unwrap()
+            }
+            Backend::Memory(store) => store.test_log_len(&self.namespace, &self.stream),
+        }
     }
 
     /// Every entry of the log.
@@ -396,4 +492,39 @@ fn node_of(slots: &redis::Value, slot: u16) -> Option<String> {
         }
     }
     None
+}
+
+/// An extension on each Redis server that is set, with the config changed by `change`, and on
+/// the memory Store when `memory` is true.
+pub(crate) fn extensions(
+    change: impl Fn(&mut RedisStreamConfig),
+    memory: bool,
+) -> Vec<Arc<StreamExtension>> {
+    let mut extensions = vec![];
+    for (variable, cluster) in [
+        ("STREAMS_REDIS_URL", false),
+        ("STREAMS_REDIS_CLUSTER_URL", true),
+    ] {
+        let Some(url) = server_url(variable) else {
+            continue;
+        };
+        let mut config = RedisStreamConfig {
+            urls: vec![url],
+            cluster,
+            key_prefix: "streams-test".to_string(),
+            ..Default::default()
+        };
+        change(&mut config);
+        let options = ExtensionOptions::from_config(config).unwrap();
+        extensions.push(StreamExtension::new(options, None));
+    }
+    if memory {
+        let defaults = RedisStoreOptions::new(String::new());
+        extensions.push(MemoryStreamExtension::create(
+            defaults.retention,
+            defaults.safety_ttl,
+            None,
+        ));
+    }
+    extensions
 }

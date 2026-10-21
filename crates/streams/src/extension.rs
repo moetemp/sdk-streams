@@ -2,6 +2,7 @@
 
 use crate::{
     StreamError, StreamResult,
+    memory::MemoryStore,
     metrics::Metrics,
     proto::{
         AppendRecordsRequest, BufferWorkflowCallsRequest, BufferWorkflowCallsResponse,
@@ -12,6 +13,7 @@ use crate::{
     },
     redis::{RedisStore, RedisStoreOptions},
     service::StreamService,
+    store::Store,
     workflow::{FlushOptions, WorkflowHooks, WorkflowRuns},
     writer::Writers,
 };
@@ -76,6 +78,7 @@ fn duration(value: Option<prost_types::Duration>) -> Option<Duration> {
 
 /// What the extension and its Workflow Task interceptor share.
 pub(crate) struct Shared {
+    name: &'static str,
     options: ExtensionOptions,
     metrics: Metrics,
     service: OnceCell<Arc<StreamService>>,
@@ -106,32 +109,48 @@ impl Shared {
     }
 }
 
-/// The Stream runtime on Redis, as a Worker extension.
+/// The Stream runtime as a Worker extension, on Redis or, for tests, on the memory Store.
 ///
-/// It connects on its first call that needs Redis, so a bridge can build it with no runtime,
-/// and a Workflow that never publishes never needs Redis. One extension serves every Worker and
-/// client of a plugin.
-pub struct RedisStreamExtension {
+/// On Redis it connects on its first call that needs Redis, so a bridge can build it with no
+/// runtime, and a Workflow that never publishes never needs Redis. One extension serves every
+/// Worker and client of a plugin.
+pub struct StreamExtension {
     shared: Arc<Shared>,
     hooks: Arc<WorkflowHooks>,
 }
 
-impl std::fmt::Debug for RedisStreamExtension {
+/// The Stream runtime on Redis. [StreamExtension::new] builds it.
+pub type RedisStreamExtension = StreamExtension;
+
+impl std::fmt::Debug for StreamExtension {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("RedisStreamExtension")
+        f.debug_struct("StreamExtension")
+            .field("name", &self.shared.name)
             .field("options", &self.shared.options)
             .finish_non_exhaustive()
     }
 }
 
-impl RedisStreamExtension {
-    /// Builds the extension. It counts on `meter`, lang's runtime meter, when given.
-    pub fn new(options: ExtensionOptions, meter: Option<TemporalMeter>) -> Arc<Self> {
+impl StreamExtension {
+    fn build(
+        name: &'static str,
+        options: ExtensionOptions,
+        meter: Option<TemporalMeter>,
+        store: Option<Arc<dyn Store>>,
+    ) -> Arc<Self> {
         let meter = meter.unwrap_or_else(TemporalMeter::no_op);
+        let metrics = Metrics::new(&meter);
+        let service = store.map(|store| {
+            Arc::new(StreamService {
+                store,
+                metrics: metrics.clone(),
+            })
+        });
         let shared = Arc::new(Shared {
+            name,
             options,
-            metrics: Metrics::new(&meter),
-            service: OnceCell::new(),
+            metrics,
+            service: OnceCell::new_with(service),
             runs: WorkflowRuns::default(),
             writers: Writers::default(),
         });
@@ -139,6 +158,11 @@ impl RedisStreamExtension {
             shared: shared.clone(),
         });
         Arc::new(Self { shared, hooks })
+    }
+
+    /// Builds the extension on Redis. It counts on `meter`, lang's runtime meter, when given.
+    pub fn new(options: ExtensionOptions, meter: Option<TemporalMeter>) -> Arc<Self> {
+        Self::build(EXTENSION_NAME, options, meter, None)
     }
 
     /// Builds the extension from an encoded [RedisStreamConfig].
@@ -242,14 +266,58 @@ impl RedisStreamExtension {
     }
 }
 
+/// The name of the memory extension, for a bridge that selects an extension by name.
+pub const MEMORY_EXTENSION_NAME: &str = "temporalio-streams-memory";
+
+/// The Stream runtime on the memory Store, for tests. It serves the same calls with the same
+/// rules as on Redis, and it keeps its Streams in this process only.
+#[derive(Debug)]
+pub struct MemoryStreamExtension;
+
+impl MemoryStreamExtension {
+    /// Builds an extension on an empty memory Store.
+    pub fn create(
+        retention: Duration,
+        safety_ttl: Duration,
+        meter: Option<TemporalMeter>,
+    ) -> Arc<StreamExtension> {
+        let mut store = RedisStoreOptions::new(String::new());
+        store.retention = retention;
+        store.safety_ttl = safety_ttl;
+        let options = ExtensionOptions {
+            store,
+            durable_writes: 0,
+            durable_timeout: Duration::from_secs(1),
+        };
+        let memory: Arc<dyn Store> = Arc::new(MemoryStore::new(retention, safety_ttl));
+        StreamExtension::build(MEMORY_EXTENSION_NAME, options, meter, Some(memory))
+    }
+
+    /// Builds an extension from an encoded [RedisStreamConfig]. Only its Retention and safety
+    /// TTL count, so a plugin can pass the config it builds for Redis.
+    pub fn from_config_bytes(
+        config: &[u8],
+        meter: Option<TemporalMeter>,
+    ) -> StreamResult<Arc<StreamExtension>> {
+        let config = RedisStreamConfig::decode(config)
+            .map_err(|error| StreamError::invalid(format!("The config is bad: {error}")))?;
+        let defaults = RedisStoreOptions::new(String::new());
+        Ok(Self::create(
+            duration(config.retention).unwrap_or(defaults.retention),
+            duration(config.safety_ttl).unwrap_or(defaults.safety_ttl),
+            meter,
+        ))
+    }
+}
+
 pub(crate) fn decode<M: Message + Default>(input: &[u8]) -> StreamResult<M> {
     M::decode(input).map_err(|error| StreamError::invalid(format!("The request is bad: {error}")))
 }
 
 #[async_trait::async_trait]
-impl WorkerExtension for RedisStreamExtension {
+impl WorkerExtension for StreamExtension {
     fn name(&self) -> &str {
-        EXTENSION_NAME
+        self.shared.name
     }
 
     fn workflow_task_interceptor(&self) -> Option<Arc<dyn WorkflowTaskInterceptor>> {

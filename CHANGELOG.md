@@ -25,3 +25,6 @@
   batch, so the new epoch withdraws the earlier attempt's Records.
 - Added `topic_prefixes` (field 10) to `ReadRecordsRequest`. A Record passes when its Topic is in
   `topics` or starts with a prefix.
+- Added `MemoryStreamExtension` (`temporalio-streams-memory`), the Stream runtime on an in-process
+  memory Store for tests. A `Store` trait has the calls of the Redis and memory Stores, and one
+  test suite runs on both.

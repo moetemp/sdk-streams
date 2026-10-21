@@ -6,8 +6,8 @@ use crate::{
     proto::{
         AppendRecord, AppendRecordsRequest, OpenWriterRequest, Producer, ProducerKind, StreamRef,
     },
-    redis::{MAX_BATCH_BYTES, MAX_RECORD_BYTES},
     service::StreamService,
+    store::{MAX_BATCH_BYTES, MAX_RECORD_BYTES},
 };
 use parking_lot::Mutex;
 use prost::Message;

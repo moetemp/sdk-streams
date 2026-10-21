@@ -1,17 +1,17 @@
-//! The Lua scripts against a real Redis, standalone and as a cluster. Start the servers with
+//! The Store rules, on a real Redis, standalone and as a cluster, and on the memory Store. One
+//! suite runs on all of them, so they can't drift. Start the Redis servers with
 //! `scripts/redis-test-servers.sh` and set the two URLs it prints.
 
 mod support;
 
 use prost_types::Timestamp;
-use redis::AsyncCommands;
 use std::time::Duration;
 use support::{Run, Target, record, records_of, stores, supersession};
 use temporalio_streams::{
     Reason,
     ids::{activity_producer_id, client_producer_id},
     proto::{Producer, ProducerEpoch, ProducerKind},
-    redis::{Batch, CreateOutcome, Owner, Withdrawal},
+    store::{Batch, CreateOutcome, Owner, Withdrawal},
 };
 
 fn activity(run: &str, attempt: i32, scheduled: i64) -> Producer {
@@ -198,8 +198,7 @@ async fn a_close_stops_appends_but_not_a_resend() {
 async fn a_newer_format_refuses_every_write() {
     for target in stores().await {
         target.create(Owner::Client).await;
-        let mut conn = target.raw().await;
-        let _: () = conn.hset(target.keys().meta(), "v", 2).await.unwrap();
+        target.set_meta("v", "2").await;
         let error = append(&target, &client(1), 1, &["a"]).await.unwrap_err();
         assert_eq!(error.reason, Reason::FormatTooNew);
         assert_eq!(
@@ -224,8 +223,7 @@ async fn a_newer_format_refuses_every_write() {
 async fn an_expired_stream_refuses_writes_and_its_create() {
     for target in stores().await {
         target.create(Owner::Client).await;
-        let mut conn = target.raw().await;
-        let _: () = conn.hset(target.keys().meta(), "exp", 1).await.unwrap();
+        target.set_meta("exp", "1").await;
         let error = append(&target, &client(1), 1, &["a"]).await.unwrap_err();
         assert_eq!(error.reason, Reason::Expired);
         let created = target
@@ -444,25 +442,23 @@ async fn a_workflow_close_withdraws_a_failed_task() {
 #[tokio::test]
 async fn the_ttl_follows_the_owner_and_the_close() {
     for target in stores().await {
-        let mut conn = target.raw().await;
         target.create(Owner::Workflow).await;
         let run = Run::new("r1");
         target
             .flush(&run.task(3, 1), None, &[], &["a"])
             .await
             .unwrap();
-        let ttl: i64 = conn.pttl(target.keys().log()).await.unwrap();
+        let (ttl, _) = target.ttls().await;
         assert!(
             ttl > Duration::from_secs(80 * 86_400).as_millis() as i64,
             "{ttl}"
         );
         target.close_run(&run.task(6, 1), &[]).await.unwrap();
-        let ttl: i64 = conn.pttl(target.keys().log()).await.unwrap();
+        let (ttl, meta) = target.ttls().await;
         assert!(
             ttl <= Duration::from_secs(7 * 86_400).as_millis() as i64,
             "{ttl}"
         );
-        let meta: i64 = conn.pttl(target.keys().meta()).await.unwrap();
         assert!(
             meta > Duration::from_secs(36 * 86_400).as_millis() as i64,
             "{meta}"
@@ -589,10 +585,8 @@ async fn a_workflow_create_takes_over_a_stream_an_activity_created() {
     for target in stores().await {
         target.create(Owner::Client).await;
         target.create(Owner::Workflow).await;
-        let mut conn = target.raw().await;
-        let own: String = conn.hget(target.keys().meta(), "own").await.unwrap();
-        assert_eq!(own, "wf");
-        let ttl: i64 = conn.pttl(target.keys().meta()).await.unwrap();
+        assert_eq!(target.meta("own").await.as_deref(), Some("wf"));
+        let (_, ttl) = target.ttls().await;
         assert!(
             ttl > Duration::from_secs(100 * 86_400).as_millis() as i64,
             "{ttl}"
@@ -621,8 +615,12 @@ async fn a_wait_for_replicas_holds_only_the_durable_connection() {
     })
     .await;
     for target in targets {
+        // The memory Store has no replicas and no second connection.
+        let support::Backend::Redis { store, .. } = &target.backend else {
+            continue;
+        };
         target.create(Owner::Client).await;
-        let durable = target.store.durable().expect("a durable connection");
+        let durable = store.durable().expect("a durable connection");
         let (namespace, stream) = (target.namespace.clone(), target.stream.clone());
         let waiter = tokio::spawn(async move {
             durable
@@ -638,7 +636,7 @@ async fn a_wait_for_replicas_holds_only_the_durable_connection() {
             started.elapsed()
         );
         assert_eq!(waiter.await.unwrap().unwrap(), 0);
-        assert!(target.store.durable().unwrap().durable().is_none());
+        assert!(store.durable().unwrap().durable().is_none());
     }
 }
 
@@ -673,26 +671,49 @@ async fn c_with_no_attempt_withdraws_by_started_time() {
 async fn an_append_whose_ids_would_not_fit_an_offset_is_refused_before_it_writes() {
     for target in stores().await {
         target.create(Owner::Client).await;
-        let mut conn = target.raw().await;
-        // An entry a millisecond ahead of the server clock, with the last 20-bit sequence.
+        // An entry a minute ahead of the clock, with nearly the last 20-bit sequence.
         let ahead = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .unwrap()
             .as_millis()
             + 60_000;
-        let _: String = redis::cmd("XADD")
-            .arg(target.keys().log())
-            .arg(format!("{ahead}-1048570"))
-            .arg("x")
-            .arg("y")
-            .query_async(&mut conn)
-            .await
-            .unwrap();
+        target.add_raw_entry(&format!("{ahead}-1048570")).await;
         let error = append(&target, &client(1), 1, &["a"; 10])
             .await
             .unwrap_err();
         assert_eq!(error.reason, Reason::Storage);
-        let length: i64 = conn.xlen(target.keys().log()).await.unwrap();
-        assert_eq!(length, 1);
+        assert_eq!(target.log_len().await, 1);
+    }
+}
+
+#[tokio::test]
+async fn every_store_keeps_the_meta_fields_of_the_shared_vectors() {
+    use temporalio_streams::ids::fields;
+    let vectors: serde_json::Value = serde_json::from_str(
+        &std::fs::read_to_string(format!(
+            "{}/testdata/fields.json",
+            env!("CARGO_MANIFEST_DIR")
+        ))
+        .unwrap(),
+    )
+    .unwrap();
+    for target in stores().await {
+        target.create(Owner::Workflow).await;
+        let producer = activity("run:1", 1, 10);
+        append(&target, &producer, 1, &["a"]).await.unwrap();
+        let kind = ProducerKind::Activity as i32;
+        // The vector's Producer is this one, so its field names are the ones the Store keeps.
+        assert_eq!(producer.id, vectors["producer_id"].as_str().unwrap());
+        let fence = fields::fence(kind, &producer.id);
+        assert_eq!(fence, vectors["fence"].as_str().unwrap());
+        for field in [
+            fence,
+            fields::dedupe(kind, &producer.id),
+            fields::holds(kind, &producer.id),
+            vectors["run_wrote"].as_str().unwrap().to_string(),
+            fields::VERSION.to_string(),
+        ] {
+            assert!(target.meta(&field).await.is_some(), "{field}");
+        }
     }
 }
