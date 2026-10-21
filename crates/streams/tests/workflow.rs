@@ -157,6 +157,7 @@ impl Run {
             run_id: run_id.to_string(),
             withdraw_run: withdraw_run.to_string(),
             calls,
+            chain_continues: false,
         };
         self.ext
             .call("BufferWorkflowCalls", &request.encode_to_vec())
@@ -535,4 +536,40 @@ fn a_buffer_call_needs_a_run_and_stream_ids() {
             .is_err()
     );
     assert!(ext.call("BufferWorkflowCalls", b"\xff\xff").is_err());
+}
+
+#[tokio::test]
+async fn an_auto_close_stays_out_when_the_run_chain_goes_on() {
+    for run in runs().await {
+        run.activation(vec![run.create(), run.publish(&["a"])])
+            .unwrap();
+        run.complete(&run.task(3, 1), true).await.unwrap();
+        // The run fails, and its retry policy starts the next run of the Chain.
+        let request = BufferWorkflowCallsRequest {
+            run_id: run.run_id.clone(),
+            calls: vec![run.close(true, None)],
+            chain_continues: true,
+            ..Default::default()
+        };
+        run.ext
+            .call("BufferWorkflowCalls", &request.encode_to_vec())
+            .unwrap();
+        run.complete(&run.task(6, 1).after(3).closing(RunCloseKind::Failed), true)
+            .await
+            .unwrap();
+        run.drain().await;
+        assert_eq!(run.visible().await, (vec!["a".into()], false));
+    }
+}
+
+#[tokio::test]
+async fn a_task_with_no_started_time_fails_its_flush() {
+    for run in runs().await {
+        run.activation(vec![run.create(), run.publish(&["a"])])
+            .unwrap();
+        let mut info = run.info(&run.task(3, 1));
+        info.started_time = None;
+        let error = run.hooks.before_complete(&info).await.unwrap_err();
+        assert!(error.message.contains("started time"), "{}", error.message);
+    }
 }

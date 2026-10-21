@@ -11,7 +11,9 @@ use crate::{
         ProducerKind, WorkflowCall, WorkflowTaskEpoch, workflow_call::Call,
     },
     record::{close_record, data_record, supersession},
-    redis::{Batch, CreateOutcome, MAX_BATCH_BYTES, MAX_RECORD_BYTES, Owner, Withdrawal},
+    redis::{
+        Batch, CreateOutcome, MAX_BATCH_BYTES, MAX_RECORD_BYTES, Owner, RedisStore, Withdrawal,
+    },
     service::StreamService,
 };
 use parking_lot::Mutex;
@@ -36,6 +38,7 @@ const CLOSE_ATTEMPTS: u32 = 6;
 #[derive(Default)]
 struct RunBuffer {
     withdraw_run: String,
+    chain_continues: bool,
     calls: Vec<WorkflowCall>,
     closes: Vec<(CloseStreamRequest, bool)>,
 }
@@ -77,15 +80,21 @@ impl WorkflowRuns {
         if !request.withdraw_run.is_empty() {
             run.withdraw_run = request.withdraw_run;
         }
+        run.chain_continues = request.chain_continues;
         run.calls.extend(request.calls);
         Ok(())
     }
 
-    fn take_calls(&self, run_id: &str) -> (Vec<WorkflowCall>, String) {
+    /// The run's calls, its withdrawn run and whether its Run Chain goes on.
+    fn take_calls(&self, run_id: &str) -> (Vec<WorkflowCall>, String, bool) {
         let mut runs = self.runs.lock();
         match runs.get_mut(run_id) {
-            Some(run) => (std::mem::take(&mut run.calls), run.withdraw_run.clone()),
-            None => (vec![], String::new()),
+            Some(run) => (
+                std::mem::take(&mut run.calls),
+                run.withdraw_run.clone(),
+                run.chain_continues,
+            ),
+            None => (vec![], String::new(), false),
         }
     }
 
@@ -215,9 +224,17 @@ impl StreamService {
         task: &WorkflowTaskCompletionInfo,
         options: FlushOptions,
     ) -> StreamResult<()> {
-        let (calls, withdraw_run) = runs.take_calls(&task.run_id);
+        let (calls, withdraw_run, chain_continues) = runs.take_calls(&task.run_id);
         if calls.is_empty() {
             return Ok(());
+        }
+        // Without the started time, a dropped speculative task and the task that reuses its
+        // started event id would get one epoch, and the second batch would count as a resend.
+        if task.started_time.is_none() {
+            self.metrics.flush_failed();
+            return Err(StreamError::invalid(
+                "The Workflow Task has no started time, which the Stream epoch needs",
+            ));
         }
         let started = std::time::Instant::now();
         let deadline = Instant::from_std(task.deadline)
@@ -247,19 +264,26 @@ impl StreamService {
                         .records
                         .extend(append.records);
                 }
+                // A failure that the server retries, or a cron run, goes on with the Run Chain,
+                // so the auto close doesn't go out.
+                Some(Call::Close(_)) if when_run_closes && chain_continues => {}
                 Some(Call::Close(close)) => closes.push((close, when_run_closes)),
                 None => {}
             }
         }
+        let durable = (options.durable_writes > 0)
+            .then(|| self.store.durable())
+            .flatten();
+        let store = durable.as_ref().unwrap_or(&self.store);
         let flush = async {
             for id in &order {
                 let calls = streams.remove(id).unwrap_or_default();
-                self.flush_stream(task, id, calls, &withdraw_run, deadline)
+                self.flush_stream(store, task, id, calls, &withdraw_run, deadline)
                     .await?;
             }
             if options.durable_writes > 0 {
                 for id in &order {
-                    self.wait_durable(task, id, options).await?;
+                    Self::wait_durable(store, task, id, options).await?;
                 }
             }
             Ok::<_, StreamError>(())
@@ -282,6 +306,7 @@ impl StreamService {
 
     async fn flush_stream(
         &self,
+        store: &RedisStore,
         task: &WorkflowTaskCompletionInfo,
         id: &str,
         calls: StreamCalls,
@@ -305,7 +330,7 @@ impl StreamService {
         };
         for retention in calls.creates {
             let created = retried(deadline, || {
-                self.store.create(
+                store.create(
                     namespace,
                     id,
                     duration(retention),
@@ -357,7 +382,7 @@ impl StreamService {
                 records,
                 withdrawal: withdrawal.clone(),
             };
-            let appended = retried(deadline, || self.store.append(namespace, id, &batch)).await;
+            let appended = retried(deadline, || store.append(namespace, id, &batch)).await;
             match self.count(appended) {
                 Ok(_) => {}
                 Err(error) if dropped_for(error.reason) => {
@@ -378,13 +403,12 @@ impl StreamService {
     }
 
     async fn wait_durable(
-        &self,
+        store: &RedisStore,
         task: &WorkflowTaskCompletionInfo,
         id: &str,
         options: FlushOptions,
     ) -> StreamResult<()> {
-        let replicas = self
-            .store
+        let replicas = store
             .wait_replicas(
                 &task.namespace,
                 id,
