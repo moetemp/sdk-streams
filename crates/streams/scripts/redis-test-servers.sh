@@ -3,13 +3,13 @@
 # cluster of three primaries. Uses a local redis-server when there is one, and docker on a Linux
 # host otherwise, since a cluster's nodes must reach each other on the addresses they announce.
 #
-#   STREAMS_REDIS_URL=redis://localhost:6384/0
-#   STREAMS_REDIS_CLUSTER_URL=redis://localhost:7101/0
+#   STREAMS_REDIS_URL=redis://localhost:6491/0
+#   STREAMS_REDIS_CLUSTER_URL=redis://localhost:7291/0
 set -euo pipefail
 
-STANDALONE=${STREAMS_STANDALONE_PORT:-6384}
+STANDALONE=${STREAMS_STANDALONE_PORT:-6491}
 # Three ports for the cluster primaries, so lanes on one host can each run their own.
-read -r -a CLUSTER <<<"${STREAMS_CLUSTER_PORTS:-7101 7102 7103}"
+read -r -a CLUSTER <<<"${STREAMS_CLUSTER_PORTS:-7291 7292 7293}"
 DATA=${STREAMS_REDIS_DATA:-${TMPDIR:-/tmp}/streams-redis}
 mkdir -p "$DATA"
 
