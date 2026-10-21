@@ -1,0 +1,698 @@
+//! The Lua scripts against a real Redis, standalone and as a cluster. Start the servers with
+//! `scripts/redis-test-servers.sh` and set the two URLs it prints.
+
+mod support;
+
+use prost_types::Timestamp;
+use redis::AsyncCommands;
+use std::time::Duration;
+use support::{Run, Target, record, records_of, stores, supersession};
+use temporalio_streams::{
+    Reason,
+    ids::{activity_producer_id, client_producer_id},
+    proto::{Producer, ProducerEpoch, ProducerKind},
+    redis::{Batch, CreateOutcome, Owner, Withdrawal},
+};
+
+fn activity(run: &str, attempt: i32, scheduled: i64) -> Producer {
+    Producer {
+        kind: ProducerKind::Activity as i32,
+        id: activity_producer_id(run, "a", "s"),
+        epoch: Some(ProducerEpoch {
+            attempt_scheduled_time: Some(Timestamp {
+                seconds: scheduled,
+                nanos: 0,
+            }),
+            attempt,
+            ..Default::default()
+        }),
+        run_id: run.to_string(),
+    }
+}
+
+fn client(attempt: i32) -> Producer {
+    Producer {
+        kind: ProducerKind::Client as i32,
+        id: client_producer_id("me", "p1"),
+        epoch: Some(ProducerEpoch {
+            attempt,
+            ..Default::default()
+        }),
+        run_id: String::new(),
+    }
+}
+
+async fn append(
+    target: &Target,
+    producer: &Producer,
+    sequence: i64,
+    texts: &[&str],
+) -> Result<temporalio_streams::redis::Appended, temporalio_streams::StreamError> {
+    let records: Vec<_> = texts.iter().map(|text| record(producer, text)).collect();
+    let mut withdrawal = Withdrawal::default();
+    let bytes = supersession(producer, &withdrawal);
+    withdrawal.supersession = &bytes;
+    target
+        .store
+        .append(
+            &target.namespace,
+            &target.stream,
+            &Batch {
+                producer,
+                sequence,
+                records: &records,
+                withdrawal,
+            },
+        )
+        .await
+}
+
+#[tokio::test]
+async fn a_create_writes_the_key_once_and_keeps_its_retention() {
+    for target in stores().await {
+        let none = Withdrawal::default();
+        assert_eq!(
+            append(&target, &client(1), 1, &["x"])
+                .await
+                .unwrap_err()
+                .reason,
+            Reason::NotFound
+        );
+        let day = Some(Duration::from_secs(86_400));
+        let created = target
+            .store
+            .create(&target.namespace, &target.stream, day, Owner::Client, &none)
+            .await
+            .unwrap();
+        assert_eq!(created.outcome, CreateOutcome::Created);
+        let again = target
+            .store
+            .create(&target.namespace, &target.stream, day, Owner::Client, &none)
+            .await
+            .unwrap();
+        assert_eq!(again.outcome, CreateOutcome::Exists);
+        let other = target
+            .store
+            .create(
+                &target.namespace,
+                &target.stream,
+                None,
+                Owner::Client,
+                &none,
+            )
+            .await
+            .unwrap();
+        assert_eq!(other.outcome, CreateOutcome::Conflict);
+        assert_eq!(other.retention, Duration::from_secs(86_400));
+    }
+}
+
+#[tokio::test]
+async fn a_resend_gets_its_first_positions_and_a_lower_sequence_is_refused() {
+    for target in stores().await {
+        target.create(Owner::Client).await;
+        let p = client(1);
+        let first = append(&target, &p, 1, &["p1", "p2"]).await.unwrap();
+        assert!(!first.resend);
+        // Another Producer writes between the batch and its resend.
+        append(&target, &activity("r", 1, 10), 1, &["q1"])
+            .await
+            .unwrap();
+        let resend = append(&target, &p, 1, &["p1", "p2"]).await.unwrap();
+        assert!(resend.resend);
+        assert_eq!(resend.offsets, first.offsets);
+        append(&target, &p, 2, &["p3"]).await.unwrap();
+        assert_eq!(
+            append(&target, &p, 1, &["p1"]).await.unwrap_err().reason,
+            Reason::Sequence
+        );
+        let texts = target.texts().await;
+        assert_eq!(texts, ["p1", "p2", "q1", "p3"]);
+    }
+}
+
+#[tokio::test]
+async fn a_lower_epoch_is_fenced_for_each_producer_kind() {
+    for target in stores().await {
+        target.create(Owner::Workflow).await;
+        let run = Run::new("r1");
+        target
+            .flush(&run.task(8, 1), None, &[], &["w8"])
+            .await
+            .unwrap();
+        let stale = target.flush(&run.task(5, 1), None, &[], &["w5"]).await;
+        assert_eq!(stale.unwrap_err().reason, Reason::Fenced);
+        let la = run.local_activity("k", 8, 1, 2);
+        target.batch(&la, 1, &["la2"]).await.unwrap();
+        let stale = target
+            .batch(&run.local_activity("k", 8, 1, 1), 1, &["la1"])
+            .await;
+        assert_eq!(stale.unwrap_err().reason, Reason::Fenced);
+        append(&target, &activity("r1", 2, 20), 1, &["a2"])
+            .await
+            .unwrap();
+        let stale = append(&target, &activity("r1", 3, 15), 1, &["a3"]).await;
+        assert_eq!(stale.unwrap_err().reason, Reason::Fenced);
+        append(&target, &client(2), 1, &["c2"]).await.unwrap();
+        let stale = append(&target, &client(1), 1, &["c1"]).await;
+        assert_eq!(stale.unwrap_err().reason, Reason::Fenced);
+        assert_eq!(target.texts().await, ["w8", "la2", "a2", "c2"]);
+    }
+}
+
+#[tokio::test]
+async fn a_close_stops_appends_but_not_a_resend() {
+    for target in stores().await {
+        target.create(Owner::Client).await;
+        let p = client(1);
+        let first = append(&target, &p, 1, &["a"]).await.unwrap();
+        let closed = target.close(&p).await.unwrap();
+        assert!(!closed.already);
+        assert_eq!(
+            append(&target, &p, 2, &["b"]).await.unwrap_err().reason,
+            Reason::Closed
+        );
+        assert_eq!(
+            append(&target, &p, 1, &["a"]).await.unwrap().offsets,
+            first.offsets
+        );
+        let again = target.close(&p).await.unwrap();
+        assert!(again.already);
+        assert_eq!(again.offset, closed.offset);
+        let created = target
+            .store
+            .create(
+                &target.namespace,
+                &target.stream,
+                None,
+                Owner::Client,
+                &Withdrawal::default(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(created.outcome, CreateOutcome::Closed);
+    }
+}
+
+#[tokio::test]
+async fn a_newer_format_refuses_every_write() {
+    for target in stores().await {
+        target.create(Owner::Client).await;
+        let mut conn = target.raw().await;
+        let _: () = conn.hset(target.keys().meta(), "v", 2).await.unwrap();
+        let error = append(&target, &client(1), 1, &["a"]).await.unwrap_err();
+        assert_eq!(error.reason, Reason::FormatTooNew);
+        assert_eq!(
+            target.close(&client(1)).await.unwrap_err().reason,
+            Reason::FormatTooNew
+        );
+        let create = target
+            .store
+            .create(
+                &target.namespace,
+                &target.stream,
+                None,
+                Owner::Client,
+                &Withdrawal::default(),
+            )
+            .await;
+        assert_eq!(create.unwrap_err().reason, Reason::FormatTooNew);
+    }
+}
+
+#[tokio::test]
+async fn an_expired_stream_refuses_writes_and_its_create() {
+    for target in stores().await {
+        target.create(Owner::Client).await;
+        let mut conn = target.raw().await;
+        let _: () = conn.hset(target.keys().meta(), "exp", 1).await.unwrap();
+        let error = append(&target, &client(1), 1, &["a"]).await.unwrap_err();
+        assert_eq!(error.reason, Reason::Expired);
+        let created = target
+            .store
+            .create(
+                &target.namespace,
+                &target.stream,
+                None,
+                Owner::Client,
+                &Withdrawal::default(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(created.outcome, CreateOutcome::Expired);
+    }
+}
+
+#[tokio::test]
+async fn an_activity_retry_flags_its_first_batch_only() {
+    for target in stores().await {
+        target.create(Owner::Workflow).await;
+        let (a1, a2) = (activity("r1", 1, 10), activity("r1", 2, 20));
+        let other = Producer {
+            id: activity_producer_id("r1", "b", "s"),
+            ..activity("r1", 1, 10)
+        };
+        append(&target, &a1, 1, &["x1"]).await.unwrap();
+        append(&target, &other, 1, &["y1"]).await.unwrap();
+        assert!(append(&target, &a2, 1, &["x2"]).await.unwrap().flagged);
+        assert!(!append(&target, &a2, 2, &["x3"]).await.unwrap().flagged);
+        assert_eq!(target.visible().await, ["y1", "x2", "x3"]);
+    }
+}
+
+#[tokio::test]
+async fn an_empty_batch_of_a_retry_withdraws_the_earlier_attempt() {
+    for target in stores().await {
+        target.create(Owner::Workflow).await;
+        append(&target, &activity("r1", 1, 10), 1, &["x1"])
+            .await
+            .unwrap();
+        let empty = append(&target, &activity("r1", 2, 20), 1, &[])
+            .await
+            .unwrap();
+        assert!(empty.flagged);
+        assert!(empty.offsets.is_some());
+        assert!(target.visible().await.is_empty());
+        // The withdrawal is done, so another empty batch writes nothing.
+        let again = append(&target, &activity("r1", 3, 30), 1, &[])
+            .await
+            .unwrap();
+        assert!(!again.flagged);
+        assert_eq!(again.offsets, None);
+        // An empty batch still moves the fence.
+        let stale = append(&target, &activity("r1", 2, 20), 2, &["late"]).await;
+        assert_eq!(stale.unwrap_err().reason, Reason::Fenced);
+    }
+}
+
+#[tokio::test]
+async fn the_appendix_e_examples_withdraw_the_right_records() {
+    for target in stores().await {
+        target.create(Owner::Workflow).await;
+        let run = Run::new("r1");
+        // 1. A retried task writes nothing. B at [5] fails, [8] writes nothing, C at [11].
+        target
+            .flush(&run.task(2, 1), None, &[], &["A"])
+            .await
+            .unwrap();
+        target
+            .flush(&run.task(5, 1), Some(run.done(2)), &[], &["B"])
+            .await
+            .unwrap();
+        let c = target
+            .flush(&run.task(11, 1), Some(run.done(8)), &[5], &["C"])
+            .await;
+        assert!(c.unwrap().flagged);
+        assert_eq!(target.visible().await, ["A", "C"]);
+        // 2. A refused completion. B at [14] is refused, B' at [17] with failed [14].
+        target
+            .flush(&run.task(14, 1), Some(run.done(11)), &[5], &["B2"])
+            .await
+            .unwrap();
+        target
+            .flush(&run.task(17, 1), Some(run.done(11)), &[5, 14], &["B2'"])
+            .await
+            .unwrap();
+        assert_eq!(target.visible().await, ["A", "C", "B2'"]);
+        // 3. A transient retry. D at [20] attempt 2, D' at [20] attempt 3.
+        target
+            .flush(&run.task(20, 2), Some(run.done(17)), &[], &["D"])
+            .await
+            .unwrap();
+        target
+            .flush(&run.task(20, 3), Some(run.done(17)), &[], &["D'"])
+            .await
+            .unwrap();
+        assert_eq!(target.visible().await, ["A", "C", "B2'", "D'"]);
+        // 4. A dropped speculative task. U at [23] T1, then [23] T2.
+        target
+            .flush(
+                &run.task_at(23, 1, 300),
+                Some(run.done_at(20, 3)),
+                &[],
+                &["U"],
+            )
+            .await
+            .unwrap();
+        target
+            .flush(
+                &run.task_at(23, 1, 400),
+                Some(run.done_at(20, 3)),
+                &[],
+                &["U'"],
+            )
+            .await
+            .unwrap();
+        assert_eq!(target.visible().await, ["A", "C", "B2'", "D'", "U'"]);
+        // 5. A refused transient attempt. D at [29] is refused, D2 at [32], c = [26].
+        target
+            .flush(&run.task(29, 2), Some(run.done(26)), &[], &["E"])
+            .await
+            .unwrap();
+        target
+            .flush(&run.task(32, 1), Some(run.done(26)), &[], &["E'"])
+            .await
+            .unwrap();
+        assert_eq!(target.visible().await, ["A", "C", "B2'", "D'", "U'", "E'"]);
+    }
+}
+
+#[tokio::test]
+async fn a_local_activity_of_a_withdrawn_task_is_withdrawn_and_fenced() {
+    for target in stores().await {
+        target.create(Owner::Workflow).await;
+        let run = Run::new("r1");
+        target
+            .flush(&run.task(5, 1), None, &[], &["w5"])
+            .await
+            .unwrap();
+        target
+            .batch(&run.local_activity("k", 5, 1, 1), 1, &["la"])
+            .await
+            .unwrap();
+        // Task [5] failed, so the next flush withdraws the task and its call.
+        target
+            .flush(&run.task(8, 1), None, &[5], &["w8"])
+            .await
+            .unwrap();
+        assert_eq!(target.visible().await, ["w8"]);
+        let late = target
+            .batch(&run.local_activity("k", 5, 1, 1), 2, &["late"])
+            .await;
+        assert_eq!(late.unwrap_err().reason, Reason::Fenced);
+        // A call of a task that completed stays.
+        target
+            .batch(&run.local_activity("j", 8, 1, 1), 1, &["la8"])
+            .await
+            .unwrap();
+        target
+            .flush(&run.task(11, 1), Some(run.done(8)), &[5], &["w11"])
+            .await
+            .unwrap();
+        assert_eq!(target.visible().await, ["w8", "la8", "w11"]);
+    }
+}
+
+#[tokio::test]
+async fn a_retry_run_withdraws_and_fences_the_previous_run() {
+    for target in stores().await {
+        target.create(Owner::Workflow).await;
+        let (r1, r2) = (Run::new("r1"), Run::new("r2"));
+        target
+            .flush(&r1.task(3, 1), None, &[], &["A"])
+            .await
+            .unwrap();
+        append(&target, &activity("r1", 1, 10), 1, &["A'"])
+            .await
+            .unwrap();
+        let b = target
+            .flush_retry(&r2.task(3, 1), None, "r1", &["B"])
+            .await
+            .unwrap();
+        assert!(b.flagged);
+        assert_eq!(target.visible().await, ["B"]);
+        let late = append(&target, &activity("r1", 1, 10), 2, &["A''"]).await;
+        assert_eq!(late.unwrap_err().reason, Reason::Fenced);
+        let late = target
+            .flush(&r1.task(6, 1), Some(r1.done(3)), &[], &["A3"])
+            .await;
+        assert_eq!(late.unwrap_err().reason, Reason::Fenced);
+        // A second withdrawal of the same run withdraws nothing more.
+        let again = target
+            .flush_retry(&r2.task(6, 1), Some(r2.done(3)), "r1", &["B2"])
+            .await
+            .unwrap();
+        assert!(!again.flagged);
+    }
+}
+
+#[tokio::test]
+async fn a_workflow_close_withdraws_a_failed_task() {
+    for target in stores().await {
+        target.create(Owner::Workflow).await;
+        let run = Run::new("r1");
+        target
+            .flush(&run.task(5, 1), None, &[], &["w5"])
+            .await
+            .unwrap();
+        let closed = target.close_run(&run.task(8, 1), &[5]).await.unwrap();
+        assert!(closed.flagged);
+        assert!(target.visible().await.is_empty());
+    }
+}
+
+#[tokio::test]
+async fn the_ttl_follows_the_owner_and_the_close() {
+    for target in stores().await {
+        let mut conn = target.raw().await;
+        target.create(Owner::Workflow).await;
+        let run = Run::new("r1");
+        target
+            .flush(&run.task(3, 1), None, &[], &["a"])
+            .await
+            .unwrap();
+        let ttl: i64 = conn.pttl(target.keys().log()).await.unwrap();
+        assert!(
+            ttl > Duration::from_secs(80 * 86_400).as_millis() as i64,
+            "{ttl}"
+        );
+        target.close_run(&run.task(6, 1), &[]).await.unwrap();
+        let ttl: i64 = conn.pttl(target.keys().log()).await.unwrap();
+        assert!(
+            ttl <= Duration::from_secs(7 * 86_400).as_millis() as i64,
+            "{ttl}"
+        );
+        let meta: i64 = conn.pttl(target.keys().meta()).await.unwrap();
+        assert!(
+            meta > Duration::from_secs(36 * 86_400).as_millis() as i64,
+            "{meta}"
+        );
+    }
+}
+
+#[tokio::test]
+async fn an_append_trims_by_retention_and_keeps_the_watermark() {
+    for target in stores().await {
+        let none = Withdrawal::default();
+        target
+            .store
+            .create(
+                &target.namespace,
+                &target.stream,
+                Some(Duration::from_millis(200)),
+                // An open Workflow Stream keeps its key, so only the Retention trims.
+                Owner::Workflow,
+                &none,
+            )
+            .await
+            .unwrap();
+        let old = append(&target, &client(1), 1, &["old"]).await.unwrap();
+        tokio::time::sleep(Duration::from_millis(300)).await;
+        // The read hides the old Record before any append trims it.
+        let (state, entries) = target
+            .store
+            .read(&target.namespace, &target.stream, 0, 10)
+            .await
+            .unwrap();
+        assert!(state.retained_from() > old.offsets.unwrap().1);
+        assert_eq!(entries.len(), 1);
+        append(&target, &client(1), 2, &["new"]).await.unwrap();
+        let (state, entries) = target
+            .store
+            .read(&target.namespace, &target.stream, 0, 10)
+            .await
+            .unwrap();
+        assert_eq!(state.trimmed, old.offsets.unwrap().1);
+        assert_eq!(records_of(&entries), ["new"]);
+    }
+}
+
+#[tokio::test]
+async fn a_blocked_read_wakes_on_an_append_and_a_wait_for_replicas_ends() {
+    for target in stores().await {
+        target.create(Owner::Client).await;
+        let first = append(&target, &client(1), 1, &["a"]).await.unwrap();
+        let newest = first.offsets.unwrap().1;
+        let deadline = tokio::time::Instant::now() + Duration::from_millis(200);
+        let woke = target
+            .store
+            .wait_after(&target.namespace, &target.stream, newest, deadline)
+            .await
+            .unwrap();
+        assert!(!woke);
+        let store = target.store.clone();
+        let (namespace, stream) = (target.namespace.clone(), target.stream.clone());
+        let waiter = tokio::spawn(async move {
+            let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
+            store
+                .wait_after(&namespace, &stream, newest, deadline)
+                .await
+        });
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        append(&target, &client(1), 2, &["b"]).await.unwrap();
+        assert!(waiter.await.unwrap().unwrap());
+        let replicas = target
+            .store
+            .wait_replicas(
+                &target.namespace,
+                &target.stream,
+                0,
+                Duration::from_millis(100),
+            )
+            .await
+            .unwrap();
+        assert_eq!(replicas, 0);
+    }
+}
+
+#[tokio::test]
+async fn a_sequence_below_one_is_refused() {
+    for target in stores().await {
+        target.create(Owner::Client).await;
+        for sequence in [0, -1] {
+            let error = append(&target, &client(1), sequence, &["x"])
+                .await
+                .unwrap_err();
+            assert_eq!(error.reason, Reason::Invalid);
+        }
+    }
+}
+
+#[tokio::test]
+async fn a_local_activity_of_a_failed_task_that_wrote_nothing_is_fenced() {
+    for target in stores().await {
+        target.create(Owner::Workflow).await;
+        let run = Run::new("r1");
+        target
+            .flush(&run.task(3, 1), None, &[], &["w3"])
+            .await
+            .unwrap();
+        // Task [5] dispatched the call and failed before anything of it went here.
+        target
+            .flush(&run.task(8, 1), Some(run.done(3)), &[5], &["w8"])
+            .await
+            .unwrap();
+        let late = target
+            .batch(&run.local_activity("k", 5, 1, 1), 1, &["late"])
+            .await;
+        assert_eq!(late.unwrap_err().reason, Reason::Fenced);
+        target
+            .batch(&run.local_activity("j", 8, 1, 1), 1, &["la8"])
+            .await
+            .unwrap();
+        assert_eq!(target.visible().await, ["w3", "w8", "la8"]);
+    }
+}
+
+#[tokio::test]
+async fn a_workflow_create_takes_over_a_stream_an_activity_created() {
+    for target in stores().await {
+        target.create(Owner::Client).await;
+        target.create(Owner::Workflow).await;
+        let mut conn = target.raw().await;
+        let own: String = conn.hget(target.keys().meta(), "own").await.unwrap();
+        assert_eq!(own, "wf");
+        let ttl: i64 = conn.pttl(target.keys().meta()).await.unwrap();
+        assert!(
+            ttl > Duration::from_secs(100 * 86_400).as_millis() as i64,
+            "{ttl}"
+        );
+    }
+}
+
+#[tokio::test]
+async fn a_stale_producer_cant_close_the_stream() {
+    for target in stores().await {
+        target.create(Owner::Client).await;
+        append(&target, &client(2), 1, &["a"]).await.unwrap();
+        assert_eq!(
+            target.close(&client(1)).await.unwrap_err().reason,
+            Reason::Fenced
+        );
+        target.close(&client(2)).await.unwrap();
+    }
+}
+
+#[tokio::test]
+async fn a_wait_for_replicas_holds_only_the_durable_connection() {
+    let targets = support::stores_with(|mut options| {
+        options.durable_connection = true;
+        options
+    })
+    .await;
+    for target in targets {
+        target.create(Owner::Client).await;
+        let durable = target.store.durable().expect("a durable connection");
+        let (namespace, stream) = (target.namespace.clone(), target.stream.clone());
+        let waiter = tokio::spawn(async move {
+            durable
+                .wait_replicas(&namespace, &stream, 1, Duration::from_millis(800))
+                .await
+        });
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        let started = std::time::Instant::now();
+        append(&target, &client(1), 1, &["a"]).await.unwrap();
+        assert!(
+            started.elapsed() < Duration::from_millis(400),
+            "{:?}",
+            started.elapsed()
+        );
+        assert_eq!(waiter.await.unwrap().unwrap(), 0);
+        assert!(target.store.durable().unwrap().durable().is_none());
+    }
+}
+
+#[tokio::test]
+async fn c_with_no_attempt_withdraws_by_started_time() {
+    for target in stores().await {
+        target.create(Owner::Workflow).await;
+        let run = Run::new("r1");
+        target
+            .flush(&run.task_at(8, 1, 200), None, &[], &["D1"])
+            .await
+            .unwrap();
+        target
+            .flush(&run.task_at(8, 2, 300), None, &[], &["D2"])
+            .await
+            .unwrap();
+        let mut c = run.done(8);
+        c.attempt = 0;
+        c.started_time = Some(Timestamp {
+            seconds: 300,
+            nanos: 0,
+        });
+        target
+            .flush(&run.task(14, 1), Some(c), &[], &["E"])
+            .await
+            .unwrap();
+        assert_eq!(target.visible().await, ["D2", "E"]);
+    }
+}
+
+#[tokio::test]
+async fn an_append_whose_ids_would_not_fit_an_offset_is_refused_before_it_writes() {
+    for target in stores().await {
+        target.create(Owner::Client).await;
+        let mut conn = target.raw().await;
+        // An entry a millisecond ahead of the server clock, with the last 20-bit sequence.
+        let ahead = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_millis()
+            + 60_000;
+        let _: String = redis::cmd("XADD")
+            .arg(target.keys().log())
+            .arg(format!("{ahead}-1048570"))
+            .arg("x")
+            .arg("y")
+            .query_async(&mut conn)
+            .await
+            .unwrap();
+        let error = append(&target, &client(1), 1, &["a"; 10])
+            .await
+            .unwrap_err();
+        assert_eq!(error.reason, Reason::Storage);
+        let length: i64 = conn.xlen(target.keys().log()).await.unwrap();
+        assert_eq!(length, 1);
+    }
+}

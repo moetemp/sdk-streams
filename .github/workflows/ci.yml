@@ -57,3 +57,26 @@ jobs:
           tree=$(cargo tree -e normal,build --no-default-features --features fips \
             -i ring --target all 2>/dev/null || true)
           if [ -n "$tree" ]; then echo "$tree"; exit 1; fi
+
+  redis:
+    name: Redis Store tests (standalone and cluster)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@1.94.0
+      - uses: arduino/setup-protoc@v3
+        with:
+          repo-token: ${{ secrets.GITHUB_TOKEN }}
+      - uses: Swatinem/rust-cache@v2
+      - name: Install Redis from the Redis apt repo
+        run: |
+          curl -fsSL https://packages.redis.io/gpg \
+            | sudo gpg --dearmor -o /usr/share/keyrings/redis-archive-keyring.gpg
+          echo "deb [signed-by=/usr/share/keyrings/redis-archive-keyring.gpg]" \
+            "https://packages.redis.io/deb $(lsb_release -cs) main" \
+            | sudo tee /etc/apt/sources.list.d/redis.list
+          sudo apt-get update && sudo apt-get install -y redis
+      - run: crates/streams/scripts/redis-test-servers.sh >> "$GITHUB_ENV"
+      - run: cargo test -p temporalio-streams -- --test-threads=8
+        env:
+          STREAMS_REQUIRE: redis

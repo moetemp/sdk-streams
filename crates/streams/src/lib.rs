@@ -11,6 +11,11 @@ mod error;
 pub mod ids;
 pub mod offset;
 pub mod protos;
+pub mod redis;
+#[cfg(test)]
+mod server {
+    include!("../tests/support/server.rs");
+}
 
 pub use error::{Reason, StreamError, StreamResult};
 
