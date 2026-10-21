@@ -6,9 +6,11 @@ use crate::{
     proto::{
         AppendRecord, AppendRecordsRequest, OpenWriterRequest, Producer, ProducerKind, StreamRef,
     },
+    redis::{MAX_BATCH_BYTES, MAX_RECORD_BYTES},
     service::StreamService,
 };
 use parking_lot::Mutex;
+use prost::Message;
 use std::{
     collections::{HashMap, VecDeque},
     sync::{
@@ -70,7 +72,18 @@ impl Writer {
                 if state.buffer.is_empty() {
                     return Ok(state.last_offset);
                 }
-                let count = state.buffer.len().min(self.max_batch);
+                // The Store refuses a batch over its limit, so a batch ends at the count or the
+                // bytes, whichever comes first.
+                let mut count = 0;
+                let mut bytes = 0;
+                for record in state.buffer.iter().take(self.max_batch) {
+                    let size = stored_size(&self.producer, record);
+                    if count > 0 && bytes + size > MAX_BATCH_BYTES {
+                        break;
+                    }
+                    bytes += size;
+                    count += 1;
+                }
                 let records: Vec<_> = state.buffer.drain(..count).collect();
                 state.sequence += 1;
                 (records, state.sequence)
@@ -118,13 +131,22 @@ impl Writer {
     async fn run(self: Arc<Self>) {
         loop {
             let _ = tokio::time::timeout(self.interval, self.wake.notified()).await;
-            if self.state.lock().closed {
-                return;
+            {
+                let state = self.state.lock();
+                // A writer that failed for good writes nothing more, so its task ends too.
+                if state.closed || state.failed.is_some() {
+                    return;
+                }
             }
             // A failure stays in the state, and the next publish or flush gives it to lang.
             let _ = self.flush().await;
         }
     }
+}
+
+/// The size of a Record once stored, with a margin for the envelope's own fields.
+fn stored_size(producer: &Producer, record: &AppendRecord) -> usize {
+    record.encoded_len() + producer.encoded_len() + 32
 }
 
 /// The open writers of one extension.
@@ -135,6 +157,10 @@ pub(crate) struct Writers {
     /// The writer of each (namespace, Stream, Producer id, epoch), so a second open shares its
     /// sequence instead of reusing it.
     by_producer: Mutex<HashMap<String, u64>>,
+    /// The last `sequence` of each closed writer, so a reopen of the same epoch goes on from
+    /// it instead of sending a used `sequence` again.
+    closed_sequences: Mutex<HashMap<String, i64>>,
+    keys: Mutex<HashMap<u64, String>>,
 }
 
 impl Writers {
@@ -187,10 +213,18 @@ impl Writers {
             wake: Notify::new(),
             flushing: tokio::sync::Mutex::new(()),
         });
-        let retry = matches!(
-            ProducerKind::try_from(writer.producer.kind).unwrap_or_default(),
-            ProducerKind::Activity | ProducerKind::LocalActivity | ProducerKind::StandaloneActivity
-        ) && epoch.attempt > 1;
+        let reopened = self.closed_sequences.lock().get(&key).copied();
+        if let Some(sequence) = reopened {
+            writer.state.lock().sequence = sequence;
+        }
+        let retry = reopened.is_none()
+            && matches!(
+                ProducerKind::try_from(writer.producer.kind).unwrap_or_default(),
+                ProducerKind::Activity
+                    | ProducerKind::LocalActivity
+                    | ProducerKind::StandaloneActivity
+            )
+            && epoch.attempt > 1;
         if retry {
             writer.state.lock().sequence = 1;
             match writer.send(vec![], 1).await {
@@ -205,7 +239,8 @@ impl Writers {
         if let Some(id) = by_producer.get(&key) {
             return Ok(*id);
         }
-        by_producer.insert(key, id);
+        by_producer.insert(key.clone(), id);
+        self.keys.lock().insert(id, key);
         self.open.lock().insert(id, writer.clone());
         tokio::spawn(writer.run());
         Ok(id)
@@ -231,6 +266,22 @@ impl Writers {
             let mut state = writer.state.lock();
             if let Some(error) = &state.failed {
                 return Err(error.clone());
+            }
+            if state.closed {
+                return Err(StreamError::new(
+                    Reason::UnknownWriter,
+                    format!("Writer {id} is closed"),
+                ));
+            }
+            if let Some(big) = records
+                .iter()
+                .map(|record| stored_size(&writer.producer, record))
+                .find(|size| *size > MAX_RECORD_BYTES)
+            {
+                return Err(StreamError::new(
+                    Reason::TooLarge,
+                    format!("A Record has about {big} bytes, more than {MAX_RECORD_BYTES}"),
+                ));
             }
             if state.buffer.len() + records.len() > writer.max_buffered {
                 writer.service.metrics.buffer_full();
@@ -260,11 +311,17 @@ impl Writers {
     /// Flushes, then drops the writer.
     pub(crate) async fn close(&self, id: u64) -> StreamResult<i64> {
         let writer = self.get(id)?;
-        let result = writer.flush().await;
+        // A publish checks the closed state under the same lock, so every Record it took is
+        // in the buffer that this flush sends.
         writer.state.lock().closed = true;
+        let result = writer.flush().await;
         writer.wake.notify_one();
         self.open.lock().remove(&id);
-        self.by_producer.lock().retain(|_, open| *open != id);
+        if let Some(key) = self.keys.lock().remove(&id) {
+            self.by_producer.lock().remove(&key);
+            let sequence = writer.state.lock().sequence;
+            self.closed_sequences.lock().insert(key, sequence);
+        }
         result
     }
 }

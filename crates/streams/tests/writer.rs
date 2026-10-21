@@ -346,3 +346,44 @@ async fn a_closed_writer_is_gone_after_its_last_flush() {
         );
     }
 }
+
+#[tokio::test]
+async fn a_flush_splits_big_records_by_bytes_and_refuses_an_oversize_one() {
+    for case in cases().await {
+        let writer = case
+            .open(client(), |r| r.batch_interval = millis(60_000))
+            .await;
+        let big = "x".repeat(1_400_000);
+        case.publish(writer, &[&big, &big, &big, "end"], false)
+            .unwrap();
+        case.flush(writer).await.unwrap();
+        assert_eq!(case.visible().await.len(), 4);
+        let huge = "y".repeat(1_700_000);
+        let error = case.publish(writer, &[&huge], false).unwrap_err();
+        assert_eq!(
+            (error.code, reason(&error).as_str()),
+            (Code::InvalidArgument, "stream_too_large")
+        );
+    }
+}
+
+#[tokio::test]
+async fn a_reopen_of_a_closed_writer_goes_on_with_its_sequence() {
+    for case in cases().await {
+        let writer = case
+            .open(client(), |r| r.batch_interval = millis(60_000))
+            .await;
+        case.publish(writer, &["1"], false).unwrap();
+        let _: CloseWriterResponse = case
+            .call("CloseWriter", CloseWriterRequest { writer_id: writer })
+            .await
+            .unwrap();
+        let again = case
+            .open(client(), |r| r.batch_interval = millis(60_000))
+            .await;
+        assert_ne!(again, writer);
+        case.publish(again, &["2"], false).unwrap();
+        case.flush(again).await.unwrap();
+        assert_eq!(case.visible().await, ["1", "2"]);
+    }
+}
