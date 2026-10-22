@@ -334,10 +334,10 @@ interface stream-service {
   // The handle is built from the response. The created and status fields of the response are
   // not on the handle.
   /// @nexus.proto "temporal.api.streamservice.v1.CreateStreamResponse"
-  type create-stream-result = own<%stream>;
+  type stream-result = own<%stream>;
 
   /// @nexus.operation name="CreateStream"
-  create-stream: func(request: create-stream-request) -> create-stream-result;
+  create-stream: func(request: create-stream-request) -> stream-result;
 
   /// @nexus.doc
   ///   "In Workflow code, Brook buffers this call in the run, and the facade drops the answer."
@@ -347,6 +347,8 @@ interface stream-service {
   /// @nexus.operation name="CloseStream"
   close-stream: func(request: close-stream-request) -> close-stream-response;
 
+  // The long poll moves from-offset, so nexgen also reads its pages as one async iterator. A WIT
+  // stream can't cross a Nexus call, so the read stays request and response on the wire.
   /// @nexus.doc "Not for Workflow code in Brook. A long poll. NOT_FOUND for an uncreated Stream."
   /// @nexus.operation name="ReadRecords"
   /// @nexus.long-poll
