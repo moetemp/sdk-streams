@@ -590,3 +590,52 @@ async fn a_workflow_stream_is_found_by_its_owner_ref_on_every_call() {
         .collect();
     assert_eq!(texts, ["w", "a"]);
 }
+
+#[tokio::test]
+async fn a_direct_read_long_polls_until_an_append() {
+    let Some(case) = case().await else {
+        return;
+    };
+    let _: CreateStreamResponse = case
+        .call(
+            "CreateStream",
+            CreateStreamRequest {
+                namespace: case.namespace.clone(),
+                stream_id: case.stream.clone(),
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+    let read = |wait_ms: u64| ReadRecordsRequest {
+        namespace: case.namespace.clone(),
+        stream: case.stream_ref(),
+        wait: Some(prost_types::Duration {
+            seconds: (wait_ms / 1000) as i64,
+            nanos: ((wait_ms % 1000) * 1_000_000) as i32,
+        }),
+        ..Default::default()
+    };
+    let started = std::time::Instant::now();
+    let quiet: ReadRecordsResponse = case.call("ReadRecords", read(1000)).await.unwrap();
+    assert!(quiet.records.is_empty());
+    assert!(
+        started.elapsed() >= Duration::from_millis(900),
+        "{:?}",
+        started.elapsed()
+    );
+    let (poll, _) = tokio::join!(
+        async {
+            let started = std::time::Instant::now();
+            let woke: ReadRecordsResponse = case.call("ReadRecords", read(10_000)).await.unwrap();
+            (woke, started.elapsed())
+        },
+        async {
+            tokio::time::sleep(Duration::from_millis(300)).await;
+            case.append(1, &["late"]).await.unwrap();
+        }
+    );
+    let (woke, waited) = poll;
+    assert_eq!(woke.records.len(), 1);
+    assert!(waited < Duration::from_secs(5), "{waited:?}");
+}

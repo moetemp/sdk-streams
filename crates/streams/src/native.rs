@@ -4,7 +4,7 @@
 //! reads and describes, so the service forwards those.
 
 use crate::{
-    Reason, StreamError, StreamResult,
+    MAX_WAIT, Reason, StreamError, StreamResult,
     proto::{
         AppendRecord, AppendRecordsRequest, AppendRecordsResponse, CloseStreamRequest,
         CloseStreamResponse, CreateStreamRequest, CreateStreamResponse, DescribeStreamRequest,
@@ -92,6 +92,7 @@ impl ServiceStore {
         method: &'static str,
         namespace: &str,
         request: Req,
+        timeout: Option<Duration>,
     ) -> StreamResult<Resp> {
         let Some(connection) = self.connection.read().clone() else {
             return Err(StreamError::storage(
@@ -101,6 +102,9 @@ impl ServiceStore {
         let mut call = tonic::Request::new(Bytes::from(request.encode_to_vec()));
         if let Ok(value) = namespace.parse() {
             call.metadata_mut().insert("temporal-namespace", value);
+        }
+        if let Some(timeout) = timeout {
+            call.set_timeout(timeout);
         }
         let answer = connection
             .raw_unary(method, call)
@@ -164,7 +168,7 @@ impl ServiceStore {
             .map(|d| Duration::new(d.seconds.max(0) as u64, d.nanos.max(0) as u32));
         let namespace = request.namespace.clone();
         let answer: StreamResult<CreateStreamResponse> =
-            self.call(CREATE, &namespace, request).await;
+            self.call(CREATE, &namespace, request, None).await;
         let retention = retention.unwrap_or(SERVER_RETENTION);
         let outcome = match answer {
             Ok(answer) => match StreamStatus::try_from(answer.status).unwrap_or_default() {
@@ -253,7 +257,7 @@ impl Store for ServiceStore {
             withdraw_run: withdrawal.withdraw_run.to_string(),
             defer_withdrawal: withdrawal.defer,
         };
-        let answer: AppendRecordsResponse = self.call(APPEND, namespace, request).await?;
+        let answer: AppendRecordsResponse = self.call(APPEND, namespace, request, None).await?;
         let offsets = (answer.last_offset > 0).then_some((answer.first_offset, answer.last_offset));
         // The server doesn't say whether the batch was a resend or withdrew, which only the
         // metrics read.
@@ -283,7 +287,7 @@ impl Store for ServiceStore {
             failed_tasks: withdrawal.failed_tasks.to_vec(),
             withdraw_run: withdrawal.withdraw_run.to_string(),
         };
-        let _: CloseStreamResponse = self.call(CLOSE, namespace, request).await?;
+        let _: CloseStreamResponse = self.call(CLOSE, namespace, request, None).await?;
         Ok(Closed {
             offset: 0,
             already: false,
@@ -332,6 +336,15 @@ impl RemoteReads for ServiceStore {
     // Reads take the direct System Nexus call, which persists nothing, so every caller reads
     // through the one path that Workflow code uses too.
     async fn read_records(&self, request: ReadRecordsRequest) -> StreamResult<ReadRecordsResponse> {
+        // The server answers about 1 s before the call's deadline, so the deadline leaves room
+        // past the read's own wait.
+        let wait = [request.wait, request.create_wait]
+            .iter()
+            .flatten()
+            .map(|d| Duration::new(d.seconds.max(0) as u64, d.nanos.max(0) as u32))
+            .max()
+            .unwrap_or_default()
+            .min(MAX_WAIT);
         self.nexus(
             "ReadRecords",
             request.namespace.clone(),
@@ -339,6 +352,7 @@ impl RemoteReads for ServiceStore {
                 namespace: String::new(),
                 ..request
             },
+            Some(wait + READ_MARGIN),
         )
         .await
     }
@@ -354,6 +368,7 @@ impl RemoteReads for ServiceStore {
                 namespace: String::new(),
                 ..request
             },
+            None,
         )
         .await
     }
@@ -408,6 +423,9 @@ struct OperationFailure {
     failure: Option<Failure>,
 }
 
+/// The time a read's deadline leaves past its wait.
+const READ_MARGIN: Duration = Duration::from_secs(5);
+
 const START_NEXUS: &str = "/temporal.api.workflowservice.v1.WorkflowService/StartNexusOperation";
 const SYSTEM_ENDPOINT: &str = "__temporal_system";
 const SERVICE_PACKAGE: &str = "temporal.api.streamservice.v1";
@@ -422,6 +440,7 @@ impl ServiceStore {
         operation: &str,
         namespace: String,
         request: Req,
+        timeout: Option<Duration>,
     ) -> StreamResult<Resp> {
         let message_type = format!("{SERVICE_PACKAGE}.{operation}Request");
         let identity = self
@@ -447,7 +466,8 @@ impl ServiceStore {
                 ..Default::default()
             }),
         };
-        let answer: StartNexusOperationResponse = self.call(START_NEXUS, &namespace, call).await?;
+        let answer: StartNexusOperationResponse =
+            self.call(START_NEXUS, &namespace, call, timeout).await?;
         if let Some(success) = answer.sync_success {
             let data = success
                 .payload
