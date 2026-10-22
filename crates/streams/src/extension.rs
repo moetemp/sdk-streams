@@ -6,24 +6,21 @@ use crate::{
     metrics::Metrics,
     native::{NATIVE_BACKEND, ServiceStore},
     proto::{
-        AppendRecordsRequest, BufferWorkflowCallsRequest, BufferWorkflowCallsResponse,
-        CloseStreamRequest, CloseWriterRequest, CloseWriterResponse, CloseWritersRequest,
-        CloseWritersResponse, DescribeStreamRequest, DrainClosesRequest, DrainClosesResponse,
-        FlushRunBufferRequest, FlushRunBufferResponse, NativeStreamConfig, OpenWriterRequest,
-        OpenWriterResponse, ReadRecordsRequest, RedisStreamConfig, WorkflowReadRecordsRequest,
-        WriteRecordsRequest, WriteRecordsResponse,
+        AppendRecordsRequest, CloseStreamRequest, CloseWriterRequest, CloseWriterResponse,
+        CloseWritersRequest, CloseWritersResponse, DescribeStreamRequest, NativeStreamConfig,
+        OpenWriterRequest, OpenWriterResponse, ReadRecordsRequest, RedisStreamConfig,
+        WorkflowReadRecordsRequest, WriteRecordsRequest, WriteRecordsResponse,
     },
     redis::{RedisStore, RedisStoreOptions},
     service::StreamService,
     store::{ReaderRun, Store},
-    workflow::{FlushOptions, WorkflowHooks, WorkflowRuns},
     writer::Writers,
 };
 use prost::Message;
 use std::{sync::Arc, time::Duration};
 use temporalio_client::Connection;
 use temporalio_common::telemetry::metrics::TemporalMeter;
-use temporalio_sdk_core::{ExtensionError, WorkerExtension, WorkflowTaskInterceptor};
+use temporalio_sdk_core::{ExtensionError, WorkerExtension};
 use tokio::sync::OnceCell;
 
 /// The name of the extension, for logs and for a bridge that selects an extension by name.
@@ -82,13 +79,12 @@ fn duration(value: Option<prost_types::Duration>) -> Option<Duration> {
     (!duration.is_zero()).then_some(duration)
 }
 
-/// What the extension and its Workflow Task interceptor share.
+/// What the extension's calls share.
 pub(crate) struct Shared {
     name: &'static str,
     options: ExtensionOptions,
     metrics: Metrics,
     service: OnceCell<Arc<StreamService>>,
-    pub(crate) runs: WorkflowRuns,
     writers: Writers,
 }
 
@@ -107,13 +103,6 @@ impl Shared {
             })
             .await
     }
-
-    pub(crate) fn flush_options(&self) -> FlushOptions {
-        FlushOptions {
-            durable_writes: self.options.durable_writes,
-            durable_timeout: self.options.durable_timeout,
-        }
-    }
 }
 
 /// The Stream runtime as a Worker extension, on Redis or, for tests, on the memory Store.
@@ -123,7 +112,6 @@ impl Shared {
 /// Worker and client of a plugin.
 pub struct StreamExtension {
     shared: Arc<Shared>,
-    hooks: Arc<WorkflowHooks>,
     /// The native Store, which takes the Worker's connection on attach.
     native: Option<Arc<ServiceStore>>,
 }
@@ -162,17 +150,9 @@ impl StreamExtension {
             options,
             metrics,
             service: OnceCell::new_with(service),
-            runs: WorkflowRuns::default(),
             writers: Writers::default(),
         });
-        let hooks = Arc::new(WorkflowHooks {
-            shared: shared.clone(),
-        });
-        Arc::new(Self {
-            shared,
-            hooks,
-            native,
-        })
+        Arc::new(Self { shared, native })
     }
 
     /// Builds the extension on Redis. It counts on `meter`, lang's runtime meter, when given.
@@ -221,51 +201,12 @@ impl StreamExtension {
         &self.shared.options
     }
 
-    /// Runs one synchronous method on encoded input. It never waits on I/O.
-    pub fn dispatch(&self, method: &str, input: &[u8]) -> Result<Vec<u8>, ExtensionError> {
-        let output = match method {
-            "BufferWorkflowCalls" => {
-                self.shared
-                    .runs
-                    .buffer(decode::<BufferWorkflowCallsRequest>(input)?)?;
-                BufferWorkflowCallsResponse {}.encode_to_vec()
-            }
-            _ => return Err(ExtensionError::unknown_method(method)),
-        };
-        Ok(output)
-    }
-
     /// Runs one asynchronous method on encoded input.
     pub async fn dispatch_async(
         &self,
         method: &str,
         input: &[u8],
     ) -> Result<Vec<u8>, ExtensionError> {
-        if method == "DrainCloses" {
-            let request = decode::<DrainClosesRequest>(input)?;
-            let timeout = duration(request.timeout).unwrap_or(Duration::from_secs(10));
-            let pending = self.shared.runs.drain(timeout).await;
-            return Ok(DrainClosesResponse {
-                pending: pending as i32,
-            }
-            .encode_to_vec());
-        }
-        if method == "FlushRunBuffer" {
-            let request = decode::<FlushRunBufferRequest>(input)?;
-            // A run with nothing buffered needs no Store, so a Local Activity of a Workflow
-            // that never publishes never connects.
-            if !self.shared.runs.has_work(&request.run_id) {
-                return Ok(FlushRunBufferResponse { records: 0 }.encode_to_vec());
-            }
-            let service = self.shared.service().await?;
-            let records = service
-                .flush_for_local_activity(&self.shared.runs, request, self.shared.flush_options())
-                .await?;
-            return Ok(FlushRunBufferResponse {
-                records: records as i32,
-            }
-            .encode_to_vec());
-        }
         let service = self.shared.service().await?;
         let output = match method {
             "CreateStream" => service.create_stream(decode(input)?).await?.encode_to_vec(),
@@ -468,16 +409,8 @@ impl WorkerExtension for StreamExtension {
         self.shared.name
     }
 
-    fn workflow_task_interceptor(&self) -> Option<Arc<dyn WorkflowTaskInterceptor>> {
-        Some(self.hooks.clone())
-    }
-
     fn attach(&self, connection: Connection) {
         self.attach_connection(connection);
-    }
-
-    fn call(&self, method: &str, input: &[u8]) -> Result<Vec<u8>, ExtensionError> {
-        self.dispatch(method, input)
     }
 
     async fn call_async(&self, method: String, input: Vec<u8>) -> Result<Vec<u8>, ExtensionError> {

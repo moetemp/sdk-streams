@@ -70,10 +70,6 @@ pub struct Withdrawal<'a> {
     pub withdraw_run: &'a str,
     /// The encoded Supersession, which the log keeps when the batch withdraws something.
     pub supersession: &'a [u8],
-    /// A Workflow batch whose task facts come later, with the task's completion. It withdraws
-    /// nothing and keeps no facts, since a batch with no previous completed task would
-    /// withdraw every earlier task. A retry run's `withdraw_run` still applies.
-    pub defer: bool,
 }
 
 /// One batch of one Producer.

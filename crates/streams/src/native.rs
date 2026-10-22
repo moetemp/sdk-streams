@@ -255,7 +255,7 @@ impl Store for ServiceStore {
             previous_completed_task: withdrawal.previous_completed.copied(),
             failed_tasks: withdrawal.failed_tasks.to_vec(),
             withdraw_run: withdrawal.withdraw_run.to_string(),
-            defer_withdrawal: withdrawal.defer,
+            ..Default::default()
         };
         let answer: AppendRecordsResponse = self.call(APPEND, namespace, request, None).await?;
         let offsets = (answer.last_offset > 0).then_some((answer.first_offset, answer.last_offset));

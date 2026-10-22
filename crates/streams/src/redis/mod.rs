@@ -518,11 +518,8 @@ fn encode_run(run_id: &str) -> String {
     }
 }
 
-/// The previous completed task key of an append, or `*` for a batch whose facts come later.
+/// The previous completed task key of an append.
 fn completed_arg(withdrawal: &Withdrawal<'_>) -> String {
-    if withdrawal.defer {
-        return "*".to_string();
-    }
     withdrawal
         .previous_completed
         .map(task_key)

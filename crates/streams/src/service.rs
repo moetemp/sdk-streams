@@ -1,5 +1,5 @@
-//! The five Stream service operations on the Redis Store, for Activities and clients. Workflow
-//! code reaches the same Store through the Workflow Task interceptor.
+//! The five Stream service operations on the Store, for Activities, clients and the Local
+//! Activity that runs each Workflow call.
 
 use crate::{
     Reason, StreamError, StreamResult,
@@ -74,7 +74,7 @@ fn outside_producer(producer: Option<&Producer>) -> StreamResult<&Producer> {
     check_producer(producer)?;
     if producer.kind == ProducerKind::Workflow as i32 {
         return Err(StreamError::invalid(
-            "A Workflow Producer writes through the Workflow Task interceptor only",
+            "A Workflow writes with the Producer of its Local Activity",
         ));
     }
     Ok(producer)

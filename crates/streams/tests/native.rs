@@ -15,22 +15,17 @@ use std::{
 };
 use temporalio_client::{Connection, ConnectionOptions, Url};
 use temporalio_common::protos::temporal::api::common::v1::Payload;
-use temporalio_sdk_core::{
-    ExtensionError, WorkerExtension, WorkflowTaskCompletionInfo, WorkflowTaskEpoch,
-    WorkflowTaskFailedInfo, WorkflowTaskInterceptor,
-};
+use temporalio_sdk_core::{ExtensionError, WorkerExtension};
 use temporalio_streams::{
     NativeStreamExtension, StreamExtension,
     epoch::withdraws,
     ids::{activity_producer_id, client_producer_id},
     proto::{
-        AppendRecord, AppendRecordsRequest, AppendRecordsResponse, BufferWorkflowCallsRequest,
-        CloseStreamRequest, CloseStreamResponse, CreateStreamRequest, CreateStreamResponse,
-        DescribeStreamRequest, DescribeStreamResponse, FlushRunBufferRequest,
-        FlushRunBufferResponse, OpenWriterRequest, OpenWriterResponse, Producer, ProducerEpoch,
+        AppendRecord, AppendRecordsRequest, AppendRecordsResponse, CloseStreamRequest,
+        CloseStreamResponse, CreateStreamRequest, CreateStreamResponse, DescribeStreamRequest,
+        DescribeStreamResponse, OpenWriterRequest, OpenWriterResponse, Producer, ProducerEpoch,
         ProducerKind, ReadRecordsRequest, ReadRecordsResponse, StreamErrorDetails, StreamRecord,
-        StreamRecordKind, StreamRef, StreamStatus, WorkflowCall, WriteRecordsRequest,
-        WriteRecordsResponse, workflow_call::Call,
+        StreamRecordKind, StreamRef, StreamStatus, WriteRecordsRequest, WriteRecordsResponse,
     },
 };
 
@@ -257,53 +252,6 @@ async fn a_stream_on_the_server_dedupes_withdraws_reads_and_closes() {
     assert_eq!(reason(&error), "stream_closed");
 }
 
-#[tokio::test]
-async fn a_workflow_flush_writes_to_the_server_with_its_owner() {
-    let Some(case) = case().await else {
-        return;
-    };
-    let run_id = format!("run-{}", case.stream);
-    let calls = vec![
-        WorkflowCall {
-            call: Some(Call::Create(CreateStreamRequest {
-                stream_id: case.stream.clone(),
-                ..Default::default()
-            })),
-            when_run_closes: false,
-        },
-        WorkflowCall {
-            call: Some(Call::Append(AppendRecordsRequest {
-                stream: case.stream_ref(),
-                records: vec![record("w")],
-                ..Default::default()
-            })),
-            when_run_closes: false,
-        },
-    ];
-    let request = BufferWorkflowCallsRequest {
-        run_id: run_id.clone(),
-        calls,
-        ..Default::default()
-    };
-    case.ext
-        .call("BufferWorkflowCalls", &request.encode_to_vec())
-        .unwrap();
-    let info = WorkflowTaskCompletionInfo::builder()
-        .namespace(case.namespace.clone())
-        .workflow_id("wf")
-        .run_id(run_id.clone())
-        .first_execution_run_id(run_id)
-        .workflow_type("t")
-        .started_event_id(3)
-        .attempt(1)
-        .started_time(UNIX_EPOCH + Duration::from_secs(100))
-        .deadline(std::time::Instant::now() + Duration::from_secs(10))
-        .build();
-    let hooks: Arc<dyn WorkflowTaskInterceptor> = case.ext.workflow_task_interceptor().unwrap();
-    hooks.before_complete(&info).await.unwrap();
-    assert_eq!(case.visible().await, (vec!["w".into()], false));
-}
-
 impl Case {
     /// Starts a Workflow on a Task Queue that no Worker polls, and answers its run id.
     async fn start_workflow(&self, workflow_id: &str) -> String {
@@ -344,133 +292,6 @@ impl Case {
             .unwrap()
             .run_id
     }
-
-    fn buffer(&self, run_id: &str, calls: Vec<WorkflowCall>) {
-        let request = BufferWorkflowCallsRequest {
-            run_id: run_id.to_string(),
-            calls,
-            ..Default::default()
-        };
-        self.ext
-            .call("BufferWorkflowCalls", &request.encode_to_vec())
-            .unwrap();
-    }
-
-    fn publish(&self, text: &str) -> WorkflowCall {
-        WorkflowCall {
-            call: Some(Call::Append(AppendRecordsRequest {
-                stream: self.stream_ref(),
-                records: vec![record(text)],
-                ..Default::default()
-            })),
-            when_run_closes: false,
-        }
-    }
-
-    fn create(&self) -> WorkflowCall {
-        WorkflowCall {
-            call: Some(Call::Create(CreateStreamRequest {
-                stream_id: self.stream.clone(),
-                ..Default::default()
-            })),
-            when_run_closes: false,
-        }
-    }
-
-    async fn complete(&self, run_id: &str, started: i64, attempt: u32, completed: Option<i64>) {
-        let info = WorkflowTaskCompletionInfo::builder()
-            .namespace(self.namespace.clone())
-            .workflow_id("wf")
-            .run_id(run_id.to_string())
-            .first_execution_run_id(run_id.to_string())
-            .workflow_type("t")
-            .started_event_id(started)
-            .attempt(attempt)
-            .started_time(UNIX_EPOCH + Duration::from_secs(100))
-            .maybe_previous_completed(completed.map(|started| {
-                WorkflowTaskEpoch::builder()
-                    .started_event_id(started)
-                    .attempt(1)
-                    .started_time(UNIX_EPOCH + Duration::from_secs(100))
-                    .build()
-            }))
-            .deadline(std::time::Instant::now() + Duration::from_secs(10))
-            .build();
-        let hooks = self.ext.workflow_task_interceptor().unwrap();
-        hooks.before_complete(&info).await.unwrap();
-        hooks.after_complete(&info, true).await;
-    }
-}
-
-#[tokio::test]
-async fn a_deferred_batch_on_the_server_is_withdrawn_when_its_task_fails() {
-    let Some(case) = case().await else {
-        return;
-    };
-    let run_id = format!("run-{}", case.stream);
-    case.buffer(&run_id, vec![case.create(), case.publish("before")]);
-    case.complete(&run_id, 2, 1, None).await;
-    // Task [5] writes early for a Local Activity. The batch withdraws nothing yet.
-    case.buffer(&run_id, vec![case.publish("early")]);
-    let request = FlushRunBufferRequest {
-        namespace: case.namespace.clone(),
-        run_id: run_id.clone(),
-        workflow_task: Some(temporalio_streams::proto::WorkflowTaskEpoch {
-            started_event_id: 5,
-            attempt: 1,
-            started_time: Some(Timestamp {
-                seconds: 100,
-                nanos: 0,
-            }),
-        }),
-        timeout: None,
-    };
-    let flushed: FlushRunBufferResponse = case.call("FlushRunBuffer", request).await.unwrap();
-    assert_eq!(flushed.records, 1);
-    let local = AppendRecordsRequest {
-        namespace: case.namespace.clone(),
-        stream: case.stream_ref(),
-        producer: Some(Producer {
-            kind: ProducerKind::LocalActivity as i32,
-            id: temporalio_streams::ids::local_activity_producer_id(&run_id, "la"),
-            epoch: Some(ProducerEpoch {
-                task_started_event_id: 5,
-                task_attempt: 1,
-                task_started_time: Some(Timestamp {
-                    seconds: 100,
-                    nanos: 0,
-                }),
-                attempt: 1,
-                ..Default::default()
-            }),
-            run_id: run_id.clone(),
-        }),
-        sequence: 1,
-        records: vec![record("la")],
-        ..Default::default()
-    };
-    let _: AppendRecordsResponse = case.call("AppendRecords", local).await.unwrap();
-    assert_eq!(
-        case.visible().await.0,
-        ["before".to_string(), "early".into(), "la".into()]
-    );
-    // Task [5] fails. Its retry runs the Activation again, and its facts withdraw the early
-    // batch and the Local Activity's Record.
-    let failed = WorkflowTaskFailedInfo::builder()
-        .run_id(run_id.clone())
-        .attempt(1)
-        .reported(true)
-        .build();
-    case.ext
-        .workflow_task_interceptor()
-        .unwrap()
-        .on_task_failed(&failed);
-    case.buffer(&run_id, vec![case.publish("retry")]);
-    case.complete(&run_id, 5, 2, Some(2)).await;
-    assert_eq!(
-        case.visible().await.0,
-        ["before".to_string(), "retry".into()]
-    );
 }
 
 #[tokio::test]
@@ -530,24 +351,49 @@ async fn a_workflow_stream_is_found_by_its_owner_ref_on_every_call() {
         first_execution_run_id: run_id.clone(),
         ..Default::default()
     };
-    let create = WorkflowCall {
-        call: Some(Call::Create(CreateStreamRequest {
-            stream_id: case.stream.clone(),
-            r#ref: Some(owned.clone()),
-            ..Default::default()
-        })),
-        when_run_closes: false,
+    // The Workflow's create and publish run as Local Activities on the service calls (S108).
+    let owner = Producer {
+        kind: ProducerKind::Workflow as i32,
+        id: temporalio_streams::ids::workflow_producer_id(&run_id),
+        run_id: run_id.clone(),
+        ..Default::default()
     };
-    let append = WorkflowCall {
-        call: Some(Call::Append(AppendRecordsRequest {
-            stream: Some(owned.clone()),
-            records: vec![record("w")],
+    let _: CreateStreamResponse = case
+        .call(
+            "CreateStream",
+            CreateStreamRequest {
+                namespace: case.namespace.clone(),
+                stream_id: case.stream.clone(),
+                owner: Some(owner),
+                r#ref: Some(owned.clone()),
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+    let local = Producer {
+        kind: ProducerKind::LocalActivity as i32,
+        id: temporalio_streams::ids::local_activity_producer_id(&run_id, "publish-1"),
+        epoch: Some(ProducerEpoch {
+            attempt: 1,
             ..Default::default()
-        })),
-        when_run_closes: false,
+        }),
+        run_id: run_id.clone(),
     };
-    case.buffer(&run_id, vec![create, append]);
-    case.complete(&run_id, 3, 1, None).await;
+    let _: AppendRecordsResponse = case
+        .call(
+            "AppendRecords",
+            AppendRecordsRequest {
+                namespace: case.namespace.clone(),
+                stream: Some(owned.clone()),
+                producer: Some(local),
+                sequence: 1,
+                records: vec![record("w")],
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
     // An Activity writes with the same ref.
     let opened: OpenWriterResponse = case
         .call(

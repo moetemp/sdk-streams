@@ -42,38 +42,6 @@ message RedisStreamConfig {
     string backend = 10;
 }
 
-// Method `BufferWorkflowCalls`, synchronous. Lang calls it at the end of each Activation of a
-// run, with the calls that Workflow code made in that Activation, in order. On replay, lang
-// sends only the creates and the closes. The crate writes the buffer in `before_complete` and
-// sends the closes in `after_complete`.
-message BufferWorkflowCallsRequest {
-    string run_id = 1;
-    // A retry run only: the previous run. The crate puts it on each create and append of the
-    // run, so the first one on each Stream withdraws the previous run's Records.
-    string withdraw_run = 2;
-    repeated WorkflowCall calls = 3;
-    // Set on the run's last call when the server goes on with the Run Chain, which is a failure
-    // that the retry policy retries, or any cron run. The crate then skips the closes that have
-    // `when_run_closes`.
-    bool chain_continues = 4;
-}
-
-message WorkflowCall {
-    oneof call {
-        temporal.api.streamservice.v1.CreateStreamRequest create = 1;
-        // The crate sets the Producer, the sequence and the History facts.
-        temporal.api.streamservice.v1.AppendRecordsRequest append = 2;
-        // The crate sets the Producer and the History facts.
-        temporal.api.streamservice.v1.CloseStreamRequest close = 3;
-    }
-    // For a close only: send it only when the server accepts a completion that closes the run.
-    // `auto_close` sets it.
-    bool when_run_closes = 4;
-}
-
-message BufferWorkflowCallsResponse {
-}
-
 // Method `WorkflowReadRecords`, asynchronous. A `ReadRecords` that a Workflow run makes, for
 // example from its read Local Activity. It answers a `ReadRecordsResponse`. On native the server
 // gets the reading run as a link, and Retention never trims a nested Workflow Stream past the
@@ -83,29 +51,6 @@ message WorkflowReadRecordsRequest {
     // The reading run.
     string workflow_id = 2;
     string run_id = 3;
-}
-
-// Method `FlushRunBuffer`, asynchronous. Lang calls it before it runs a Local Activity, also
-// before each retry that Core runs in the same task. The crate writes the run's buffered
-// creates and appends in the epoch of the Workflow Task that dispatched the Local Activity, so
-// the run's Records come before the Local Activity's. Closes still wait for an accepted
-// completion. The task's completion writes only what came later, with the numbering going on,
-// and sends the task's withdrawal facts to each Stream this call wrote. A Local Activity of a
-// task that already completed, or of a task older than an earlier flush, writes nothing. When
-// the call fails, the run's next completion fails with the same error, so the retry withdraws
-// what was written. Lang then fails the Local Activity attempt.
-message FlushRunBufferRequest {
-    string namespace = 1;
-    string run_id = 2;
-    // `ActivityTask.Start.workflow_task` (field 20) of the Local Activity.
-    temporal.api.streamservice.v1.WorkflowTaskEpoch workflow_task = 3;
-    // How long the write may take. Empty is 10 s.
-    google.protobuf.Duration timeout = 4;
-}
-
-message FlushRunBufferResponse {
-    // The Records the call wrote. Zero when the run had nothing buffered.
-    int32 records = 1;
 }
 
 // Method `OpenWriter`, asynchronous. A writer for an Activity or a client Producer, which keeps
@@ -163,18 +108,6 @@ message CloseWritersRequest {
 message CloseWritersResponse {
     // The writers that had failed.
     int32 failed = 1;
-}
-
-// Method `DrainCloses`, asynchronous. Waits for the closes that `after_complete` started, for
-// example at Worker shutdown.
-message DrainClosesRequest {
-    // Empty is 10 s.
-    google.protobuf.Duration timeout = 1;
-}
-
-message DrainClosesResponse {
-    // The closes still running when the timeout passed.
-    int32 pending = 1;
 }
 
 // The details of a failed call, in the error's details bytes.

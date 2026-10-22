@@ -106,3 +106,9 @@
   the run goes as a `WorkflowEvent` link on the direct call, so Retention keeps a nested
   Workflow Stream from the lowest offset that the open run read (S109). Redis and memory read
   as `ReadRecords` does.
+- Removed the Workflow write path that S108 replaced, since a Workflow now makes each create,
+  publish and close from a Local Activity on the service calls. Gone are `BufferWorkflowCalls`,
+  `FlushRunBuffer` and `DrainCloses` with their messages, the run buffer, the Workflow Task
+  interceptor, the deferred withdrawal of the batch before a Local Activity, and the metrics
+  only they kept (`stream_hook_latency`, `stream_flush_failures`, `stream_close_retries`,
+  `stream_records_dropped`).

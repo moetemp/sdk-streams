@@ -4,8 +4,8 @@ Internal and experimental.
 
 `temporalio-streams` is the Stream runtime for Temporal SDKs. It serves the Stream service of the
 Brook API proposal on the customer's Redis. The SDKs link this crate into their bridges. Lang
-calls it through the bridge's generic extension calls, and Core calls its Workflow Task
-interceptor. Temporal Core holds no stream code.
+calls it through the bridge's generic extension calls. A Workflow writes through a Local Activity
+per call, on the same calls. Temporal Core holds no stream code.
 
 ## Stage pins
 

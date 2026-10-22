@@ -401,17 +401,6 @@ impl Target {
             .await
     }
 
-    /// A Workflow batch whose task facts come later, as a Local Activity flush writes it.
-    pub(crate) async fn flush_deferred(
-        &self,
-        task: &Producer,
-        sequence: i64,
-        texts: &[&str],
-    ) -> StreamResult<Appended> {
-        self.write_with(task, sequence, None, &[], "", texts, true)
-            .await
-    }
-
     /// A later batch of a task, with its facts.
     pub(crate) async fn flush_next(
         &self,
@@ -434,36 +423,12 @@ impl Target {
         withdraw_run: &str,
         texts: &[&str],
     ) -> StreamResult<Appended> {
-        self.write_with(
-            producer,
-            sequence,
-            completed,
-            failed,
-            withdraw_run,
-            texts,
-            false,
-        )
-        .await
-    }
-
-    #[allow(clippy::too_many_arguments)]
-    async fn write_with(
-        &self,
-        producer: &Producer,
-        sequence: i64,
-        completed: Option<&WorkflowTaskEpoch>,
-        failed: &[i64],
-        withdraw_run: &str,
-        texts: &[&str],
-        defer: bool,
-    ) -> StreamResult<Appended> {
         let records: Vec<_> = texts.iter().map(|text| record(producer, text)).collect();
         let mut withdrawal = Withdrawal {
             previous_completed: completed,
             failed_tasks: failed,
             withdraw_run,
             supersession: &[],
-            defer,
         };
         let bytes = supersession(producer, &withdrawal);
         withdrawal.supersession = &bytes;
