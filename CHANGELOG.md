@@ -12,8 +12,7 @@
   and the withdrawn tasks and runs, and keep the format version, the TTLs and the Retention.
 - Added `RedisStreamExtension`, the Worker extension that serves `CreateStream`,
   `AppendRecords`, `CloseStream`, `ReadRecords` and `DescribeStream` through `call_async`. A read
-  is a long poll with `create_wait` and `idle_timeout`, filters by Retention, and ends with the
-  close Record or an Idle Record.
+  is a long poll with `create_wait`, filters by Retention, and ends with the close Record.
 - Added the Workflow path. Lang hands each Activation's calls to `BufferWorkflowCalls`, the
   Workflow Task interceptor writes the creates and appends in `before_complete`, and it sends the
   closes in the background after `after_complete` accepts. `DrainCloses` waits for them. A flush
@@ -32,3 +31,6 @@
   them, and the Store keys on `id` only.
 - Split `Store` into the required log calls and capability calls. A call that needs a
   capability the Store lacks fails with UNIMPLEMENTED and the reason `stream_unsupported`.
+- Reserved `ReadRecordsRequest.idle_timeout` (9) and `STREAM_RECORD_KIND_IDLE` (4). A read ends
+  with Records, the close Record, or nothing after `wait`. A Reader that stops after a quiet
+  period sets its own timer and resumes from `next_offset`.

@@ -221,7 +221,6 @@ fn texts(response: &ReadRecordsResponse) -> Vec<String> {
                 }
                 StreamRecordKind::Superseded => "<superseded>".to_string(),
                 StreamRecordKind::Close => "<close>".to_string(),
-                StreamRecordKind::Idle => "<idle>".to_string(),
                 StreamRecordKind::Unspecified => "?".to_string(),
             },
         )
@@ -393,7 +392,7 @@ async fn a_read_waits_for_the_create_only_as_long_as_create_wait() {
 }
 
 #[tokio::test]
-async fn a_quiet_read_ends_with_an_idle_record_and_a_long_poll_wakes_on_append() {
+async fn a_quiet_read_ends_empty_after_its_wait_and_a_long_poll_wakes_on_append() {
     for case in cases().await {
         case.create(None).await.unwrap();
         let first = case
@@ -402,19 +401,19 @@ async fn a_quiet_read_ends_with_an_idle_record_and_a_long_poll_wakes_on_append()
             .unwrap();
         let from = first.last_offset + 1;
         let started = Instant::now();
-        let idle = case
+        let quiet = case
             .read(ReadRecordsRequest {
                 from_offset: from,
-                wait: millis(5000),
-                idle_timeout: millis(200),
+                wait: millis(200),
                 ..Default::default()
             })
             .await
             .unwrap();
+        assert!(started.elapsed() >= Duration::from_millis(200));
         assert!(started.elapsed() < Duration::from_secs(2));
-        assert_eq!(texts(&idle), ["<idle>"]);
-        assert_eq!(idle.records[0].offset, from);
-        assert!(!idle.done);
+        assert!(quiet.records.is_empty());
+        assert_eq!(quiet.next_offset, from);
+        assert!(!quiet.done);
         let ext = case.ext.clone();
         let (namespace, stream) = (case.namespace.clone(), case.stream.clone());
         let writer = tokio::spawn(async move {
