@@ -2,7 +2,8 @@
 
 //! The Stream runtime of Temporal SDKs.
 //!
-//! The crate serves the Stream service of the Brook API proposal on the customer's Redis. Lang
+//! The crate serves the Stream service of the Brook API proposal on the customer's Redis, or on
+//! the server's Stream service through [native::ServiceStore]. Lang
 //! reaches it through the bridge's generic extension calls, with an operation name and proto
 //! bytes, and Core calls its Workflow Task interceptor around each Workflow Task completion.
 
@@ -12,6 +13,7 @@ mod extension;
 pub mod ids;
 pub mod memory;
 mod metrics;
+pub mod native;
 pub mod offset;
 pub mod protos;
 mod record;
@@ -28,11 +30,13 @@ mod writer;
 pub use error::{Reason, StreamError, StreamResult};
 pub use extension::{
     EXTENSION_NAME, ExtensionOptions, MEMORY_EXTENSION_NAME, MemoryStreamExtension,
-    RedisStreamExtension, StreamExtension,
+    NATIVE_EXTENSION_NAME, NativeStreamExtension, RedisStreamExtension, StreamExtension,
 };
 pub use service::{MAX_RECORDS, MAX_WAIT};
 
 /// The protos lang and the crate exchange.
 pub mod proto {
     pub use crate::protos::temporal::{api::streamservice::v1::*, sdk::streams::v1::*};
+    // Both packages have the message. The extension's is the one in extension errors.
+    pub use crate::protos::temporal::sdk::streams::v1::StreamErrorDetails;
 }

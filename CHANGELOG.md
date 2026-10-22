@@ -76,3 +76,15 @@
   `OpenWriterRequest` reserves `batch_interval` (4) and `max_buffered_records` (7). An SDK
   writes with `WriteRecords` and buffers on its own. `CloseWriter` and `CloseWriters` now only
   drop the writers.
+- Added the native Store, `ServiceStore`, over the server's
+  `temporal.api.streamservice.v1.StreamService`, called with `Connection::raw_unary` on the
+  connection that `WorkerExtension::attach` gives. `NativeStreamExtension` builds an extension on
+  it, and `StreamExtension::for_backend` picks `redis`, `memory` or `native`. The service forwards
+  whole reads and describes to the server. A Workflow create passes its owner, `close_with_run`
+  and ref with the new `Store::create_owned`. Server errors map to the crate's reasons by their
+  `StreamErrorDetails`.
+- Synced `stream_service.proto` with the server's: `CreateStreamRequest.owner` (6),
+  `close_with_run` (7), `ref` (8), `CloseStreamRequest.withdraw_run` (8) and
+  `StreamErrorDetails`. The WIT has the same fields.
+- Added the capability `deferred_withdrawal`. Redis and memory have it. The server doesn't yet,
+  so on native the Local Activity flush leaves the calls to the Workflow Task completion.

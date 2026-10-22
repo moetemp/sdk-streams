@@ -9,13 +9,13 @@ use crate::{
     ids::{check_stream_id, workflow_producer_id},
     proto::{
         AppendRecord, BufferWorkflowCallsRequest, CloseStreamRequest, FlushRunBufferRequest,
-        Producer, ProducerEpoch, ProducerKind, WorkflowCall, WorkflowTaskEpoch,
+        Producer, ProducerEpoch, ProducerKind, StreamRef, WorkflowCall, WorkflowTaskEpoch,
         workflow_call::Call,
     },
     record::{close_record, data_record, supersession},
     service::StreamService,
     store::{
-        Batch, Capabilities, CreateOutcome, MAX_BATCH_BYTES, MAX_RECORD_BYTES, Owner, Store,
+        Batch, Capabilities, CreateOutcome, MAX_BATCH_BYTES, MAX_RECORD_BYTES, RunOwner, Store,
         Withdrawal,
     },
 };
@@ -374,11 +374,19 @@ fn previous_completed(task: &WorkflowTaskCompletionInfo) -> Option<WorkflowTaskE
     })
 }
 
+/// One buffered create of a Stream.
+struct CreateCall {
+    retention: Option<Duration>,
+    auto_close: Option<Duration>,
+    close_with_run: bool,
+    stream: Option<StreamRef>,
+}
+
 /// The calls of one Stream in one write, in the order Workflow code made them.
 #[derive(Default)]
 struct StreamCalls {
     /// The Retention and the auto close of each create.
-    creates: Vec<(Option<Duration>, Option<Duration>)>,
+    creates: Vec<CreateCall>,
     records: Vec<AppendRecord>,
     /// Send a batch also with no Records, so the task's withdrawal facts reach the Stream.
     settle: bool,
@@ -535,6 +543,15 @@ impl StreamService {
             ));
         };
         let key = task_key(&epoch);
+        // Without the deferred withdrawal the early batch would withdraw every earlier task, so
+        // the completion writes the calls, after the Local Activity's Records.
+        if !self
+            .store
+            .capabilities()
+            .contains(Capabilities::DEFERRED_WITHDRAWAL)
+        {
+            return Ok(0);
+        }
         let Some(taken) = runs.take(&request.run_id, &key, false)? else {
             return Ok(0);
         };
@@ -584,9 +601,12 @@ impl StreamService {
                         order.push(create.stream_id.clone());
                     }
                     let entry = streams.entry(create.stream_id).or_default();
-                    entry
-                        .creates
-                        .push((duration(create.retention), duration(create.auto_close)));
+                    entry.creates.push(CreateCall {
+                        retention: duration(create.retention),
+                        auto_close: duration(create.auto_close),
+                        close_with_run: create.close_with_run,
+                        stream: create.r#ref,
+                    });
                 }
                 Some(Call::Append(append)) => {
                     let id = append.stream.map(|s| s.id).unwrap_or_default();
@@ -634,7 +654,7 @@ impl StreamService {
             if calls
                 .creates
                 .iter()
-                .any(|(_, auto_close)| auto_close.is_some())
+                .any(|create| create.auto_close.is_some())
             {
                 needed = needed.union(Capabilities::AUTO_CLOSE);
             }
@@ -731,14 +751,19 @@ impl StreamService {
             supersession: &bytes,
             defer: task.facts.is_none(),
         };
-        for (retention, auto_close) in calls.creates {
+        for create in calls.creates {
+            let owner = RunOwner {
+                producer,
+                close_with_run: create.close_with_run,
+                stream: create.stream.as_ref(),
+            };
             let created = retried(task.deadline, || {
-                store.create(
+                store.create_owned(
                     namespace,
                     id,
-                    retention,
-                    auto_close,
-                    Owner::Workflow,
+                    create.retention,
+                    create.auto_close,
+                    &owner,
                     &withdrawal,
                 )
             })

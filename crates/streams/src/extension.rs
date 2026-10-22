@@ -4,6 +4,7 @@ use crate::{
     StreamError, StreamResult,
     memory::MemoryStore,
     metrics::Metrics,
+    native::{NATIVE_BACKEND, ServiceStore},
     proto::{
         AppendRecordsRequest, BufferWorkflowCallsRequest, BufferWorkflowCallsResponse,
         CloseStreamRequest, CloseWriterRequest, CloseWriterResponse, CloseWritersRequest,
@@ -19,6 +20,7 @@ use crate::{
 };
 use prost::Message;
 use std::{sync::Arc, time::Duration};
+use temporalio_client::Connection;
 use temporalio_common::telemetry::metrics::TemporalMeter;
 use temporalio_sdk_core::{ExtensionError, WorkerExtension, WorkflowTaskInterceptor};
 use tokio::sync::OnceCell;
@@ -121,6 +123,8 @@ impl Shared {
 pub struct StreamExtension {
     shared: Arc<Shared>,
     hooks: Arc<WorkflowHooks>,
+    /// The native Store, which takes the Worker's connection on attach.
+    native: Option<Arc<ServiceStore>>,
 }
 
 /// The Stream runtime on Redis. [StreamExtension::new] builds it.
@@ -141,6 +145,7 @@ impl StreamExtension {
         options: ExtensionOptions,
         meter: Option<TemporalMeter>,
         store: Option<Arc<dyn Store>>,
+        native: Option<Arc<ServiceStore>>,
     ) -> Arc<Self> {
         let meter = meter.unwrap_or_else(TemporalMeter::no_op);
         let metrics = Metrics::new(&meter);
@@ -162,12 +167,51 @@ impl StreamExtension {
         let hooks = Arc::new(WorkflowHooks {
             shared: shared.clone(),
         });
-        Arc::new(Self { shared, hooks })
+        Arc::new(Self {
+            shared,
+            hooks,
+            native,
+        })
     }
 
     /// Builds the extension on Redis. It counts on `meter`, lang's runtime meter, when given.
     pub fn new(options: ExtensionOptions, meter: Option<TemporalMeter>) -> Arc<Self> {
-        Self::build(EXTENSION_NAME, options, meter, None)
+        Self::build(EXTENSION_NAME, options, meter, None, None)
+    }
+
+    /// Builds the extension of a backend kind: `redis`, `memory` or `native`, from an encoded
+    /// [RedisStreamConfig]. A native extension reads only `backend` from it, and the config may
+    /// be empty.
+    pub fn for_backend(
+        kind: &str,
+        config: &[u8],
+        meter: Option<TemporalMeter>,
+    ) -> StreamResult<Arc<Self>> {
+        match kind {
+            "redis" => Self::from_config_bytes(config, meter),
+            "memory" => MemoryStreamExtension::from_config_bytes(config, meter),
+            NATIVE_BACKEND => {
+                let config = RedisStreamConfig::decode(config)
+                    .map_err(|error| StreamError::invalid(format!("The config is bad: {error}")))?;
+                let backend = match config.backend.as_str() {
+                    "" => NATIVE_BACKEND.to_string(),
+                    name => name.to_string(),
+                };
+                Ok(NativeStreamExtension::create(backend, meter))
+            }
+            other => Err(StreamError::invalid(format!(
+                "No Stream backend kind {other}. The kinds are redis, memory and native"
+            ))),
+        }
+    }
+
+    /// Gives a native extension the client connection to call the server on. A Worker gives
+    /// its own through [WorkerExtension::attach]. A bridge with only a client calls this. Other
+    /// extensions ignore it.
+    pub fn attach_connection(&self, connection: Connection) {
+        if let Some(native) = &self.native {
+            native.attach(connection);
+        }
     }
 
     /// Builds the extension from an encoded [RedisStreamConfig].
@@ -351,7 +395,41 @@ impl MemoryStreamExtension {
             durable_timeout: Duration::from_secs(1),
             backend,
         };
-        StreamExtension::build(MEMORY_EXTENSION_NAME, options, meter, Some(store))
+        StreamExtension::build(MEMORY_EXTENSION_NAME, options, meter, Some(store), None)
+    }
+}
+
+/// The name of the native extension, for a bridge that selects an extension by name.
+pub const NATIVE_EXTENSION_NAME: &str = "temporalio-streams-native";
+
+/// The Stream runtime on the server's Stream service, through [ServiceStore]. It serves the same
+/// calls as on Redis, on the connection that the Worker or the client attaches.
+#[derive(Debug)]
+pub struct NativeStreamExtension;
+
+impl NativeStreamExtension {
+    /// Builds an extension with no connection yet. `backend` is the name in the refs it builds.
+    pub fn create(
+        backend: impl Into<String>,
+        meter: Option<TemporalMeter>,
+    ) -> Arc<StreamExtension> {
+        let native = Arc::new(ServiceStore::new());
+        let mut options = RedisStoreOptions::new(String::new());
+        options.retention = native.default_retention();
+        let options = ExtensionOptions {
+            store: options,
+            durable_writes: 0,
+            durable_timeout: Duration::from_secs(1),
+            backend: backend.into(),
+        };
+        let store: Arc<dyn Store> = native.clone();
+        StreamExtension::build(
+            NATIVE_EXTENSION_NAME,
+            options,
+            meter,
+            Some(store),
+            Some(native),
+        )
     }
 }
 
@@ -367,6 +445,10 @@ impl WorkerExtension for StreamExtension {
 
     fn workflow_task_interceptor(&self) -> Option<Arc<dyn WorkflowTaskInterceptor>> {
         Some(self.hooks.clone())
+    }
+
+    fn attach(&self, connection: Connection) {
+        self.attach_connection(connection);
     }
 
     fn call(&self, method: &str, input: &[u8]) -> Result<Vec<u8>, ExtensionError> {

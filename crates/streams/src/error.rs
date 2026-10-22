@@ -62,6 +62,27 @@ impl Reason {
         }
     }
 
+    /// The reason of a token, for an error that the server or another runtime sends.
+    pub fn from_token(token: &str) -> Option<Self> {
+        [
+            Reason::NotFound,
+            Reason::Expired,
+            Reason::Closed,
+            Reason::Fenced,
+            Reason::Sequence,
+            Reason::FormatTooNew,
+            Reason::AlreadyExists,
+            Reason::Offset,
+            Reason::TooLarge,
+            Reason::Invalid,
+            Reason::Storage,
+            Reason::UnknownWriter,
+            Reason::Unsupported,
+        ]
+        .into_iter()
+        .find(|reason| reason.token() == token)
+    }
+
     /// The status code of the reason, as in the proposal's Appendix A.
     pub fn code(self) -> Code {
         match self {

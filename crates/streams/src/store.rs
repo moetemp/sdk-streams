@@ -3,7 +3,10 @@
 
 use crate::{
     Reason, StreamError, StreamResult,
-    proto::{Producer, WorkflowTaskEpoch},
+    proto::{
+        DescribeStreamRequest, DescribeStreamResponse, Producer, ReadRecordsRequest,
+        ReadRecordsResponse, StreamRef, WorkflowTaskEpoch,
+    },
 };
 use std::{sync::Arc, time::Duration};
 use tokio::time::Instant;
@@ -199,10 +202,13 @@ impl Capabilities {
     /// A Stream with an auto close period closes with no result when no append came for that
     /// long. Each write step applies it before it acts, so no call sees the Stream open late.
     pub const AUTO_CLOSE: Self = Self(1 << 6);
+    /// A Workflow batch whose task facts come later withdraws nothing and keeps no facts, so a
+    /// run's Records can go in before a Local Activity of the run starts.
+    pub const DEFERRED_WITHDRAWAL: Self = Self(1 << 7);
     /// Every capability.
-    pub const ALL: Self = Self((1 << 7) - 1);
+    pub const ALL: Self = Self(u8::MAX);
 
-    const NAMES: [(Self, &'static str); 7] = [
+    const NAMES: [(Self, &'static str); 8] = [
         (Self::PRODUCER_FENCE, "producer_fence"),
         (Self::WITHDRAWAL, "withdrawal"),
         (Self::RUN_FENCE, "run_fence"),
@@ -210,6 +216,7 @@ impl Capabilities {
         (Self::REPLICA_WAIT, "replica_wait"),
         (Self::SAFETY_TTL, "safety_ttl"),
         (Self::AUTO_CLOSE, "auto_close"),
+        (Self::DEFERRED_WITHDRAWAL, "deferred_withdrawal"),
     ];
 
     /// Both sets.
@@ -280,6 +287,29 @@ pub trait Store: Send + Sync + 'static {
         withdrawal: &Withdrawal<'_>,
     ) -> StreamResult<Created>;
 
+    /// Creates a Stream that a Workflow run owns. A Store that keeps the owner, such as the
+    /// server, overrides it. The default is a Workflow-owned [Store::create].
+    async fn create_owned(
+        &self,
+        namespace: &str,
+        stream_id: &str,
+        retention: Option<Duration>,
+        auto_close: Option<Duration>,
+        owner: &RunOwner<'_>,
+        withdrawal: &Withdrawal<'_>,
+    ) -> StreamResult<Created> {
+        let _ = owner;
+        self.create(
+            namespace,
+            stream_id,
+            retention,
+            auto_close,
+            Owner::Workflow,
+            withdrawal,
+        )
+        .await
+    }
+
     /// Appends one batch whole, or nothing of it.
     async fn append(
         &self,
@@ -342,6 +372,36 @@ pub trait Store: Send + Sync + 'static {
     fn durable_store(&self) -> Option<Arc<dyn Store>> {
         None
     }
+
+    /// The reads of a Store that answers whole reads and describes itself, such as the
+    /// server. The service then forwards those calls and uses no [Store::read].
+    fn remote_reads(&self) -> Option<&dyn RemoteReads> {
+        None
+    }
+}
+
+/// The Workflow run that owns a Stream, for a Store that keeps it.
+#[derive(Debug, Clone, Copy)]
+pub struct RunOwner<'a> {
+    /// The run's Producer in the task of the create.
+    pub producer: &'a Producer,
+    /// Close the Stream when the owner's run chain closes.
+    pub close_with_run: bool,
+    /// The Stream's ref, with the owner fields.
+    pub stream: Option<&'a StreamRef>,
+}
+
+/// Whole reads and describes, which a remote Store answers itself.
+#[async_trait::async_trait]
+pub trait RemoteReads: Send + Sync {
+    /// A long-polling read.
+    async fn read_records(&self, request: ReadRecordsRequest) -> StreamResult<ReadRecordsResponse>;
+
+    /// The state of a Stream.
+    async fn describe_stream(
+        &self,
+        request: DescribeStreamRequest,
+    ) -> StreamResult<DescribeStreamResponse>;
 }
 
 #[cfg(test)]
@@ -357,13 +417,13 @@ mod tests {
             .unwrap_err();
         assert_eq!(error.reason, Reason::Unsupported);
         assert!(error.message.ends_with("replica_wait"), "{}", error.message);
-        assert_eq!(Capabilities::ALL.names().len(), 7);
+        assert_eq!(Capabilities::ALL.names().len(), 8);
         assert_eq!(
             Capabilities::ALL
                 .without(Capabilities::REPLICA_WAIT)
                 .names()
                 .len(),
-            6
+            7
         );
     }
 }

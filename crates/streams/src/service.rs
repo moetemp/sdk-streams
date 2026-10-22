@@ -183,6 +183,9 @@ impl StreamService {
         &self,
         request: DescribeStreamRequest,
     ) -> StreamResult<DescribeStreamResponse> {
+        if let Some(remote) = self.store.remote_reads() {
+            return remote.describe_stream(request).await;
+        }
         let id = stream_id(request.stream.as_ref())?;
         let state = self.state(&request.namespace, id).await?;
         if !state.exists {
@@ -238,6 +241,9 @@ impl StreamService {
         &self,
         request: ReadRecordsRequest,
     ) -> StreamResult<ReadRecordsResponse> {
+        if let Some(remote) = self.store.remote_reads() {
+            return remote.read_records(request).await;
+        }
         let id = stream_id(request.stream.as_ref())?.to_string();
         let namespace = request.namespace.as_str();
         if request.from_offset < 0 {
