@@ -43,6 +43,9 @@ needs CMake and Go.
 - `protos/temporal/api/streamservice/v1/stream_service.proto` is the draft Stream service of the
   API proposal. sdk-rust doesn't have it, so the crate generates it. Lang generates the same file.
 - `protos/temporal/sdk/streams/v1/extension.proto` has the crate's own extension calls.
+- `nexus/stream-service.wit` is the Stream service as a System Nexus service, backed by the
+  proto above. Each SDK copies it and generates its bindings with nexgen. A test keeps every
+  line at most 100 columns.
 - `protos/api_include` is a copy of the Temporal API protos, for imports only.
   `scripts/sync-api-protos.sh` refreshes it from the pinned sdk-rust commit, and CI fails when the
   copy differs.
