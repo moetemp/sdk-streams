@@ -75,3 +75,5 @@ See the known limits for a Reader of a Stream with an auto close.
 - A Reader of a Stream with an auto close needs `+evalsha` with write access to the Stream's
   keys, since its read or describe may apply a due close. A Reader with read-only access gets
   an error from that step.
+- A read or a describe served by a replica that is behind can report a Stream open just after
+  its close.
