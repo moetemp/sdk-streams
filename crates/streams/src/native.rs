@@ -17,10 +17,18 @@ use crate::{
     },
 };
 use bytes::Bytes;
-use parking_lot::RwLock;
+use parking_lot::{Mutex, RwLock};
 use prost::Message;
-use std::time::Duration;
+use std::{
+    collections::HashMap,
+    sync::atomic::{AtomicU64, Ordering},
+    time::Duration,
+};
 use temporalio_client::Connection;
+use temporalio_common::protos::temporal::api::{
+    common::v1::Payload,
+    failure::v1::{Failure, failure::FailureInfo},
+};
 use tokio::time::Instant;
 
 /// The backend name of the server's Stream service.
@@ -30,8 +38,6 @@ pub const NATIVE_BACKEND: &str = "native";
 const CREATE: &str = "/temporal.api.streamservice.v1.StreamService/CreateStream";
 const APPEND: &str = "/temporal.api.streamservice.v1.StreamService/AppendRecords";
 const CLOSE: &str = "/temporal.api.streamservice.v1.StreamService/CloseStream";
-const READ: &str = "/temporal.api.streamservice.v1.StreamService/ReadRecords";
-const DESCRIBE: &str = "/temporal.api.streamservice.v1.StreamService/DescribeStream";
 
 /// The Retention the server gives a Stream with none, `stream.defaultRetention`.
 const SERVER_RETENTION: Duration = Duration::from_secs(7 * 24 * 60 * 60);
@@ -40,6 +46,9 @@ const SERVER_RETENTION: Duration = Duration::from_secs(7 * 24 * 60 * 60);
 #[derive(Default)]
 pub struct ServiceStore {
     connection: RwLock<Option<Connection>>,
+    /// The full ref of each Stream that a call named with owner fields. The server finds a
+    /// Workflow's Stream only by them, and the Store calls get the id alone.
+    refs: Mutex<HashMap<(String, String), StreamRef>>,
     /// The Retention of a create that gives none, or the server's default.
     retention: Option<Duration>,
 }
@@ -142,19 +151,28 @@ fn proto_duration(value: Duration) -> prost_types::Duration {
     }
 }
 
-fn stream_ref(id: &str) -> Option<StreamRef> {
-    Some(StreamRef {
-        id: id.to_string(),
-        ..Default::default()
-    })
-}
-
 fn decode_record(bytes: &[u8]) -> StreamResult<StreamRecord> {
     StreamRecord::decode(bytes)
         .map_err(|error| StreamError::invalid(format!("A Record is bad: {error}")))
 }
 
+/// The most refs a Store keeps. Past it, it forgets them all, and later calls note them again.
+const MAX_REFS: usize = 100_000;
+
 impl ServiceStore {
+    /// The full ref of a Stream, or one with the id alone.
+    fn stream_ref(&self, namespace: &str, id: &str) -> Option<StreamRef> {
+        let known = self
+            .refs
+            .lock()
+            .get(&(namespace.to_string(), id.to_string()))
+            .cloned();
+        Some(known.unwrap_or_else(|| StreamRef {
+            id: id.to_string(),
+            ..Default::default()
+        }))
+    }
+
     async fn create_request(
         &self,
         request: CreateStreamRequest,
@@ -221,7 +239,11 @@ impl Store for ServiceStore {
             auto_close: auto_close.map(proto_duration),
             owner: run.map(|run| run.producer.clone()),
             close_with_run: run.is_some_and(|run| run.close_with_run),
-            r#ref: run.and_then(|run| run.stream.cloned().or_else(|| stream_ref(stream_id))),
+            r#ref: run.and_then(|run| {
+                run.stream
+                    .cloned()
+                    .or_else(|| self.stream_ref(namespace, stream_id))
+            }),
         };
         self.create_request(request, retention).await
     }
@@ -246,7 +268,7 @@ impl Store for ServiceStore {
         let withdrawal = &batch.withdrawal;
         let request = AppendRecordsRequest {
             namespace: namespace.to_string(),
-            stream: stream_ref(stream_id),
+            stream: self.stream_ref(namespace, stream_id),
             producer: Some(batch.producer.clone()),
             sequence: batch.sequence,
             records,
@@ -277,7 +299,7 @@ impl Store for ServiceStore {
         let record = decode_record(record)?;
         let request = CloseStreamRequest {
             namespace: namespace.to_string(),
-            stream: stream_ref(stream_id),
+            stream: self.stream_ref(namespace, stream_id),
             producer: Some(producer.clone()),
             result: record.close_result,
             failure: record.close_failure,
@@ -327,22 +349,194 @@ impl Store for ServiceStore {
     fn remote_reads(&self) -> Option<&dyn RemoteReads> {
         Some(self)
     }
+
+    fn remember(&self, namespace: &str, stream: &StreamRef) {
+        if stream.workflow_id.is_empty() {
+            return;
+        }
+        let mut refs = self.refs.lock();
+        if refs.len() >= MAX_REFS {
+            refs.clear();
+        }
+        refs.insert((namespace.to_string(), stream.id.clone()), stream.clone());
+    }
 }
 
 #[async_trait::async_trait]
 impl RemoteReads for ServiceStore {
+    // Reads take the direct System Nexus call, which persists nothing, so every caller reads
+    // through the one path that Workflow code uses too.
     async fn read_records(&self, request: ReadRecordsRequest) -> StreamResult<ReadRecordsResponse> {
-        let namespace = request.namespace.clone();
-        self.call(READ, &namespace, request).await
+        self.nexus(
+            "ReadRecords",
+            request.namespace.clone(),
+            ReadRecordsRequest {
+                namespace: String::new(),
+                ..request
+            },
+        )
+        .await
     }
 
     async fn describe_stream(
         &self,
         request: DescribeStreamRequest,
     ) -> StreamResult<DescribeStreamResponse> {
-        let namespace = request.namespace.clone();
-        self.call(DESCRIBE, &namespace, request).await
+        self.nexus(
+            "DescribeStream",
+            request.namespace.clone(),
+            DescribeStreamRequest {
+                namespace: String::new(),
+                ..request
+            },
+        )
+        .await
     }
+}
+
+/// `temporal.api.workflowservice.v1.StartNexusOperationRequest`, the direct Nexus call. The
+/// crate builds only the fields it sends.
+#[derive(Clone, PartialEq, prost::Message)]
+struct StartNexusOperationRequest {
+    #[prost(string, tag = "1")]
+    namespace: String,
+    #[prost(string, tag = "2")]
+    identity: String,
+    #[prost(string, tag = "3")]
+    request_id: String,
+    #[prost(string, tag = "4")]
+    endpoint: String,
+    #[prost(string, tag = "5")]
+    service: String,
+    #[prost(string, tag = "6")]
+    operation: String,
+    #[prost(message, optional, tag = "7")]
+    input: Option<Payload>,
+}
+
+/// `temporal.api.workflowservice.v1.StartNexusOperationResponse`, without its links.
+#[derive(Clone, PartialEq, prost::Message)]
+struct StartNexusOperationResponse {
+    #[prost(message, optional, tag = "1")]
+    sync_success: Option<SyncSuccess>,
+    #[prost(message, optional, tag = "2")]
+    async_success: Option<AsyncSuccess>,
+    #[prost(message, optional, tag = "3")]
+    operation_failure: Option<OperationFailure>,
+}
+
+#[derive(Clone, PartialEq, prost::Message)]
+struct SyncSuccess {
+    #[prost(message, optional, tag = "1")]
+    payload: Option<Payload>,
+}
+
+#[derive(Clone, PartialEq, prost::Message)]
+struct AsyncSuccess {
+    #[prost(string, tag = "1")]
+    operation_token: String,
+}
+
+#[derive(Clone, PartialEq, prost::Message)]
+struct OperationFailure {
+    #[prost(message, optional, tag = "1")]
+    failure: Option<Failure>,
+}
+
+const START_NEXUS: &str = "/temporal.api.workflowservice.v1.WorkflowService/StartNexusOperation";
+const SYSTEM_ENDPOINT: &str = "__temporal_system";
+const SERVICE_PACKAGE: &str = "temporal.api.streamservice.v1";
+const SERVICE_NAME: &str = "temporal.api.streamservice.v1.StreamService";
+
+static NEXT_REQUEST: AtomicU64 = AtomicU64::new(0);
+
+impl ServiceStore {
+    /// Runs a Stream service operation as a direct System Nexus call and decodes its result.
+    async fn nexus<Req: Message, Resp: Message + Default>(
+        &self,
+        operation: &str,
+        namespace: String,
+        request: Req,
+    ) -> StreamResult<Resp> {
+        let message_type = format!("{SERVICE_PACKAGE}.{operation}Request");
+        let identity = self
+            .connection
+            .read()
+            .as_ref()
+            .map(|connection| connection.identity().to_string())
+            .unwrap_or_default();
+        let call = StartNexusOperationRequest {
+            namespace: namespace.clone(),
+            identity,
+            request_id: request_id(),
+            endpoint: SYSTEM_ENDPOINT.to_string(),
+            service: SERVICE_NAME.to_string(),
+            operation: operation.to_string(),
+            input: Some(Payload {
+                metadata: [
+                    ("encoding".to_string(), b"binary/protobuf".to_vec()),
+                    ("messageType".to_string(), message_type.into_bytes()),
+                ]
+                .into(),
+                data: request.encode_to_vec(),
+                ..Default::default()
+            }),
+        };
+        let answer: StartNexusOperationResponse = self.call(START_NEXUS, &namespace, call).await?;
+        if let Some(success) = answer.sync_success {
+            let data = success
+                .payload
+                .map(|payload| payload.data)
+                .unwrap_or_default();
+            return Resp::decode(data.as_slice()).map_err(|error| {
+                StreamError::storage(format!("The server's answer is bad: {error}"))
+            });
+        }
+        if let Some(failure) = answer.operation_failure.and_then(|f| f.failure) {
+            return Err(from_failure(failure));
+        }
+        Err(StreamError::storage(format!(
+            "The {operation} call started an operation instead of answering"
+        )))
+    }
+}
+
+/// A unique request id for one call.
+fn request_id() -> String {
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_nanos();
+    let n = NEXT_REQUEST.fetch_add(1, Ordering::Relaxed);
+    format!("streams-{}-{now}-{n}", std::process::id())
+}
+
+/// The crate error of a failed operation: the reason is the application failure's type, else
+/// its first `StreamErrorDetails`, else the `<reason>: ` prefix of the message.
+fn from_failure(failure: Failure) -> StreamError {
+    let application = match &failure.failure_info {
+        Some(FailureInfo::ApplicationFailureInfo(info)) => Some(info),
+        _ => None,
+    };
+    let by_type = application.and_then(|info| Reason::from_token(&info.r#type));
+    let by_details = application
+        .and_then(|info| info.details.as_ref())
+        .and_then(|details| details.payloads.first())
+        .and_then(|payload| crate::proto::StreamErrorDetails::decode(payload.data.as_slice()).ok())
+        .and_then(|details| Reason::from_token(&details.reason));
+    let message = failure.message;
+    let by_prefix = message
+        .split_once(": ")
+        .and_then(|(token, _)| Reason::from_token(token));
+    let reason = by_type
+        .or(by_details)
+        .or(by_prefix)
+        .unwrap_or(Reason::Storage);
+    let message = message
+        .strip_prefix(&format!("{}: ", reason.token()))
+        .unwrap_or(&message)
+        .to_string();
+    StreamError::new(reason, message)
 }
 
 #[cfg(test)]
@@ -375,5 +569,44 @@ mod tests {
         assert_eq!(error.reason, Reason::Sequence);
         let error = from_status(tonic::Status::unavailable("down"));
         assert_eq!(error.reason, Reason::Storage);
+    }
+
+    #[test]
+    fn a_failed_operation_maps_by_its_failure_type() {
+        use temporalio_common::protos::temporal::api::{
+            common::v1::Payloads, failure::v1::ApplicationFailureInfo,
+        };
+        let failure = |kind: &str, details: Option<&str>, message: &str| Failure {
+            message: message.to_string(),
+            failure_info: Some(FailureInfo::ApplicationFailureInfo(
+                ApplicationFailureInfo {
+                    r#type: kind.to_string(),
+                    details: details.map(|reason| Payloads {
+                        payloads: vec![Payload {
+                            data: crate::proto::StreamErrorDetails {
+                                reason: reason.to_string(),
+                            }
+                            .encode_to_vec(),
+                            ..Default::default()
+                        }],
+                    }),
+                    ..Default::default()
+                },
+            )),
+            ..Default::default()
+        };
+        let error = from_failure(failure("stream_not_found", None, "stream_not_found: none"));
+        assert_eq!(
+            (error.reason, error.message.as_str()),
+            (Reason::NotFound, "none")
+        );
+        let error = from_failure(failure("Other", Some("stream_expired"), "gone"));
+        assert_eq!(error.reason, Reason::Expired);
+        let error = from_failure(failure("Other", None, "stream_offset: past the end"));
+        assert_eq!(error.reason, Reason::Offset);
+        assert_eq!(
+            from_failure(failure("x", None, "?")).reason,
+            Reason::Storage
+        );
     }
 }

@@ -305,6 +305,46 @@ async fn a_workflow_flush_writes_to_the_server_with_its_owner() {
 }
 
 impl Case {
+    /// Starts a Workflow on a Task Queue that no Worker polls, and answers its run id.
+    async fn start_workflow(&self, workflow_id: &str) -> String {
+        use temporalio_common::protos::temporal::api::{
+            common::v1::WorkflowType,
+            taskqueue::v1::TaskQueue,
+            workflowservice::v1::{StartWorkflowExecutionRequest, StartWorkflowExecutionResponse},
+        };
+        let url = support::server_url("STREAMS_NATIVE_URL").unwrap();
+        let options = ConnectionOptions::new(Url::parse(&url).unwrap())
+            .identity("streams-native-test")
+            .build();
+        let connection = Connection::connect(options).await.unwrap();
+        let request = StartWorkflowExecutionRequest {
+            namespace: self.namespace.clone(),
+            workflow_id: workflow_id.to_string(),
+            workflow_type: Some(WorkflowType {
+                name: "streams-native-test".to_string(),
+            }),
+            task_queue: Some(TaskQueue {
+                name: "streams-native-test-no-worker".to_string(),
+                ..Default::default()
+            }),
+            request_id: workflow_id.to_string(),
+            ..Default::default()
+        };
+        let mut call = tonic::Request::new(bytes::Bytes::from(request.encode_to_vec()));
+        call.metadata_mut()
+            .insert("temporal-namespace", self.namespace.parse().unwrap());
+        let answer = connection
+            .raw_unary(
+                "/temporal.api.workflowservice.v1.WorkflowService/StartWorkflowExecution",
+                call,
+            )
+            .await
+            .unwrap();
+        StartWorkflowExecutionResponse::decode(answer.into_inner())
+            .unwrap()
+            .run_id
+    }
+
     fn buffer(&self, run_id: &str, calls: Vec<WorkflowCall>) {
         let request = BufferWorkflowCallsRequest {
             run_id: run_id.to_string(),
@@ -473,4 +513,80 @@ async fn a_create_with_no_retention_takes_the_config_default() {
         .await
         .unwrap();
     assert_eq!(described.retention.unwrap().seconds, 3 * 60 * 60);
+}
+
+#[tokio::test]
+async fn a_workflow_stream_is_found_by_its_owner_ref_on_every_call() {
+    let Some(case) = case().await else {
+        return;
+    };
+    // The server finds a Workflow's Stream in the Workflow, so the test starts one that no
+    // Worker polls.
+    let workflow_id = format!("wf-{}", case.stream);
+    let run_id = case.start_workflow(&workflow_id).await;
+    let owned = StreamRef {
+        id: case.stream.clone(),
+        workflow_id: workflow_id.clone(),
+        first_execution_run_id: run_id.clone(),
+        ..Default::default()
+    };
+    let create = WorkflowCall {
+        call: Some(Call::Create(CreateStreamRequest {
+            stream_id: case.stream.clone(),
+            r#ref: Some(owned.clone()),
+            ..Default::default()
+        })),
+        when_run_closes: false,
+    };
+    let append = WorkflowCall {
+        call: Some(Call::Append(AppendRecordsRequest {
+            stream: Some(owned.clone()),
+            records: vec![record("w")],
+            ..Default::default()
+        })),
+        when_run_closes: false,
+    };
+    case.buffer(&run_id, vec![create, append]);
+    case.complete(&run_id, 3, 1, None).await;
+    // An Activity writes with the same ref.
+    let opened: OpenWriterResponse = case
+        .call(
+            "OpenWriter",
+            OpenWriterRequest {
+                namespace: case.namespace.clone(),
+                stream: Some(owned.clone()),
+                producer: Some(activity(1)),
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+    let _: WriteRecordsResponse = case
+        .call(
+            "WriteRecords",
+            WriteRecordsRequest {
+                writer_id: opened.writer_id,
+                records: vec![record("a")],
+            },
+        )
+        .await
+        .unwrap();
+    let read: ReadRecordsResponse = case
+        .call(
+            "ReadRecords",
+            ReadRecordsRequest {
+                namespace: case.namespace.clone(),
+                stream: Some(owned),
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+    let texts: Vec<String> = read
+        .records
+        .iter()
+        .filter_map(|r| r.body.as_ref())
+        .map(|body| String::from_utf8(body.data.clone()).unwrap())
+        .collect();
+    assert_eq!(texts, ["w", "a"]);
 }

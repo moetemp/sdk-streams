@@ -348,6 +348,10 @@ pub trait Store: Send + Sync + 'static {
         None
     }
 
+    /// Notes the full ref of a Stream that a call names, for a Store that sends more than the
+    /// id. The server finds a Workflow's Stream by its owner fields. The others ignore it.
+    fn remember(&self, _namespace: &str, _stream: &StreamRef) {}
+
     /// The reads of a Store that answers whole reads and describes itself, such as the
     /// server. The service then forwards those calls and uses no [Store::read].
     fn remote_reads(&self) -> Option<&dyn RemoteReads> {

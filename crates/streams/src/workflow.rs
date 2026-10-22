@@ -588,6 +588,7 @@ impl StreamService {
             let when_run_closes = call.when_run_closes;
             match call.call {
                 Some(Call::Create(create)) => {
+                    self.remember(task.namespace, create.r#ref.as_ref());
                     if !streams.contains_key(&create.stream_id) {
                         order.push(create.stream_id.clone());
                     }
@@ -600,6 +601,7 @@ impl StreamService {
                     });
                 }
                 Some(Call::Append(append)) => {
+                    self.remember(task.namespace, append.stream.as_ref());
                     let id = append.stream.map(|s| s.id).unwrap_or_default();
                     if !streams.contains_key(&id) {
                         order.push(id.clone());
@@ -893,6 +895,7 @@ impl StreamService {
                 .as_ref()
                 .map(|s| s.id.clone())
                 .unwrap_or_default();
+            self.remember(&task.namespace, close.stream.as_ref());
             let record = close_record(&producer, close.result, close.failure);
             let mut backoff = FIRST_BACKOFF * 4;
             for attempt in 1..=CLOSE_ATTEMPTS {

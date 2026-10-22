@@ -91,3 +91,10 @@
   on the server too, so the native Local Activity flush writes early as on Redis.
 - Synced `stream_service.proto` with the server's `ReadRecordsRequest.to_offset` (11) and
   `wake_only` (12). The native Store forwards them. The Redis and memory reads don't use them.
+- The native Store reads and describes over the direct System Nexus call
+  (`WorkflowService.StartNexusOperation` on `__temporal_system`), not the `StreamService` gRPC
+  reads, so every caller reads through the path Workflow code uses. A failed operation maps to
+  the crate's reasons by its application failure type.
+- The native Store sends the full `StreamRef` of a Stream, with its owner fields, on every
+  call. The server finds a Workflow's Stream by them. `Store::remember` gives a Store the ref
+  that a call names, since the Store calls take the id alone.

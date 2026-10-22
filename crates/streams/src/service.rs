@@ -75,6 +75,7 @@ impl StreamService {
         request: CreateStreamRequest,
     ) -> StreamResult<CreateStreamResponse> {
         check_stream_id(&request.stream_id)?;
+        self.remember(&request.namespace, request.r#ref.as_ref());
         let auto_close = duration(request.auto_close);
         if auto_close.is_some() {
             self.store
@@ -122,6 +123,7 @@ impl StreamService {
         request: AppendRecordsRequest,
     ) -> StreamResult<AppendRecordsResponse> {
         let id = stream_id(request.stream.as_ref())?;
+        self.remember(&request.namespace, request.stream.as_ref());
         let producer = outside_producer(request.producer.as_ref())?;
         if request.sequence < 1 {
             return Err(StreamError::invalid("The sequence must be 1 or more"));
@@ -150,6 +152,13 @@ impl StreamService {
         })
     }
 
+    /// Tells the Store the full ref of a call's Stream.
+    pub(crate) fn remember(&self, namespace: &str, stream: Option<&StreamRef>) {
+        if let Some(stream) = stream {
+            self.store.remember(namespace, stream);
+        }
+    }
+
     /// Counts a fence or a flag of an append on the metrics.
     pub(crate) fn count<T: Flagged>(&self, result: StreamResult<T>) -> StreamResult<T> {
         match &result {
@@ -165,6 +174,7 @@ impl StreamService {
         request: CloseStreamRequest,
     ) -> StreamResult<CloseStreamResponse> {
         let id = stream_id(request.stream.as_ref())?;
+        self.remember(&request.namespace, request.stream.as_ref());
         let producer = outside_producer(request.producer.as_ref())?;
         self.store.capabilities().require(Capabilities::CLOSE)?;
         let record = close_record(producer, request.result, request.failure);
