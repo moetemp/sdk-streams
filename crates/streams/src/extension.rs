@@ -5,22 +5,20 @@ use crate::{
     memory::MemoryStore,
     metrics::Metrics,
     proto::{
-        AppendRecordsRequest, BufferWorkflowCallsRequest, BufferWorkflowCallsResponse,
-        CloseStreamRequest, CloseWriterRequest, CloseWriterResponse, CloseWritersRequest,
-        CloseWritersResponse, DescribeStreamRequest, DrainClosesRequest, DrainClosesResponse,
-        FlushRunBufferRequest, FlushRunBufferResponse, OpenWriterRequest, OpenWriterResponse,
-        ReadRecordsRequest, RedisStreamConfig, WriteRecordsRequest, WriteRecordsResponse,
+        AppendRecordsRequest, CloseStreamRequest, CloseWriterRequest, CloseWriterResponse,
+        CloseWritersRequest, CloseWritersResponse, DescribeStreamRequest, OpenWriterRequest,
+        OpenWriterResponse, ReadRecordsRequest, RedisStreamConfig, WriteRecordsRequest,
+        WriteRecordsResponse,
     },
     redis::{RedisStore, RedisStoreOptions},
     service::StreamService,
     store::Store,
-    workflow::{FlushOptions, WorkflowHooks, WorkflowRuns},
     writer::Writers,
 };
 use prost::Message;
 use std::{sync::Arc, time::Duration};
 use temporalio_common::telemetry::metrics::TemporalMeter;
-use temporalio_sdk_core::{ExtensionError, WorkerExtension, WorkflowTaskInterceptor};
+use temporalio_sdk_core::{ExtensionError, WorkerExtension};
 use tokio::sync::OnceCell;
 
 /// The name of the extension, for logs and for a bridge that selects an extension by name.
@@ -31,10 +29,6 @@ pub const EXTENSION_NAME: &str = "temporalio-streams-redis";
 pub struct ExtensionOptions {
     /// How to reach Redis.
     pub store: RedisStoreOptions,
-    /// When above zero, each Workflow flush waits until this many replicas have it.
-    pub durable_writes: u32,
-    /// How long that wait may take before the flush fails.
-    pub durable_timeout: Duration,
     /// The backend name that lang registered the extension under, for the refs it builds.
     pub backend: String,
 }
@@ -63,11 +57,8 @@ impl ExtensionOptions {
         if let Some(timeout) = duration(config.response_timeout) {
             store.response_timeout = timeout;
         }
-        store.durable_connection = config.durable_writes > 0;
         Ok(Self {
             store,
-            durable_writes: config.durable_writes.max(0) as u32,
-            durable_timeout: duration(config.durable_timeout).unwrap_or(Duration::from_secs(1)),
             backend: config.backend,
         })
     }
@@ -79,13 +70,12 @@ fn duration(value: Option<prost_types::Duration>) -> Option<Duration> {
     (!duration.is_zero()).then_some(duration)
 }
 
-/// What the extension and its Workflow Task interceptor share.
+/// What the extension's calls share.
 pub(crate) struct Shared {
     name: &'static str,
     options: ExtensionOptions,
     metrics: Metrics,
     service: OnceCell<Arc<StreamService>>,
-    pub(crate) runs: WorkflowRuns,
     writers: Writers,
 }
 
@@ -104,13 +94,6 @@ impl Shared {
             })
             .await
     }
-
-    pub(crate) fn flush_options(&self) -> FlushOptions {
-        FlushOptions {
-            durable_writes: self.options.durable_writes,
-            durable_timeout: self.options.durable_timeout,
-        }
-    }
 }
 
 /// The Stream runtime as a Worker extension, on Redis or, for tests, on the memory Store.
@@ -120,7 +103,6 @@ impl Shared {
 /// Worker and client of a plugin.
 pub struct StreamExtension {
     shared: Arc<Shared>,
-    hooks: Arc<WorkflowHooks>,
 }
 
 /// The Stream runtime on Redis. [StreamExtension::new] builds it.
@@ -156,13 +138,9 @@ impl StreamExtension {
             options,
             metrics,
             service: OnceCell::new_with(service),
-            runs: WorkflowRuns::default(),
             writers: Writers::default(),
         });
-        let hooks = Arc::new(WorkflowHooks {
-            shared: shared.clone(),
-        });
-        Arc::new(Self { shared, hooks })
+        Arc::new(Self { shared })
     }
 
     /// Builds the extension on Redis. It counts on `meter`, lang's runtime meter, when given.
@@ -185,51 +163,12 @@ impl StreamExtension {
         &self.shared.options
     }
 
-    /// Runs one synchronous method on encoded input. It never waits on I/O.
-    pub fn dispatch(&self, method: &str, input: &[u8]) -> Result<Vec<u8>, ExtensionError> {
-        let output = match method {
-            "BufferWorkflowCalls" => {
-                self.shared
-                    .runs
-                    .buffer(decode::<BufferWorkflowCallsRequest>(input)?)?;
-                BufferWorkflowCallsResponse {}.encode_to_vec()
-            }
-            _ => return Err(ExtensionError::unknown_method(method)),
-        };
-        Ok(output)
-    }
-
     /// Runs one asynchronous method on encoded input.
     pub async fn dispatch_async(
         &self,
         method: &str,
         input: &[u8],
     ) -> Result<Vec<u8>, ExtensionError> {
-        if method == "DrainCloses" {
-            let request = decode::<DrainClosesRequest>(input)?;
-            let timeout = duration(request.timeout).unwrap_or(Duration::from_secs(10));
-            let pending = self.shared.runs.drain(timeout).await;
-            return Ok(DrainClosesResponse {
-                pending: pending as i32,
-            }
-            .encode_to_vec());
-        }
-        if method == "FlushRunBuffer" {
-            let request = decode::<FlushRunBufferRequest>(input)?;
-            // A run with nothing buffered needs no Store, so a Local Activity of a Workflow
-            // that never publishes never connects.
-            if !self.shared.runs.has_work(&request.run_id) {
-                return Ok(FlushRunBufferResponse { records: 0 }.encode_to_vec());
-            }
-            let service = self.shared.service().await?;
-            let records = service
-                .flush_for_local_activity(&self.shared.runs, request, self.shared.flush_options())
-                .await?;
-            return Ok(FlushRunBufferResponse {
-                records: records as i32,
-            }
-            .encode_to_vec());
-        }
         let service = self.shared.service().await?;
         let output = match method {
             "CreateStream" => service.create_stream(decode(input)?).await?.encode_to_vec(),
@@ -302,12 +241,11 @@ impl MemoryStreamExtension {
         meter: Option<TemporalMeter>,
     ) -> Arc<StreamExtension> {
         let memory = Arc::new(MemoryStore::new(retention, safety_ttl));
-        Self::with_store(memory, 0, meter)
+        Self::with_store(memory, meter)
     }
 
     /// Builds an extension from an encoded [RedisStreamConfig]. The URLs don't count, so a
-    /// plugin can pass the config it builds for Redis. `durable_writes` counts, and the memory
-    /// Store then refuses every Workflow flush, since it has no replicas.
+    /// plugin can pass the config it builds for Redis.
     pub fn from_config_bytes(
         config: &[u8],
         meter: Option<TemporalMeter>,
@@ -319,27 +257,17 @@ impl MemoryStreamExtension {
             duration(config.retention).unwrap_or(defaults.retention),
             duration(config.safety_ttl).unwrap_or(defaults.safety_ttl),
         ));
-        Ok(Self::with_options(
-            memory,
-            config.durable_writes.max(0) as u32,
-            config.backend,
-            meter,
-        ))
+        Ok(Self::with_options(memory, config.backend, meter))
     }
 
     /// Builds an extension on any Store, for tests of a Store that lacks some capabilities.
     #[doc(hidden)]
-    pub fn with_store(
-        store: Arc<dyn Store>,
-        durable_writes: u32,
-        meter: Option<TemporalMeter>,
-    ) -> Arc<StreamExtension> {
-        Self::with_options(store, durable_writes, String::new(), meter)
+    pub fn with_store(store: Arc<dyn Store>, meter: Option<TemporalMeter>) -> Arc<StreamExtension> {
+        Self::with_options(store, String::new(), meter)
     }
 
     fn with_options(
         store: Arc<dyn Store>,
-        durable_writes: u32,
         backend: String,
         meter: Option<TemporalMeter>,
     ) -> Arc<StreamExtension> {
@@ -347,8 +275,6 @@ impl MemoryStreamExtension {
         options.retention = store.default_retention();
         let options = ExtensionOptions {
             store: options,
-            durable_writes,
-            durable_timeout: Duration::from_secs(1),
             backend,
         };
         StreamExtension::build(MEMORY_EXTENSION_NAME, options, meter, Some(store))
@@ -365,14 +291,6 @@ impl WorkerExtension for StreamExtension {
         self.shared.name
     }
 
-    fn workflow_task_interceptor(&self) -> Option<Arc<dyn WorkflowTaskInterceptor>> {
-        Some(self.hooks.clone())
-    }
-
-    fn call(&self, method: &str, input: &[u8]) -> Result<Vec<u8>, ExtensionError> {
-        self.dispatch(method, input)
-    }
-
     async fn call_async(&self, method: String, input: Vec<u8>) -> Result<Vec<u8>, ExtensionError> {
         self.dispatch_async(&method, &input).await
     }
@@ -386,7 +304,6 @@ mod tests {
     fn the_config_fills_the_defaults() {
         let options = ExtensionOptions::from_config(RedisStreamConfig {
             urls: vec!["redis://x:1".to_string()],
-            durable_writes: 2,
             backend: "redis-a".to_string(),
             ..Default::default()
         })
@@ -396,9 +313,6 @@ mod tests {
         assert_eq!(options.store.retention, Duration::from_secs(7 * 86_400));
         assert_eq!(options.store.safety_ttl, Duration::from_secs(90 * 86_400));
         assert_eq!(options.store.blocking_reads_per_node, 256);
-        assert_eq!(options.durable_writes, 2);
-        assert!(options.store.durable_connection);
-        assert_eq!(options.durable_timeout, Duration::from_secs(1));
         assert!(ExtensionOptions::from_config(RedisStreamConfig::default()).is_err());
     }
 }

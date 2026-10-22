@@ -15,11 +15,11 @@ use std::sync::{
 use temporalio_streams::{
     ExtensionOptions, MemoryStreamExtension, StreamExtension, StreamResult,
     epoch::withdraws,
-    ids::{StreamKeys, local_activity_producer_id, workflow_producer_id},
+    ids::{StreamKeys, local_activity_producer_id},
     memory::MemoryStore,
     proto::{
         Producer, ProducerEpoch, ProducerKind, RedisStreamConfig, StreamRecord, StreamRecordKind,
-        Supersession, WorkflowTaskEpoch,
+        Supersession,
     },
     redis::{RedisStore, RedisStoreOptions},
     store::{Appended, Batch, Closed, Entry, Owner, Store, Withdrawal},
@@ -119,38 +119,6 @@ impl Run {
         Self { id: id.to_string() }
     }
 
-    /// The run's Producer in the Workflow Task `[started]` at `attempt`.
-    pub(crate) fn task(&self, started: i64, attempt: i32) -> Producer {
-        self.task_at(started, attempt, 100)
-    }
-
-    pub(crate) fn task_at(&self, started: i64, attempt: i32, seconds: i64) -> Producer {
-        Producer {
-            kind: ProducerKind::Workflow as i32,
-            id: workflow_producer_id(&self.id),
-            epoch: Some(ProducerEpoch {
-                task_started_event_id: started,
-                task_attempt: attempt,
-                task_started_time: at(seconds),
-                ..Default::default()
-            }),
-            run_id: self.id.clone(),
-        }
-    }
-
-    /// A completed Workflow Task, as the previous completed task.
-    pub(crate) fn done(&self, started: i64) -> WorkflowTaskEpoch {
-        self.done_at(started, 1)
-    }
-
-    pub(crate) fn done_at(&self, started: i64, attempt: i32) -> WorkflowTaskEpoch {
-        WorkflowTaskEpoch {
-            started_event_id: started,
-            attempt,
-            started_time: at(100),
-        }
-    }
-
     pub(crate) fn local_activity(
         &self,
         call: &str,
@@ -194,10 +162,9 @@ pub(crate) fn supersession(producer: &Producer, withdrawal: &Withdrawal<'_>) -> 
         producer_kind: producer.kind,
         producer_id: producer.id.clone(),
         epoch: producer.epoch,
-        previous_completed_task: withdrawal.previous_completed.copied(),
-        failed_tasks: withdrawal.failed_tasks.to_vec(),
         withdraw_run: withdrawal.withdraw_run.to_string(),
         run_id: producer.run_id.clone(),
+        ..Default::default()
     }
     .encode_to_vec()
 }
@@ -367,96 +334,30 @@ impl Target {
         sequence: i64,
         texts: &[&str],
     ) -> StreamResult<Appended> {
-        self.write(producer, sequence, None, &[], "", texts).await
+        self.write(producer, sequence, "", texts).await
     }
 
-    /// A Workflow Task's flush to the Stream, as its first batch.
-    pub(crate) async fn flush(
+    /// A retry run's first batch, which withdraws `previous`.
+    pub(crate) async fn batch_retry(
         &self,
-        task: &Producer,
-        completed: Option<WorkflowTaskEpoch>,
-        failed: &[i64],
-        texts: &[&str],
-    ) -> StreamResult<Appended> {
-        self.write(task, 1, completed.as_ref(), failed, "", texts)
-            .await
-    }
-
-    /// A retry run's flush that withdraws `previous`.
-    pub(crate) async fn flush_retry(
-        &self,
-        task: &Producer,
-        completed: Option<WorkflowTaskEpoch>,
+        producer: &Producer,
         previous: &str,
         texts: &[&str],
     ) -> StreamResult<Appended> {
-        self.write(task, 1, completed.as_ref(), &[], previous, texts)
-            .await
-    }
-
-    /// A Workflow batch whose task facts come later, as a Local Activity flush writes it.
-    pub(crate) async fn flush_deferred(
-        &self,
-        task: &Producer,
-        sequence: i64,
-        texts: &[&str],
-    ) -> StreamResult<Appended> {
-        self.write_with(task, sequence, None, &[], "", texts, true)
-            .await
-    }
-
-    /// A later batch of a task, with its facts.
-    pub(crate) async fn flush_next(
-        &self,
-        task: &Producer,
-        sequence: i64,
-        completed: Option<WorkflowTaskEpoch>,
-        failed: &[i64],
-        texts: &[&str],
-    ) -> StreamResult<Appended> {
-        self.write(task, sequence, completed.as_ref(), failed, "", texts)
-            .await
+        self.write(producer, 1, previous, texts).await
     }
 
     async fn write(
         &self,
         producer: &Producer,
         sequence: i64,
-        completed: Option<&WorkflowTaskEpoch>,
-        failed: &[i64],
         withdraw_run: &str,
         texts: &[&str],
-    ) -> StreamResult<Appended> {
-        self.write_with(
-            producer,
-            sequence,
-            completed,
-            failed,
-            withdraw_run,
-            texts,
-            false,
-        )
-        .await
-    }
-
-    #[allow(clippy::too_many_arguments)]
-    async fn write_with(
-        &self,
-        producer: &Producer,
-        sequence: i64,
-        completed: Option<&WorkflowTaskEpoch>,
-        failed: &[i64],
-        withdraw_run: &str,
-        texts: &[&str],
-        defer: bool,
     ) -> StreamResult<Appended> {
         let records: Vec<_> = texts.iter().map(|text| record(producer, text)).collect();
         let mut withdrawal = Withdrawal {
-            previous_completed: completed,
-            failed_tasks: failed,
             withdraw_run,
             supersession: &[],
-            defer,
         };
         let bytes = supersession(producer, &withdrawal);
         withdrawal.supersession = &bytes;
@@ -475,35 +376,14 @@ impl Target {
     }
 
     pub(crate) async fn close(&self, producer: &Producer) -> StreamResult<Closed> {
-        self.close_with(producer, &[]).await
-    }
-
-    /// A Workflow's close in task `task`, with the failed tasks.
-    pub(crate) async fn close_run(&self, task: &Producer, failed: &[i64]) -> StreamResult<Closed> {
-        self.close_with(task, failed).await
-    }
-
-    async fn close_with(&self, producer: &Producer, failed: &[i64]) -> StreamResult<Closed> {
         let record = StreamRecord {
             kind: StreamRecordKind::Close as i32,
             producer: Some(producer.clone()),
             ..Default::default()
         }
         .encode_to_vec();
-        let mut withdrawal = Withdrawal {
-            failed_tasks: failed,
-            ..Default::default()
-        };
-        let bytes = supersession(producer, &withdrawal);
-        withdrawal.supersession = &bytes;
         self.store
-            .close(
-                &self.namespace,
-                &self.stream,
-                producer,
-                &record,
-                &withdrawal,
-            )
+            .close(&self.namespace, &self.stream, producer, &record)
             .await
     }
 }

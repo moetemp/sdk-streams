@@ -190,16 +190,6 @@ pub mod fields {
         format!("h|{kind}|{producer_id}")
     }
 
-    /// The task keys of a run and its Local Activities that have Records in the Stream.
-    pub fn task_index(run_id: &str) -> String {
-        format!("ti|{}", encode_part(run_id))
-    }
-
-    /// The task keys of a run that a `Superseded` withdrew.
-    pub fn withdrawn_tasks(run_id: &str) -> String {
-        format!("wt|{}", encode_part(run_id))
-    }
-
     /// Set when a Producer of the run wrote a Record to the Stream.
     pub fn run_wrote(run_id: &str) -> String {
         format!("run|{}", encode_part(run_id))

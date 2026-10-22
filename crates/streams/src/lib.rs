@@ -4,7 +4,7 @@
 //!
 //! The crate serves the Stream service of the Brook API proposal on the customer's Redis. Lang
 //! reaches it through the bridge's generic extension calls, with an operation name and proto
-//! bytes, and Core calls its Workflow Task interceptor around each Workflow Task completion.
+//! bytes. A Workflow makes each call from a Local Activity.
 
 pub mod epoch;
 mod error;
@@ -22,7 +22,6 @@ mod server {
 }
 mod service;
 pub mod store;
-mod workflow;
 mod writer;
 
 pub use error::{Reason, StreamError, StreamResult};

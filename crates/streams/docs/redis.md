@@ -29,15 +29,12 @@ slot. `CreateStream` writes `:meta`, and the first entry makes `:log`.
 | `e\|<kind>\|<producer id>` | The newest epoch key of the Producer, the fence |
 | `d\|<kind>\|<producer id>` | `<epoch key>\|<sequence>\|<first id>\|<last id>` of the last batch |
 | `h\|<kind>\|<producer id>` | The newest epoch key that still has Records here |
-| `ti\|<run>` | The task keys of the run and its Local Activities that have Records here |
-| `wt\|<run>` | The task keys of the run that a `Superseded` item withdrew |
-| `lf\|<run>` | `<task key>\|<completed task key>\|<failed ids>` of the run's newest Workflow write with facts |
 | `run\|<run>` | Set when a Producer of the run wrote a Record here |
 | `wr\|<run>` | Set when a Workflow retry withdrew the run |
 
 `<kind>` is the `ProducerKind` number, and `<run>` is the percent-encoded run id. An epoch key is
 the epoch's fields as fixed-width hex, in the order of comparison, so two keys compare as
-strings. A task key is the first four fields of an epoch key.
+strings.
 
 ## Log entries
 
@@ -45,22 +42,6 @@ Each entry has `r`, the encoded `temporal.api.streamservice.v1.StreamRecord` wit
 `s`, the encoded `Supersession`, on the first entry of a batch that withdraws. An entry with
 only `s` withdraws and has no Record. A reader gives a `SUPERSEDED` item for `s` just before the
 Record of the same entry. An offset is the entry id `<ms>-<seq>` packed as `ms << 20 | seq`.
-
-## Workflow batches before a Local Activity
-
-A Workflow batch that a Local Activity flush writes has no withdrawal facts yet, since Core
-gives them only with the task's completion. The append script gets `*` as its completed task
-key. It then withdraws no task, flags nothing and keeps no `lf`, but it still fences, dedupes,
-adds the task to `ti` and applies a retry run's withdrawal. The task's completion sends the next
-batch of the same epoch with the facts, an empty one if it has no Records, so the withdrawal
-reaches the Stream then.
-
-## Withdrawals after a close
-
-A Workflow batch with facts and no Records goes in also after a close, so a task that completes
-after a close still withdraws a failed task's Records. When a close refuses a Workflow batch with
-Records, the crate drops the Records and sends a batch with only the facts. A read that reaches
-the close Record gives the `SUPERSEDED` items written after it just before the close Record.
 
 ## Auto close
 
@@ -85,9 +66,6 @@ See the known limits for a Reader of a Stream with an auto close.
 
 ## Known limits
 
-- Offsets inside one page may not increase across a close: `SUPERSEDED` items written after
-  the close come just before the close Record, with higher offsets. A Reader resumes from the
-  page's `next_offset`, never from the offset of the last item.
 - A Reader of a Stream with an auto close needs `+evalsha` with write access to the Stream's
   keys, since its read or describe may apply a due close. A Reader with read-only access gets
   an error from that step.

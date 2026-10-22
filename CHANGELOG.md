@@ -80,3 +80,18 @@
   code, such as S108's Local Activities. `CreateStreamRequest.owner` (6) makes the Stream
   Workflow-owned, and `withdraw_run` on both withdraws a retry run's previous run. The proto
   also has `close_with_run` (7) and `ref` (8), which only the server reads.
+- Removed the Workflow write path that S108 replaced, since a Workflow now makes each create,
+  publish and close from a Local Activity on the service calls. Gone are `BufferWorkflowCalls`,
+  `FlushRunBuffer` and `DrainCloses` with their messages, the run buffer, the Workflow Task
+  interceptor, the deferred withdrawal of the batch before a Local Activity, and the metrics
+  only they kept (`stream_hook_latency`, `stream_flush_failures`, `stream_close_retries`,
+  `stream_records_dropped`).
+- Removed `durable_writes` and `durable_timeout` (`RedisStreamConfig` 6 and 7, now reserved), the
+  `replica_wait` capability, `Store::wait_replicas` and `Store::durable_store`. Only the Workflow
+  flush used them, and a Workflow write is now an Activity-path write with the same guarantee.
+- Removed the Workflow withdrawal rule from the Store, since no caller appends with a Workflow
+  Producer any more. The service refuses one, and S108's Local Activities write with their own
+  Producer. Gone are the task index, the withdrawn tasks, the last facts and the Local Activity
+  fence that used them, the facts-only batch after a close and the `Superseded` items that it
+  left after the close Record, and the previous completed task and failed tasks on
+  `Withdrawal`. A close takes no withdrawal. The `withdraws()` reader rule stays.

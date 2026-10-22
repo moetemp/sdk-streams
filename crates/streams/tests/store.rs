@@ -152,12 +152,6 @@ async fn a_lower_epoch_is_fenced_for_each_producer_kind() {
     for target in stores().await {
         target.create(Owner::Workflow).await;
         let run = Run::new("r1");
-        target
-            .flush(&run.task(8, 1), None, &[], &["w8"])
-            .await
-            .unwrap();
-        let stale = target.flush(&run.task(5, 1), None, &[], &["w5"]).await;
-        assert_eq!(stale.unwrap_err().reason, Reason::Fenced);
         let la = run.local_activity("k", 8, 1, 2);
         target.batch(&la, 1, &["la2"]).await.unwrap();
         let stale = target
@@ -172,7 +166,7 @@ async fn a_lower_epoch_is_fenced_for_each_producer_kind() {
         append(&target, &client(2), 1, &["c2"]).await.unwrap();
         let stale = append(&target, &client(1), 1, &["c1"]).await;
         assert_eq!(stale.unwrap_err().reason, Reason::Fenced);
-        assert_eq!(target.texts().await, ["w8", "la2", "a2", "c2"]);
+        assert_eq!(target.texts().await, ["la2", "a2", "c2"]);
     }
 }
 
@@ -303,127 +297,19 @@ async fn an_empty_batch_of_a_retry_withdraws_the_earlier_attempt() {
 }
 
 #[tokio::test]
-async fn the_appendix_e_examples_withdraw_the_right_records() {
-    for target in stores().await {
-        target.create(Owner::Workflow).await;
-        let run = Run::new("r1");
-        // 1. A retried task writes nothing. B at [5] fails, [8] writes nothing, C at [11].
-        target
-            .flush(&run.task(2, 1), None, &[], &["A"])
-            .await
-            .unwrap();
-        target
-            .flush(&run.task(5, 1), Some(run.done(2)), &[], &["B"])
-            .await
-            .unwrap();
-        let c = target
-            .flush(&run.task(11, 1), Some(run.done(8)), &[5], &["C"])
-            .await;
-        assert!(c.unwrap().flagged);
-        assert_eq!(target.visible().await, ["A", "C"]);
-        // 2. A refused completion. B at [14] is refused, B' at [17] with failed [14].
-        target
-            .flush(&run.task(14, 1), Some(run.done(11)), &[5], &["B2"])
-            .await
-            .unwrap();
-        target
-            .flush(&run.task(17, 1), Some(run.done(11)), &[5, 14], &["B2'"])
-            .await
-            .unwrap();
-        assert_eq!(target.visible().await, ["A", "C", "B2'"]);
-        // 3. A transient retry. D at [20] attempt 2, D' at [20] attempt 3.
-        target
-            .flush(&run.task(20, 2), Some(run.done(17)), &[], &["D"])
-            .await
-            .unwrap();
-        target
-            .flush(&run.task(20, 3), Some(run.done(17)), &[], &["D'"])
-            .await
-            .unwrap();
-        assert_eq!(target.visible().await, ["A", "C", "B2'", "D'"]);
-        // 4. A dropped speculative task. U at [23] T1, then [23] T2.
-        target
-            .flush(
-                &run.task_at(23, 1, 300),
-                Some(run.done_at(20, 3)),
-                &[],
-                &["U"],
-            )
-            .await
-            .unwrap();
-        target
-            .flush(
-                &run.task_at(23, 1, 400),
-                Some(run.done_at(20, 3)),
-                &[],
-                &["U'"],
-            )
-            .await
-            .unwrap();
-        assert_eq!(target.visible().await, ["A", "C", "B2'", "D'", "U'"]);
-        // 5. A refused transient attempt. D at [29] is refused, D2 at [32], c = [26].
-        target
-            .flush(&run.task(29, 2), Some(run.done(26)), &[], &["E"])
-            .await
-            .unwrap();
-        target
-            .flush(&run.task(32, 1), Some(run.done(26)), &[], &["E'"])
-            .await
-            .unwrap();
-        assert_eq!(target.visible().await, ["A", "C", "B2'", "D'", "U'", "E'"]);
-    }
-}
-
-#[tokio::test]
-async fn a_local_activity_of_a_withdrawn_task_is_withdrawn_and_fenced() {
-    for target in stores().await {
-        target.create(Owner::Workflow).await;
-        let run = Run::new("r1");
-        target
-            .flush(&run.task(5, 1), None, &[], &["w5"])
-            .await
-            .unwrap();
-        target
-            .batch(&run.local_activity("k", 5, 1, 1), 1, &["la"])
-            .await
-            .unwrap();
-        // Task [5] failed, so the next flush withdraws the task and its call.
-        target
-            .flush(&run.task(8, 1), None, &[5], &["w8"])
-            .await
-            .unwrap();
-        assert_eq!(target.visible().await, ["w8"]);
-        let late = target
-            .batch(&run.local_activity("k", 5, 1, 1), 2, &["late"])
-            .await;
-        assert_eq!(late.unwrap_err().reason, Reason::Fenced);
-        // A call of a task that completed stays.
-        target
-            .batch(&run.local_activity("j", 8, 1, 1), 1, &["la8"])
-            .await
-            .unwrap();
-        target
-            .flush(&run.task(11, 1), Some(run.done(8)), &[5], &["w11"])
-            .await
-            .unwrap();
-        assert_eq!(target.visible().await, ["w8", "la8", "w11"]);
-    }
-}
-
-#[tokio::test]
 async fn a_retry_run_withdraws_and_fences_the_previous_run() {
     for target in stores().await {
         target.create(Owner::Workflow).await;
         let (r1, r2) = (Run::new("r1"), Run::new("r2"));
         target
-            .flush(&r1.task(3, 1), None, &[], &["A"])
+            .batch(&r1.local_activity("k", 3, 1, 1), 1, &["A"])
             .await
             .unwrap();
         append(&target, &activity("r1", 1, 10), 1, &["A'"])
             .await
             .unwrap();
         let b = target
-            .flush_retry(&r2.task(3, 1), None, "r1", &["B"])
+            .batch_retry(&r2.local_activity("k", 3, 1, 1), "r1", &["B"])
             .await
             .unwrap();
         assert!(b.flagged);
@@ -431,30 +317,15 @@ async fn a_retry_run_withdraws_and_fences_the_previous_run() {
         let late = append(&target, &activity("r1", 1, 10), 2, &["A''"]).await;
         assert_eq!(late.unwrap_err().reason, Reason::Fenced);
         let late = target
-            .flush(&r1.task(6, 1), Some(r1.done(3)), &[], &["A3"])
+            .batch(&r1.local_activity("j", 6, 1, 1), 1, &["A3"])
             .await;
         assert_eq!(late.unwrap_err().reason, Reason::Fenced);
         // A second withdrawal of the same run withdraws nothing more.
         let again = target
-            .flush_retry(&r2.task(6, 1), Some(r2.done(3)), "r1", &["B2"])
+            .batch_retry(&r2.local_activity("j", 6, 1, 1), "r1", &["B2"])
             .await
             .unwrap();
         assert!(!again.flagged);
-    }
-}
-
-#[tokio::test]
-async fn a_workflow_close_withdraws_a_failed_task() {
-    for target in stores().await {
-        target.create(Owner::Workflow).await;
-        let run = Run::new("r1");
-        target
-            .flush(&run.task(5, 1), None, &[], &["w5"])
-            .await
-            .unwrap();
-        let closed = target.close_run(&run.task(8, 1), &[5]).await.unwrap();
-        assert!(closed.flagged);
-        assert!(target.visible().await.is_empty());
     }
 }
 
@@ -464,7 +335,7 @@ async fn the_ttl_follows_the_owner_and_the_close() {
         target.create(Owner::Workflow).await;
         let run = Run::new("r1");
         target
-            .flush(&run.task(3, 1), None, &[], &["a"])
+            .batch(&run.local_activity("k", 3, 1, 1), 1, &["a"])
             .await
             .unwrap();
         let (ttl, _) = target.ttls().await;
@@ -472,7 +343,10 @@ async fn the_ttl_follows_the_owner_and_the_close() {
             ttl > Duration::from_secs(80 * 86_400).as_millis() as i64,
             "{ttl}"
         );
-        target.close_run(&run.task(6, 1), &[]).await.unwrap();
+        target
+            .close(&run.local_activity("k", 6, 1, 1))
+            .await
+            .unwrap();
         let (ttl, meta) = target.ttls().await;
         assert!(
             ttl <= Duration::from_secs(7 * 86_400).as_millis() as i64,
@@ -547,25 +421,6 @@ async fn a_blocked_read_wakes_on_an_append_and_a_wait_for_replicas_ends() {
         tokio::time::sleep(Duration::from_millis(100)).await;
         append(&target, &client(1), 2, &["b"]).await.unwrap();
         assert!(waiter.await.unwrap().unwrap());
-        let replicas = target
-            .store
-            .wait_replicas(
-                &target.namespace,
-                &target.stream,
-                0,
-                Duration::from_millis(100),
-            )
-            .await;
-        // A Store with no replica wait refuses it by name.
-        if target
-            .store
-            .capabilities()
-            .contains(Capabilities::REPLICA_WAIT)
-        {
-            assert_eq!(replicas.unwrap(), 0);
-        } else {
-            assert_eq!(replicas.unwrap_err().reason, Reason::Unsupported);
-        }
     }
 }
 
@@ -579,32 +434,6 @@ async fn a_sequence_below_one_is_refused() {
                 .unwrap_err();
             assert_eq!(error.reason, Reason::Invalid);
         }
-    }
-}
-
-#[tokio::test]
-async fn a_local_activity_of_a_failed_task_that_wrote_nothing_is_fenced() {
-    for target in stores().await {
-        target.create(Owner::Workflow).await;
-        let run = Run::new("r1");
-        target
-            .flush(&run.task(3, 1), None, &[], &["w3"])
-            .await
-            .unwrap();
-        // Task [5] dispatched the call and failed before anything of it went here.
-        target
-            .flush(&run.task(8, 1), Some(run.done(3)), &[5], &["w8"])
-            .await
-            .unwrap();
-        let late = target
-            .batch(&run.local_activity("k", 5, 1, 1), 1, &["late"])
-            .await;
-        assert_eq!(late.unwrap_err().reason, Reason::Fenced);
-        target
-            .batch(&run.local_activity("j", 8, 1, 1), 1, &["la8"])
-            .await
-            .unwrap();
-        assert_eq!(target.visible().await, ["w3", "w8", "la8"]);
     }
 }
 
@@ -632,66 +461,6 @@ async fn a_stale_producer_cant_close_the_stream() {
             Reason::Fenced
         );
         target.close(&client(2)).await.unwrap();
-    }
-}
-
-#[tokio::test]
-async fn a_wait_for_replicas_holds_only_the_durable_connection() {
-    let targets = support::stores_with(|mut options| {
-        options.durable_connection = true;
-        options
-    })
-    .await;
-    for target in targets {
-        // The memory Store has no replicas and no second connection.
-        let support::Backend::Redis { store, .. } = &target.backend else {
-            continue;
-        };
-        target.create(Owner::Client).await;
-        let durable = store.durable().expect("a durable connection");
-        let (namespace, stream) = (target.namespace.clone(), target.stream.clone());
-        let waiter = tokio::spawn(async move {
-            durable
-                .wait_replicas(&namespace, &stream, 1, Duration::from_millis(800))
-                .await
-        });
-        tokio::time::sleep(Duration::from_millis(50)).await;
-        let started = std::time::Instant::now();
-        append(&target, &client(1), 1, &["a"]).await.unwrap();
-        assert!(
-            started.elapsed() < Duration::from_millis(400),
-            "{:?}",
-            started.elapsed()
-        );
-        assert_eq!(waiter.await.unwrap().unwrap(), 0);
-        assert!(store.durable().unwrap().durable().is_none());
-    }
-}
-
-#[tokio::test]
-async fn c_with_no_attempt_withdraws_by_started_time() {
-    for target in stores().await {
-        target.create(Owner::Workflow).await;
-        let run = Run::new("r1");
-        target
-            .flush(&run.task_at(8, 1, 200), None, &[], &["D1"])
-            .await
-            .unwrap();
-        target
-            .flush(&run.task_at(8, 2, 300), None, &[], &["D2"])
-            .await
-            .unwrap();
-        let mut c = run.done(8);
-        c.attempt = 0;
-        c.started_time = Some(Timestamp {
-            seconds: 300,
-            nanos: 0,
-        });
-        target
-            .flush(&run.task(14, 1), Some(c), &[], &["E"])
-            .await
-            .unwrap();
-        assert_eq!(target.visible().await, ["D2", "E"]);
     }
 }
 
@@ -888,38 +657,6 @@ async fn an_auto_close_counts_from_the_create_and_each_step_applies_it_once() {
                 .capabilities()
                 .contains(Capabilities::AUTO_CLOSE)
         );
-    }
-}
-
-#[tokio::test]
-async fn a_deferred_workflow_batch_withdraws_nothing_until_its_task_sends_the_facts() {
-    for target in stores().await {
-        target.create(Owner::Workflow).await;
-        let run = Run::new("run-d");
-        target
-            .flush(&run.task(3, 1), None, &[], &["A"])
-            .await
-            .unwrap();
-        let facts = target.meta("lf|run-d").await;
-        assert!(facts.is_some());
-        // With no previous completed task, a batch with facts would withdraw task [3].
-        let early = target
-            .flush_deferred(&run.task(5, 1), 1, &["B"])
-            .await
-            .unwrap();
-        assert!(!early.flagged);
-        assert_eq!(target.visible().await, ["A", "B"]);
-        // The deferred batch keeps no facts, so the Local Activity fence still has task [3]'s.
-        assert_eq!(target.meta("lf|run-d").await, facts);
-        // The task's completion sends the facts in the same epoch, numbered after the early
-        // batch, and withdraws the failed task [3].
-        let settled = target
-            .flush_next(&run.task(5, 1), 2, None, &[3], &[])
-            .await
-            .unwrap();
-        assert!(settled.flagged);
-        assert_eq!(target.visible().await, ["B"]);
-        assert_ne!(target.meta("lf|run-d").await, facts);
     }
 }
 

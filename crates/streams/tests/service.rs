@@ -878,3 +878,82 @@ async fn a_retry_run_s_local_activity_calls_withdraw_the_previous_run() {
         assert!(!withdraws(superseded, &read.records[2]));
     }
 }
+
+/// The user Local Activity `call-1` of `run`, dispatched by the Workflow Task `[started]`. A
+/// rerun in a later task keeps the Producer id and gets newer task facts (field 20).
+fn user_local_activity(run: &str, started: i64, seconds: i64) -> Producer {
+    Producer {
+        kind: ProducerKind::LocalActivity as i32,
+        id: temporalio_streams::ids::local_activity_producer_id(run, "call-1"),
+        epoch: Some(ProducerEpoch {
+            task_started_event_id: started,
+            task_attempt: 1,
+            task_started_time: Some(Timestamp { seconds, nanos: 0 }),
+            attempt: 1,
+            ..Default::default()
+        }),
+        run_id: run.to_string(),
+    }
+}
+
+#[tokio::test]
+async fn a_rerun_local_activity_supersedes_its_first_attempt() {
+    for case in cases().await {
+        let run = format!("{}-run", case.stream);
+        let _: CreateStreamResponse = call(
+            &case.ext,
+            "CreateStream",
+            CreateStreamRequest {
+                namespace: case.namespace.clone(),
+                stream_id: case.stream.clone(),
+                owner: Some(workflow_owner(&run)),
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+        let write = |producer: Producer, text: &str| AppendRecordsRequest {
+            namespace: case.namespace.clone(),
+            stream: case.stream(),
+            producer: Some(producer),
+            sequence: 1,
+            records: vec![record("", text)],
+            ..Default::default()
+        };
+        // Task [3] runs the Local Activity, which writes, and then the task fails.
+        let _: AppendRecordsResponse = call(
+            &case.ext,
+            "AppendRecords",
+            write(user_local_activity(&run, 3, 100), "first"),
+        )
+        .await
+        .unwrap();
+        // The next task [7] runs the same call again, and it writes again.
+        let _: AppendRecordsResponse = call(
+            &case.ext,
+            "AppendRecords",
+            write(user_local_activity(&run, 7, 200), "second"),
+        )
+        .await
+        .unwrap();
+        // A late write of the failed attempt is fenced.
+        let late = call::<_, AppendRecordsResponse>(
+            &case.ext,
+            "AppendRecords",
+            AppendRecordsRequest {
+                sequence: 2,
+                ..write(user_local_activity(&run, 3, 100), "late")
+            },
+        )
+        .await
+        .unwrap_err();
+        assert_eq!(reason(&late), "stream_fenced");
+        // A Reader sees the first attempt, then the Superseded item that withdraws it, then
+        // the second attempt. Applied, only the second attempt stays.
+        let read = case.read(ReadRecordsRequest::default()).await.unwrap();
+        assert_eq!(texts(&read), ["first", "<superseded>", "second"]);
+        let superseded = read.records[1].supersession.as_ref().unwrap();
+        assert!(withdraws(superseded, &read.records[0]));
+        assert!(!withdraws(superseded, &read.records[2]));
+    }
+}

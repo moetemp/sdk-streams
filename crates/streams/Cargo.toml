@@ -50,8 +50,6 @@ tracing = "0.1"
 tonic-prost-build = { workspace = true }
 
 [dev-dependencies]
-# Core's mock Worker, so a test drives the hooks as a bridge's Worker does.
-temporalio-sdk-core = { workspace = true, features = ["test-utilities"] }
 serde_json = { workspace = true }
 tokio = { version = "1.47", features = ["macros", "rt-multi-thread", "time"] }
 
