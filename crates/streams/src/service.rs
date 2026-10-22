@@ -73,12 +73,19 @@ impl StreamService {
         request: CreateStreamRequest,
     ) -> StreamResult<CreateStreamResponse> {
         check_stream_id(&request.stream_id)?;
+        let auto_close = duration(request.auto_close);
+        if auto_close.is_some() {
+            self.store
+                .capabilities()
+                .require(Capabilities::AUTO_CLOSE)?;
+        }
         let created = self
             .store
             .create(
                 &request.namespace,
                 &request.stream_id,
                 duration(request.retention),
+                auto_close,
                 Owner::Client,
                 &Withdrawal::default(),
             )
@@ -91,8 +98,8 @@ impl StreamService {
                 return Err(StreamError::new(
                     Reason::AlreadyExists,
                     format!(
-                        "The Stream exists with the Retention {:?}",
-                        created.retention
+                        "The Stream exists with the Retention {:?} and the auto close {:?}",
+                        created.retention, created.auto_close
                     ),
                 ));
             }
@@ -174,7 +181,7 @@ impl StreamService {
         request: DescribeStreamRequest,
     ) -> StreamResult<DescribeStreamResponse> {
         let id = stream_id(request.stream.as_ref())?;
-        let (state, _) = self.store.read(&request.namespace, id, 0, 0).await?;
+        let state = self.state(&request.namespace, id).await?;
         if !state.exists {
             return Err(StreamError::new(
                 Reason::NotFound,
@@ -192,7 +199,28 @@ impl StreamService {
             status: status as i32,
             last_offset: state.newest,
             retention: Some(proto_duration(state.retention)),
+            auto_close: state.auto_close.map(proto_duration),
         })
+    }
+
+    /// The state of a Stream, after its auto close if that is due. The read step writes
+    /// nothing, so a due auto close takes one more step that writes.
+    async fn state(&self, namespace: &str, id: &str) -> StreamResult<StreamState> {
+        let (state, _) = self.store.read(namespace, id, 0, 0).await?;
+        self.after_auto_close(namespace, id, state).await
+    }
+
+    async fn after_auto_close(
+        &self,
+        namespace: &str,
+        id: &str,
+        state: StreamState,
+    ) -> StreamResult<StreamState> {
+        if !state.auto_close_due() {
+            return Ok(state);
+        }
+        self.store.auto_close(namespace, id).await?;
+        Ok(self.store.read(namespace, id, 0, 0).await?.0)
     }
 
     /// A long poll. It ends with the Records it found, a close Record, or nothing after `wait`.
@@ -216,7 +244,8 @@ impl StreamService {
             .min(MAX_WAIT);
         let deadline = started + wait;
 
-        let mut state = self.created(namespace, &id, started + create_wait).await?;
+        let state = self.created(namespace, &id, started + create_wait).await?;
+        let mut state = self.after_auto_close(namespace, &id, state).await?;
         if state.version > FORMAT_VERSION {
             return Err(StreamError::new(
                 Reason::FormatTooNew,
@@ -252,19 +281,26 @@ impl StreamService {
                 return Ok(page);
             }
             cursor = scanned;
-            if deadline <= Instant::now() {
+            let now = Instant::now();
+            if deadline <= now {
                 return Ok(ReadRecordsResponse {
                     records: vec![],
                     next_offset: cursor,
                     done: false,
                 });
             }
+            // The wait ends when the auto close comes due, so the read gives its close Record.
+            let until = state.auto_close_at_ms().map_or(deadline, |at| {
+                // At least a short pause, so a Store that keeps it open can't spin the loop.
+                let left = Duration::from_millis((at - state.now_ms).max(20) as u64);
+                deadline.min(now + left)
+            });
             let after = (cursor - 1).max(state.newest);
             self.metrics.read_waits(true);
-            let woke = self.store.wait_after(namespace, &id, after, deadline).await;
+            let woke = self.store.wait_after(namespace, &id, after, until).await;
             self.metrics.read_waits(false);
             woke?;
-            state = self.store.read(namespace, &id, 0, 0).await?.0;
+            state = self.state(namespace, &id).await?;
         }
     }
 

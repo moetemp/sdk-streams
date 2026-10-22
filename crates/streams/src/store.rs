@@ -33,7 +33,7 @@ pub enum CreateOutcome {
     Created,
     /// The Stream exists with the same Retention.
     Exists,
-    /// The Stream exists with another Retention, which stays.
+    /// The Stream exists with another Retention or auto close, which stays.
     Conflict,
     /// The Stream is closed.
     Closed,
@@ -50,6 +50,8 @@ pub struct Created {
     pub retention: Duration,
     /// Whether the create withdrew a retry run's previous run.
     pub flagged: bool,
+    /// The auto close period of the Stream, the stored one if it existed.
+    pub auto_close: Option<Duration>,
 }
 
 /// The withdrawal facts of a Workflow batch or close, and the `Superseded` item they make.
@@ -120,12 +122,31 @@ pub struct StreamState {
     pub expires_ms: i64,
     /// The server time of the read, in ms since 1970.
     pub now_ms: i64,
+    /// The auto close period, if the Stream has one.
+    pub auto_close: Option<Duration>,
+    /// When the Stream was created or last took a Record, in ms since 1970. The auto close
+    /// counts from it.
+    pub last_append_ms: i64,
 }
 
 impl StreamState {
     /// The Stream is a Tombstone.
     pub fn expired(&self) -> bool {
         self.exists && self.expires_ms <= self.now_ms
+    }
+
+    /// When the auto close of an open Stream is due, in ms since 1970.
+    pub fn auto_close_at_ms(&self) -> Option<i64> {
+        if self.closed_at.is_some() || self.expired() {
+            return None;
+        }
+        let period = i64::try_from(self.auto_close?.as_millis()).unwrap_or(i64::MAX);
+        Some(self.last_append_ms.saturating_add(period))
+    }
+
+    /// The auto close period passed with no append, so the next write step closes the Stream.
+    pub fn auto_close_due(&self) -> bool {
+        self.auto_close_at_ms().is_some_and(|at| at <= self.now_ms)
     }
 
     /// The offset below which Retention dropped or hides the Records, as of the read.
@@ -171,16 +192,20 @@ impl Capabilities {
     pub const REPLICA_WAIT: Self = Self(1 << 4);
     /// An open Workflow-owned Stream keeps the safety TTL, not the Retention.
     pub const SAFETY_TTL: Self = Self(1 << 5);
+    /// A Stream with an auto close period closes with no result when no append came for that
+    /// long. Each write step applies it before it acts, so no call sees the Stream open late.
+    pub const AUTO_CLOSE: Self = Self(1 << 6);
     /// Every capability.
-    pub const ALL: Self = Self((1 << 6) - 1);
+    pub const ALL: Self = Self((1 << 7) - 1);
 
-    const NAMES: [(Self, &'static str); 6] = [
+    const NAMES: [(Self, &'static str); 7] = [
         (Self::PRODUCER_FENCE, "producer_fence"),
         (Self::WITHDRAWAL, "withdrawal"),
         (Self::RUN_FENCE, "run_fence"),
         (Self::CLOSE, "close"),
         (Self::REPLICA_WAIT, "replica_wait"),
         (Self::SAFETY_TTL, "safety_ttl"),
+        (Self::AUTO_CLOSE, "auto_close"),
     ];
 
     /// Both sets.
@@ -239,12 +264,14 @@ pub trait Store: Send + Sync + 'static {
     /// The Retention of a Stream that its create gives none.
     fn default_retention(&self) -> Duration;
 
-    /// Creates a Stream, or finds it. A retry run's create withdraws its previous run.
+    /// Creates a Stream, or finds it. A retry run's create withdraws its previous run. An
+    /// `auto_close` needs [Capabilities::AUTO_CLOSE].
     async fn create(
         &self,
         namespace: &str,
         stream_id: &str,
         retention: Option<Duration>,
+        auto_close: Option<Duration>,
         owner: Owner,
         withdrawal: &Withdrawal<'_>,
     ) -> StreamResult<Created>;
@@ -289,6 +316,12 @@ pub trait Store: Send + Sync + 'static {
         Err(unsupported("close"))
     }
 
+    /// Closes the Stream if its auto close is due, for a read that found it due. Answers the
+    /// offset of the close Record if the Stream is closed. Needs [Capabilities::AUTO_CLOSE].
+    async fn auto_close(&self, _namespace: &str, _stream_id: &str) -> StreamResult<Option<i64>> {
+        Err(unsupported("auto_close"))
+    }
+
     /// Waits until `replicas` replicas have this process's writes to the Stream. Answers how
     /// many have them. Needs [Capabilities::REPLICA_WAIT].
     async fn wait_replicas(
@@ -320,13 +353,13 @@ mod tests {
             .unwrap_err();
         assert_eq!(error.reason, Reason::Unsupported);
         assert!(error.message.ends_with("replica_wait"), "{}", error.message);
-        assert_eq!(Capabilities::ALL.names().len(), 6);
+        assert_eq!(Capabilities::ALL.names().len(), 7);
         assert_eq!(
             Capabilities::ALL
                 .without(Capabilities::REPLICA_WAIT)
                 .names()
                 .len(),
-            5
+            6
         );
     }
 }

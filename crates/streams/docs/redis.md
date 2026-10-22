@@ -24,6 +24,8 @@ slot. `CreateStream` writes `:meta`, and the first entry makes `:log`.
 | `closed`, `close_id` | Set by the close, with the entry id of the close Record |
 | `newest` | The entry id of the newest entry |
 | `trimmed` | The entry id of the newest entry that Retention dropped |
+| `ac` | The auto close period in ms, absent when the Stream has none |
+| `la` | When the create or the newest append with Records ran, in ms since 1970, with `ac` only |
 | `e\|<kind>\|<producer id>` | The newest epoch key of the Producer, the fence |
 | `d\|<kind>\|<producer id>` | `<epoch key>\|<sequence>\|<first id>\|<last id>` of the last batch |
 | `h\|<kind>\|<producer id>` | The newest epoch key that still has Records here |
@@ -44,6 +46,15 @@ Each entry has `r`, the encoded `temporal.api.streamservice.v1.StreamRecord` wit
 only `s` withdraws and has no Record. A reader gives a `SUPERSEDED` item for `s` just before the
 Record of the same entry. An offset is the entry id `<ms>-<seq>` packed as `ms << 20 | seq`.
 
+## Auto close
+
+A Stream with `ac` closes with no result when `la + ac` passes. Nothing runs at that time. The
+next create, append, close or auto close step finds it due and first writes the close Record
+`08 03` (a `StreamRecord` with only `kind = CLOSE`), then acts on the closed Stream. So an append
+is refused with `stream_closed`, and a close answers that the Stream was already closed. The
+read script writes nothing, so a read or a describe that finds the close due runs the auto close
+step, then reads again. A long-polling read wakes when the period passes.
+
 ## TTLs
 
 The log key expires at `exp`, and the meta key 30 days later, as the Tombstone. Each write sets
@@ -53,4 +64,5 @@ otherwise. Each append drops the Records older than the Retention, and a read hi
 ## Access
 
 A Producer needs `+evalsha` and `+script|load` on `~<prefix>:{<namespace>:*`. A Reader needs
-`+evalsha_ro` or `+evalsha`, `+xread` and the read keys. A cluster also needs `+cluster|slots`.
+`+evalsha_ro` or `+evalsha`, `+xread` and the read keys. A Reader of a Stream with an auto close
+also needs `+evalsha` with write access, since its read may apply the close. A cluster also needs `+cluster|slots`.

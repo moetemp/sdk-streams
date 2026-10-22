@@ -136,7 +136,24 @@ impl Case {
                 namespace: self.namespace.clone(),
                 stream_id: self.stream.clone(),
                 retention,
-                withdraw_run: String::new(),
+                ..Default::default()
+            },
+        )
+        .await
+    }
+
+    async fn create_auto_close(
+        &self,
+        auto_close: Option<prost_types::Duration>,
+    ) -> Result<CreateStreamResponse, ExtensionError> {
+        call(
+            &self.ext,
+            "CreateStream",
+            CreateStreamRequest {
+                namespace: self.namespace.clone(),
+                stream_id: self.stream.clone(),
+                auto_close,
+                ..Default::default()
             },
         )
         .await
@@ -635,5 +652,72 @@ async fn a_ref_with_the_owner_fields_and_one_without_reach_the_same_stream() {
             call(&case.ext, "ReadRecords", read(owned)).await.unwrap();
         assert_eq!(texts(&plain), ["1", "2", "3"]);
         assert_eq!(plain, with_owner);
+    }
+}
+
+#[tokio::test]
+async fn an_auto_close_ends_a_long_poll_and_refuses_later_appends() {
+    for case in cases().await {
+        let created = case.create_auto_close(millis(400)).await.unwrap();
+        assert!(created.created);
+        assert!(case.create_auto_close(millis(400)).await.is_ok());
+        let error = case.create_auto_close(millis(900)).await.unwrap_err();
+        assert_eq!(reason(&error), "stream_already_exists");
+        let described = case.describe().await.unwrap();
+        assert_eq!(described.status, StreamStatus::Open as i32);
+        assert_eq!(described.auto_close, millis(400));
+
+        let first = case
+            .append(client(1), 1, vec![record("", "1")])
+            .await
+            .unwrap();
+        // The read waits for new Records and ends with the close Record when the period
+        // passes, well before its own wait.
+        let started = Instant::now();
+        let read = case
+            .read(ReadRecordsRequest {
+                from_offset: first.last_offset + 1,
+                wait: millis(5000),
+                ..Default::default()
+            })
+            .await
+            .unwrap();
+        let waited = started.elapsed();
+        assert!(waited >= Duration::from_millis(300), "{waited:?}");
+        assert!(waited < Duration::from_secs(3), "{waited:?}");
+        assert_eq!(texts(&read), ["<close>"]);
+        assert!(read.done);
+        assert!(read.records[0].producer.is_none());
+
+        let error = case
+            .append(client(1), 2, vec![record("", "2")])
+            .await
+            .unwrap_err();
+        assert_eq!(reason(&error), "stream_closed");
+        let described = case.describe().await.unwrap();
+        assert_eq!(described.status, StreamStatus::Closed as i32);
+        let all = case.read(ReadRecordsRequest::default()).await.unwrap();
+        assert_eq!(texts(&all), ["1", "<close>"]);
+    }
+}
+
+#[tokio::test]
+async fn a_describe_or_a_read_applies_a_due_auto_close() {
+    for case in cases().await {
+        case.create_auto_close(millis(200)).await.unwrap();
+        tokio::time::sleep(Duration::from_millis(300)).await;
+        let described = case.describe().await.unwrap();
+        assert_eq!(described.status, StreamStatus::Closed as i32);
+        assert!(described.last_offset > 0);
+        let read = case.read(ReadRecordsRequest::default()).await.unwrap();
+        assert_eq!(texts(&read), ["<close>"]);
+        assert_eq!(read.records[0].offset, described.last_offset);
+    }
+    for case in cases().await {
+        case.create_auto_close(millis(200)).await.unwrap();
+        tokio::time::sleep(Duration::from_millis(300)).await;
+        let read = case.read(ReadRecordsRequest::default()).await.unwrap();
+        assert_eq!(texts(&read), ["<close>"]);
+        assert!(read.done);
     }
 }

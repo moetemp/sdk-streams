@@ -600,3 +600,28 @@ async fn calls_after_a_drain_still_answer() {
         run.drain().await;
     }
 }
+
+#[tokio::test]
+async fn a_workflow_create_with_an_auto_close_closes_its_quiet_stream() {
+    for run in runs().await {
+        let create = WorkflowCall {
+            call: Some(Call::Create(CreateStreamRequest {
+                stream_id: run.stream.clone(),
+                auto_close: Some(prost_types::Duration {
+                    seconds: 0,
+                    nanos: 300_000_000,
+                }),
+                ..Default::default()
+            })),
+            when_run_closes: false,
+        };
+        run.activation(vec![create, run.publish(&["a"])]).unwrap();
+        run.complete(&run.task(3, 1), true).await.unwrap();
+        assert_eq!(run.visible().await, (vec!["a".to_string()], false));
+        tokio::time::sleep(Duration::from_millis(400)).await;
+        // A later flush finds the Stream closed and drops its Records, as for any close.
+        run.activation(vec![run.publish(&["late"])]).unwrap();
+        run.complete(&run.task(7, 1).after(3), true).await.unwrap();
+        assert_eq!(run.visible().await, (vec!["a".to_string()], true));
+    }
+}

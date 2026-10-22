@@ -169,7 +169,8 @@ fn previous_completed(task: &WorkflowTaskCompletionInfo) -> Option<WorkflowTaskE
 /// The calls of one Stream in one flush, in the order Workflow code made them.
 #[derive(Default)]
 struct StreamCalls {
-    creates: Vec<Option<prost_types::Duration>>,
+    /// The Retention and the auto close of each create.
+    creates: Vec<(Option<Duration>, Option<Duration>)>,
     records: Vec<AppendRecord>,
 }
 
@@ -261,7 +262,9 @@ impl StreamService {
                         order.push(create.stream_id.clone());
                     }
                     let entry = streams.entry(create.stream_id).or_default();
-                    entry.creates.push(create.retention);
+                    entry
+                        .creates
+                        .push((duration(create.retention), duration(create.auto_close)));
                 }
                 Some(Call::Append(append)) => {
                     let id = append.stream.map(|s| s.id).unwrap_or_default();
@@ -291,6 +294,13 @@ impl StreamService {
         for calls in streams.values() {
             if !calls.creates.is_empty() {
                 needed = needed.union(Capabilities::SAFETY_TTL);
+            }
+            if calls
+                .creates
+                .iter()
+                .any(|(_, auto_close)| auto_close.is_some())
+            {
+                needed = needed.union(Capabilities::AUTO_CLOSE);
             }
             if !calls.records.is_empty() {
                 needed = needed.union(Capabilities::PRODUCER_FENCE.union(Capabilities::WITHDRAWAL));
@@ -362,12 +372,13 @@ impl StreamService {
             withdraw_run,
             supersession: &bytes,
         };
-        for retention in calls.creates {
+        for (retention, auto_close) in calls.creates {
             let created = retried(deadline, || {
                 store.create(
                     namespace,
                     id,
-                    duration(retention),
+                    retention,
+                    auto_close,
                     Owner::Workflow,
                     &withdrawal,
                 )
@@ -380,7 +391,8 @@ impl StreamService {
                 CreateOutcome::Conflict => warn!(
                     stream = id,
                     retention = ?created.retention,
-                    "The Stream exists with another Retention, which stays"
+                    auto_close = ?created.auto_close,
+                    "The Stream exists with another Retention or auto close, which stays"
                 ),
                 // A replay after a cache miss sends the run's creates again, also for the
                 // Streams the run closed since, so this is no warning.

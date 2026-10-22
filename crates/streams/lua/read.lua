@@ -2,10 +2,10 @@
 -- step, so the entries and the state agree.
 --
 -- Answers {state, server time, entries}. The state is the meta fields v, closed, close_id,
--- newest, trimmed, ret and exp, with false for a missing one.
+-- newest, trimmed, ret, exp, ac and la, with false for a missing one.
 local meta, log = KEYS[1], KEYS[2]
 local state = redis.call('HMGET', meta, 'v', 'closed', 'close_id', 'newest', 'trimmed', 'ret',
-  'exp')
+  'exp', 'ac', 'la')
 local entries = {}
 if tonumber(ARGV[2]) > 0 then
   entries = redis.call('XRANGE', log, ARGV[1], '+', 'COUNT', ARGV[2])
