@@ -12,6 +12,7 @@ use temporalio_common::protos::temporal::api::common::v1::Payload;
 use temporalio_sdk_core::{ExtensionError, WorkerExtension};
 use temporalio_streams::{
     MemoryStreamExtension, RedisStreamExtension,
+    epoch::withdraws,
     ids::{activity_producer_id, client_producer_id},
     proto::{
         AppendRecord, AppendRecordsRequest, AppendRecordsResponse, CloseStreamRequest,
@@ -776,5 +777,87 @@ async fn a_create_answer_names_the_backend_and_the_store_never_reads_it() {
     for case in cases().await {
         let created = case.create(None).await.unwrap();
         assert_eq!(created.stream.unwrap().backend, "");
+    }
+}
+
+/// The Local Activity Producer of a Workflow call in run `run`, as S108 writes it.
+fn local_activity(run: &str) -> Producer {
+    Producer {
+        kind: ProducerKind::LocalActivity as i32,
+        id: temporalio_streams::ids::local_activity_producer_id(run, "call-1"),
+        epoch: Some(ProducerEpoch {
+            task_started_event_id: 3,
+            task_attempt: 1,
+            task_started_time: Some(Timestamp {
+                seconds: 100,
+                nanos: 0,
+            }),
+            attempt: 1,
+            ..Default::default()
+        }),
+        run_id: run.to_string(),
+    }
+}
+
+fn workflow_owner(run: &str) -> Producer {
+    Producer {
+        kind: ProducerKind::Workflow as i32,
+        id: temporalio_streams::ids::workflow_producer_id(run),
+        run_id: run.to_string(),
+        ..Default::default()
+    }
+}
+
+#[tokio::test]
+async fn a_retry_run_s_local_activity_calls_withdraw_the_previous_run() {
+    for case in cases().await {
+        let (previous, retry) = (format!("{}-r1", case.stream), format!("{}-r2", case.stream));
+        let create = |run: &str, withdraw_run: &str| CreateStreamRequest {
+            namespace: case.namespace.clone(),
+            stream_id: case.stream.clone(),
+            withdraw_run: withdraw_run.to_string(),
+            owner: Some(workflow_owner(run)),
+            ..Default::default()
+        };
+        let append = |run: &str, withdraw_run: &str, text: &str| AppendRecordsRequest {
+            namespace: case.namespace.clone(),
+            stream: case.stream(),
+            producer: Some(local_activity(run)),
+            sequence: 1,
+            records: vec![record("", text)],
+            withdraw_run: withdraw_run.to_string(),
+            ..Default::default()
+        };
+        let _: CreateStreamResponse = call(&case.ext, "CreateStream", create(&previous, ""))
+            .await
+            .unwrap();
+        let _: AppendRecordsResponse =
+            call(&case.ext, "AppendRecords", append(&previous, "", "old"))
+                .await
+                .unwrap();
+        // The retry run's first create withdraws the previous run.
+        let _: CreateStreamResponse = call(&case.ext, "CreateStream", create(&retry, &previous))
+            .await
+            .unwrap();
+        let first: AppendRecordsResponse =
+            call(&case.ext, "AppendRecords", append(&retry, &previous, "new"))
+                .await
+                .unwrap();
+        // A retried Local Activity sends the same batch and gets its first answer.
+        let again: AppendRecordsResponse =
+            call(&case.ext, "AppendRecords", append(&retry, &previous, "new"))
+                .await
+                .unwrap();
+        assert_eq!(
+            (again.first_offset, again.last_offset),
+            (first.first_offset, first.last_offset)
+        );
+        assert!(first.last_offset > 0);
+        let read = case.read(ReadRecordsRequest::default()).await.unwrap();
+        assert_eq!(texts(&read), ["old", "<superseded>", "new"]);
+        let superseded = read.records[1].supersession.as_ref().unwrap();
+        assert_eq!(superseded.withdraw_run, previous);
+        assert!(withdraws(superseded, &read.records[0]));
+        assert!(!withdraws(superseded, &read.records[2]));
     }
 }

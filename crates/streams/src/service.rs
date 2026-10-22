@@ -57,6 +57,16 @@ fn stream_id(stream: Option<&StreamRef>) -> StreamResult<&str> {
     Ok(id)
 }
 
+/// The `Superseded` facts of a create that withdraws a retry run's previous run. It has no epoch,
+/// so a Reader withdraws only that run's Records.
+fn run_supersession(owner: Option<&Producer>, withdraw_run: &str) -> Vec<u8> {
+    let producer = Producer {
+        epoch: None,
+        ..owner.cloned().unwrap_or_default()
+    };
+    supersession(&producer, None, &[], withdraw_run)
+}
+
 /// Checks a Producer that writes outside Workflow code.
 fn outside_producer(producer: Option<&Producer>) -> StreamResult<&Producer> {
     let producer = producer.ok_or_else(|| StreamError::invalid("The request has no Producer"))?;
@@ -89,6 +99,26 @@ impl StreamService {
                 .capabilities()
                 .require(Capabilities::AUTO_CLOSE)?;
         }
+        // A Workflow's call that runs outside Workflow code, such as a Local Activity, names the
+        // owning run, so the Stream keeps the safety TTL of a Workflow-owned one.
+        let owner = match &request.owner {
+            Some(_) => {
+                self.store
+                    .capabilities()
+                    .require(Capabilities::SAFETY_TTL)?;
+                Owner::Workflow
+            }
+            None => Owner::Client,
+        };
+        if !request.withdraw_run.is_empty() {
+            self.store.capabilities().require(Capabilities::RUN_FENCE)?;
+        }
+        let bytes = run_supersession(request.owner.as_ref(), &request.withdraw_run);
+        let withdrawal = Withdrawal {
+            withdraw_run: &request.withdraw_run,
+            supersession: &bytes,
+            ..Default::default()
+        };
         let created = self
             .store
             .create(
@@ -96,10 +126,13 @@ impl StreamService {
                 &stream,
                 duration(request.retention),
                 auto_close,
-                Owner::Client,
-                &Withdrawal::default(),
+                owner,
+                &withdrawal,
             )
             .await?;
+        if created.flagged {
+            self.metrics.superseded();
+        }
         let status = match created.outcome {
             CreateOutcome::Created | CreateOutcome::Exists => StreamStatus::Open,
             CreateOutcome::Closed => StreamStatus::Closed,
@@ -139,13 +172,17 @@ impl StreamService {
         self.store
             .capabilities()
             .require(Capabilities::PRODUCER_FENCE.union(Capabilities::WITHDRAWAL))?;
+        if !request.withdraw_run.is_empty() {
+            self.store.capabilities().require(Capabilities::RUN_FENCE)?;
+        }
         let records = data_records(producer, request.records)?;
-        let bytes = supersession(producer, None, &[], "");
+        let bytes = supersession(producer, None, &[], &request.withdraw_run);
         let batch = Batch {
             producer,
             sequence: request.sequence,
             records: &records,
             withdrawal: Withdrawal {
+                withdraw_run: &request.withdraw_run,
                 supersession: &bytes,
                 ..Default::default()
             },

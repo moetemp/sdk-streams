@@ -98,3 +98,7 @@
 - The Store calls that write (`create`, `append`, `close`) take the Stream's `StreamRef`, so the
   native Store sends the owner fields on every call. The server finds a Workflow's Stream by
   them. Redis and memory key on the id.
+- The service `CreateStream` and `AppendRecords` take a Workflow's calls from outside Workflow
+  code, such as S108's Local Activities. `CreateStreamRequest.owner` (6) makes the Stream
+  Workflow-owned, and `withdraw_run` on both withdraws a retry run's previous run. The proto
+  also has `close_with_run` (7) and `ref` (8), which only the server reads.
