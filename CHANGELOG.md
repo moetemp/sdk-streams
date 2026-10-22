@@ -76,3 +76,7 @@
   `OpenWriterRequest` reserves `batch_interval` (4) and `max_buffered_records` (7). An SDK
   writes with `WriteRecords` and buffers on its own. `CloseWriter` and `CloseWriters` now only
   drop the writers.
+- The service `CreateStream` and `AppendRecords` take a Workflow's calls from outside Workflow
+  code, such as S108's Local Activities. `CreateStreamRequest.owner` (6) makes the Stream
+  Workflow-owned, and `withdraw_run` on both withdraws a retry run's previous run. The proto
+  also has `close_with_run` (7) and `ref` (8), which only the server reads.
