@@ -127,6 +127,14 @@ message CreateStreamRequest {
     // TTL. The Store applies it on the next access, so no call sees the Stream open after the
     // period. UNIMPLEMENTED (detail stream_unsupported) on a Store that can't.
     google.protobuf.Duration auto_close = 5;
+    // The Workflow run that owns the Stream. Workflow kind, with its run_id and epoch.
+    Producer owner = 6;
+    // Close the Stream with the result or the failure of the owner's run chain when the chain
+    // closes, terminate and timeout included. Needs owner, and ref with the owner fields.
+    bool close_with_run = 7;
+    // The ref of the Stream. A Workflow-owned Stream sets workflow_id and
+    // first_execution_run_id, which name the owner's run chain.
+    StreamRef ref = 8;
 }
 
 enum StreamStatus {
