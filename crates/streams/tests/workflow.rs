@@ -527,7 +527,7 @@ async fn a_stale_task_fails_on_the_fence() {
         let error = run.complete(&run.task(5, 1), true).await.unwrap_err();
         assert!(error.contains("stream_fenced"), "{error}");
         // The task failure names the Stream and the Topic, which lang can't add.
-        let named = format!("(Stream {}, Topic \"turns\")", run.stream);
+        let named = format!("Stream {}, Topic \"turns\": ", run.stream);
         assert!(error.contains(&named), "{error}");
         assert_eq!(run.visible().await.0, ["new"]);
     }

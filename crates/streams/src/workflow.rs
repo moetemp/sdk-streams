@@ -430,6 +430,15 @@ where
     }
 }
 
+/// Names the Stream and the Topic in a flush error. Lang can't add them to the Workflow Task
+/// failure, since the flush runs in Core.
+fn named(error: StreamError, id: &str, topic: &str) -> StreamError {
+    StreamError::new(
+        error.reason,
+        format!("Stream {id}, Topic {topic:?}: {}", error.message),
+    )
+}
+
 /// The Topic of a batch's first Record, for an error message.
 fn batch_topic(records: &[Vec<u8>]) -> String {
     use prost::Message;
@@ -609,8 +618,16 @@ impl StreamService {
         let store: &dyn Store = durable.as_deref().unwrap_or(self.store.as_ref());
         // All checks come before the first write, so a Store that lacks a capability fails the
         // task with nothing written.
-        let mut needed = Capabilities::default();
-        for calls in streams.values() {
+        let mut global = Capabilities::default();
+        if !closes.is_empty() {
+            global = global.union(Capabilities::CLOSE);
+        }
+        if options.durable_writes > 0 {
+            global = global.union(Capabilities::REPLICA_WAIT);
+        }
+        for id in &order {
+            let calls = &streams[id];
+            let mut needed = global;
             if !calls.creates.is_empty() {
                 needed = needed.union(Capabilities::SAFETY_TTL);
             }
@@ -624,19 +641,22 @@ impl StreamService {
             if !calls.records.is_empty() || calls.settle {
                 needed = needed.union(Capabilities::PRODUCER_FENCE.union(Capabilities::WITHDRAWAL));
             }
+            if !withdraw_run.is_empty() {
+                needed = needed.union(Capabilities::RUN_FENCE);
+            }
+            if let Err(error) = store.capabilities().require(needed) {
+                self.metrics.flush_failed();
+                let topic = calls.records.first().map_or("", |r| r.topic.as_str());
+                return Err(named(error, id, topic));
+            }
         }
-        if !withdraw_run.is_empty() && !streams.is_empty() {
-            needed = needed.union(Capabilities::RUN_FENCE);
-        }
-        if !closes.is_empty() {
-            needed = needed.union(Capabilities::CLOSE);
-        }
-        if options.durable_writes > 0 {
-            needed = needed.union(Capabilities::REPLICA_WAIT);
-        }
-        if let Err(error) = store.capabilities().require(needed) {
+        if let Err(error) = store.capabilities().require(global) {
             self.metrics.flush_failed();
-            return Err(error);
+            let id = closes
+                .first()
+                .and_then(|(close, _)| close.stream.as_ref())
+                .map_or("", |s| s.id.as_str());
+            return Err(named(error, id, ""));
         }
         let deadline = task.deadline;
         let flush = async {
@@ -652,7 +672,9 @@ impl StreamService {
             }
             if options.durable_writes > 0 {
                 for id in &order {
-                    Self::wait_durable(store, task.namespace, id, options).await?;
+                    Self::wait_durable(store, task.namespace, id, options)
+                        .await
+                        .map_err(|error| named(error, id, ""))?;
                 }
             }
             Ok::<_, StreamError>(written)
@@ -800,14 +822,7 @@ impl StreamService {
                     );
                     break;
                 }
-                // Lang can't add the Stream to the task failure, since the flush runs in Core.
-                Err(error) => {
-                    let topic = batch_topic(records);
-                    return Err(StreamError::new(
-                        error.reason,
-                        format!("{} (Stream {id}, Topic {topic:?})", error.message),
-                    ));
-                }
+                Err(error) => return Err(named(error, id, &batch_topic(records))),
             }
         }
         Ok((written, first + batches.len() as i64))

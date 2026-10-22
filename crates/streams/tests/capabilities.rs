@@ -439,6 +439,11 @@ async fn durable_writes_on_the_memory_store_fail_by_name() {
         .await
         .unwrap_err();
     assert!(error.ends_with("replica_wait"), "{error}");
+    // The Workflow Task failure names the Stream and the Topic, which lang can't add.
+    assert!(
+        error.contains(&format!("Stream {}, Topic \"\": ", case.stream)),
+        "{error}"
+    );
 }
 
 #[tokio::test]
