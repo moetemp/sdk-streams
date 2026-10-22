@@ -61,6 +61,9 @@ struct RunBuffer {
     /// A Local Activity flush that failed. The run's Workflow Task fails with it, so the
     /// retry withdraws what the flush wrote.
     failed: Option<StreamError>,
+    /// Tells this buffer apart from the one a failed task or an eviction left behind, so a
+    /// write that ends after either of them leaves nothing in the new buffer.
+    id: u64,
     /// One write of the run at a time, so a Local Activity that starts while another one's
     /// flush runs waits for it, and the batch numbers of one task stay in order.
     writing: Arc<tokio::sync::Mutex<()>>,
@@ -80,6 +83,7 @@ struct EarlyWrite {
 #[derive(Default)]
 pub(crate) struct WorkflowRuns {
     runs: Mutex<HashMap<String, RunBuffer>>,
+    next_id: std::sync::atomic::AtomicU64,
     closes: TaskTracker,
 }
 
@@ -105,6 +109,8 @@ struct WriteTask<'a> {
 
 /// What one write takes from a run's buffer.
 struct Taken {
+    /// The id of the buffer it came from.
+    id: u64,
     calls: Vec<WorkflowCall>,
     withdraw_run: String,
     chain_continues: bool,
@@ -136,13 +142,22 @@ impl WorkflowRuns {
             }
         }
         let mut runs = self.runs.lock();
-        let run = runs.entry(request.run_id).or_default();
+        let run = runs.entry(request.run_id).or_insert_with(|| RunBuffer {
+            id: self.fresh_id(),
+            ..Default::default()
+        });
         if !request.withdraw_run.is_empty() {
             run.withdraw_run = request.withdraw_run;
         }
         run.chain_continues = request.chain_continues;
         run.calls.extend(request.calls);
         Ok(())
+    }
+
+    fn fresh_id(&self) -> u64 {
+        self.next_id
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+            + 1
     }
 
     /// The lock that orders the run's writes, or `None` for a run with no buffer.
@@ -192,6 +207,7 @@ impl WorkflowRuns {
                 return Ok(None);
             }
             return Ok(Some(Taken {
+                id: run.id,
                 calls,
                 withdraw_run: run.withdraw_run.clone(),
                 chain_continues: run.chain_continues,
@@ -216,6 +232,7 @@ impl WorkflowRuns {
                 .cloned(),
         );
         Ok(Some(Taken {
+            id: run.id,
             calls,
             withdraw_run: run.withdraw_run.clone(),
             chain_continues: run.chain_continues,
@@ -230,14 +247,16 @@ impl WorkflowRuns {
     fn keep(
         &self,
         run_id: &str,
+        id: u64,
         key: &str,
         early: Vec<WorkflowCall>,
         next: HashMap<String, i64>,
         closes: Vec<(CloseStreamRequest, bool)>,
     ) {
         let mut runs = self.runs.lock();
-        // An eviction while the write ran drops the run, and what it left goes too.
-        let Some(run) = runs.get_mut(run_id) else {
+        // A failed task or an eviction while the write ran drops what it left. The retry runs
+        // the Activations again and buffers the same calls.
+        let Some(run) = runs.get_mut(run_id).filter(|run| run.id == id) else {
             return;
         };
         run.closes.extend(closes);
@@ -251,8 +270,8 @@ impl WorkflowRuns {
     }
 
     /// Fails the run's next completion, after a Local Activity flush failed.
-    fn fail(&self, run_id: &str, error: StreamError) {
-        if let Some(run) = self.runs.lock().get_mut(run_id) {
+    fn fail(&self, run_id: &str, id: u64, error: StreamError) {
+        if let Some(run) = self.runs.lock().get_mut(run_id).filter(|run| run.id == id) {
             run.failed = Some(error);
         }
     }
@@ -267,7 +286,9 @@ impl WorkflowRuns {
     /// Drops what a failed task buffered and wrote early. Its retry runs the Activations
     /// again, and its writes withdraw what this task wrote.
     pub(crate) fn task_failed(&self, task: &WorkflowTaskFailedInfo) {
+        let id = self.fresh_id();
         if let Some(run) = self.runs.lock().get_mut(&task.run_id) {
+            run.id = id;
             run.calls.clear();
             run.closes.clear();
             run.early = None;
@@ -406,6 +427,16 @@ where
     }
 }
 
+/// The Topic of a batch's first Record, for an error message.
+fn batch_topic(records: &[Vec<u8>]) -> String {
+    use prost::Message;
+    records
+        .first()
+        .and_then(|bytes| crate::proto::StreamRecord::decode(bytes.as_slice()).ok())
+        .map(|record| record.topic)
+        .unwrap_or_default()
+}
+
 /// Whether a Workflow flush drops its Records for this refusal instead of failing the task. A
 /// raise at the flush would differ between a live run and its replay.
 fn dropped_for(reason: Reason) -> bool {
@@ -420,10 +451,21 @@ impl StreamService {
         task: &WorkflowTaskCompletionInfo,
         options: FlushOptions,
     ) -> StreamResult<()> {
+        // A Local Activity heartbeat completion comes late in the task, with little time left,
+        // so the margin is at most a quarter of what is left.
+        let left = Instant::from_std(task.deadline).saturating_duration_since(Instant::now());
+        let deadline = Instant::now() + left - DEADLINE_MARGIN.min(left / 4);
         let Some(writing) = runs.writing(&task.run_id) else {
             return Ok(());
         };
-        let _writing = writing.lock().await;
+        // A Local Activity flush may hold the lock, so the wait for it counts against the
+        // task's deadline too.
+        let Ok(_writing) = tokio::time::timeout_at(deadline, writing.lock()).await else {
+            self.metrics.flush_failed();
+            return Err(StreamError::storage(
+                "A Local Activity flush of the run did not end before the Workflow Task deadline",
+            ));
+        };
         // Without the started time, a dropped speculative task and the task that reuses its
         // started event id would get one epoch, and the second batch would count as a resend.
         if task.started_time.is_none() {
@@ -437,10 +479,6 @@ impl StreamService {
         let Some(taken) = runs.take(&task.run_id, &key, true)? else {
             return Ok(());
         };
-        // A Local Activity heartbeat completion comes late in the task, with little time left,
-        // so the margin is at most a quarter of what is left.
-        let left = Instant::from_std(task.deadline).saturating_duration_since(Instant::now());
-        let deadline = Instant::now() + left - DEADLINE_MARGIN.min(left / 4);
         let completed = previous_completed(task);
         let write = WriteTask {
             namespace: &task.namespace,
@@ -474,26 +512,32 @@ impl StreamService {
                 "The Workflow Task has no started time, which the Stream epoch needs",
             ));
         }
+        let timeout = duration(request.timeout).unwrap_or(LOCAL_FLUSH_TIMEOUT);
+        let deadline = Instant::now() + timeout;
         let Some(writing) = runs.writing(&request.run_id) else {
             return Ok(0);
         };
-        let _writing = writing.lock().await;
+        let Ok(_writing) = tokio::time::timeout_at(deadline, writing.lock()).await else {
+            return Err(StreamError::storage(
+                "Another flush of the run did not end before this flush's timeout",
+            ));
+        };
         let key = task_key(&epoch);
         let Some(taken) = runs.take(&request.run_id, &key, false)? else {
             return Ok(0);
         };
-        let timeout = duration(request.timeout).unwrap_or(LOCAL_FLUSH_TIMEOUT);
+        let id = taken.id;
         let write = WriteTask {
             namespace: &request.namespace,
             run_id: &request.run_id,
             producer: producer(&request.run_id, &epoch),
             key,
             facts: None,
-            deadline: Instant::now() + timeout,
+            deadline,
         };
         let result = self.write(runs, write, taken, options).await;
         if let Err(error) = &result {
-            runs.fail(&request.run_id, error.clone());
+            runs.fail(&request.run_id, id, error.clone());
         }
         result
     }
@@ -509,6 +553,7 @@ impl StreamService {
     ) -> StreamResult<usize> {
         let started = std::time::Instant::now();
         let Taken {
+            id: buffer,
             calls,
             withdraw_run,
             chain_continues,
@@ -617,7 +662,7 @@ impl StreamService {
         };
         self.metrics.hook_latency(started.elapsed());
         match &result {
-            Ok(_) => runs.keep(task.run_id, &task.key, early, next, closes),
+            Ok(_) => runs.keep(task.run_id, buffer, &task.key, early, next, closes),
             Err(error) => {
                 self.metrics.flush_failed();
                 warn!(run_id = %task.run_id, %error, "A Workflow flush failed the Workflow Task");
@@ -643,7 +688,17 @@ impl StreamService {
             Some((completed, failed)) => (completed.as_ref(), *failed),
             None => (None, &[][..]),
         };
-        let bytes = supersession(producer, completed, failed, withdraw_run);
+        // A deferred batch can still flag a retry run's withdrawal. Its item has no epoch, so a
+        // Reader withdraws only the previous run, not every earlier task of this run.
+        let bytes = if task.facts.is_some() {
+            supersession(producer, completed, failed, withdraw_run)
+        } else {
+            let bare = Producer {
+                epoch: None,
+                ..producer.clone()
+            };
+            supersession(&bare, None, &[], withdraw_run)
+        };
         let withdrawal = Withdrawal {
             previous_completed: completed,
             failed_tasks: failed,
@@ -726,7 +781,14 @@ impl StreamService {
                     );
                     break;
                 }
-                Err(error) => return Err(error),
+                // Lang can't add the Stream to the task failure, since the flush runs in Core.
+                Err(error) => {
+                    let topic = batch_topic(records);
+                    return Err(StreamError::new(
+                        error.reason,
+                        format!("{} (Stream {id}, Topic {topic:?})", error.message),
+                    ));
+                }
             }
         }
         Ok((written, first + batches.len() as i64))

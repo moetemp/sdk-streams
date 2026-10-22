@@ -920,7 +920,10 @@ async fn a_deferred_workflow_batch_withdraws_nothing_until_its_task_sends_the_fa
         assert!(settled.flagged);
         assert_eq!(target.visible().await, ["B"]);
         assert_ne!(target.meta("lf|run-d").await, facts);
+    }
+}
 
+#[tokio::test]
 async fn an_auto_close_period_at_the_edges_neither_overflows_nor_rounds_to_zero() {
     for target in stores().await {
         let none = Withdrawal::default();
