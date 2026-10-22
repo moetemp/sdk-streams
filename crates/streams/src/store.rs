@@ -1,10 +1,7 @@
 //! What every Store gives the Stream service: the Redis Store in production and the memory
 //! Store in tests. Both keep the same rules, which the Lua scripts state.
 
-use crate::{
-    Reason, StreamError, StreamResult,
-    proto::{Producer, WorkflowTaskEpoch},
-};
+use crate::{Reason, StreamError, StreamResult, proto::Producer};
 use std::time::Duration;
 use tokio::time::Instant;
 
@@ -57,10 +54,6 @@ pub struct Created {
 /// The withdrawal facts of a Workflow batch or close, and the `Superseded` item they make.
 #[derive(Debug, Clone, Default)]
 pub struct Withdrawal<'a> {
-    /// The previous completed Workflow Task of the run.
-    pub previous_completed: Option<&'a WorkflowTaskEpoch>,
-    /// The started event ids of the run's failed Workflow Tasks.
-    pub failed_tasks: &'a [i64],
     /// A retry run's previous run.
     pub withdraw_run: &'a str,
     /// The encoded Supersession, which the log keeps when the batch withdraws something.
@@ -99,8 +92,6 @@ pub struct Closed {
     pub offset: i64,
     /// Someone closed the Stream before.
     pub already: bool,
-    /// The close withdrew earlier Records.
-    pub flagged: bool,
 }
 
 /// The state of a Stream as one read saw it.
@@ -181,8 +172,8 @@ pub struct Capabilities(u8);
 impl Capabilities {
     /// Each append checks the Producer's epoch and its last `sequence` before it writes.
     pub const PRODUCER_FENCE: Self = Self(1);
-    /// Each append flags the first batch of a new epoch that withdraws, keeps the run's task
-    /// index and refuses a Local Activity of a withdrawn task.
+    /// Each append flags the first batch of a Producer's newer epoch, which withdraws the
+    /// Records of its earlier ones.
     pub const WITHDRAWAL: Self = Self(1 << 1);
     /// A retry run's first write withdraws the previous run and fences its Producers.
     pub const RUN_FENCE: Self = Self(1 << 2);
@@ -308,7 +299,6 @@ pub trait Store: Send + Sync + 'static {
         _stream_id: &str,
         _producer: &Producer,
         _record: &[u8],
-        _withdrawal: &Withdrawal<'_>,
     ) -> StreamResult<Closed> {
         Err(unsupported("close"))
     }

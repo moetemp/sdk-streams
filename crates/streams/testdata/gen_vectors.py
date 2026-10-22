@@ -144,8 +144,6 @@ def fields():
         "fence": f"e|3|{producer}",
         "dedupe": f"d|3|{producer}",
         "holds": f"h|3|{producer}",
-        "task_index": f"ti|{part(run)}",
-        "withdrawn_tasks": f"wt|{part(run)}",
         "run_wrote": f"run|{part(run)}",
         "withdrawn_run": f"wr|{part(run)}",
     }

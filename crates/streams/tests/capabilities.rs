@@ -98,10 +98,9 @@ impl Store for Masked {
         stream_id: &str,
         producer: &Producer,
         record: &[u8],
-        withdrawal: &Withdrawal<'_>,
     ) -> StreamResult<Closed> {
         self.inner
-            .close(namespace, stream_id, producer, record, withdrawal)
+            .close(namespace, stream_id, producer, record)
             .await
     }
 

@@ -11,10 +11,10 @@ pub use crate::store::{
 };
 use crate::{
     StreamError, StreamResult,
-    epoch::{epoch_key, task_key, task_of},
+    epoch::epoch_key,
     ids::{StreamKeys, encode_part},
     offset::{entry_id_of_offset, offset_of_entry_id},
-    proto::{Producer, ProducerKind},
+    proto::Producer,
     store::{Capabilities, Store},
 };
 use conn::{BlockingPool, Shared};
@@ -214,11 +214,6 @@ impl RedisStore {
         let keys = self.keys(namespace, stream_id);
         let producer = batch.producer;
         let epoch = producer.epoch.unwrap_or_default();
-        let kind = ProducerKind::try_from(producer.kind).unwrap_or_default();
-        let task = match kind {
-            ProducerKind::Workflow | ProducerKind::LocalActivity => task_key(&task_of(&epoch)),
-            _ => String::new(),
-        };
         let withdrawal = &batch.withdrawal;
         let mut invocation = scripts::APPEND_SCRIPT.prepare_invoke();
         invocation
@@ -229,10 +224,7 @@ impl RedisStore {
             .arg(&producer.id)
             .arg(encode_run(&producer.run_id))
             .arg(epoch_key(&epoch))
-            .arg(task)
             .arg(batch.sequence)
-            .arg(completed_arg(withdrawal))
-            .arg(failed_list(withdrawal.failed_tasks))
             .arg(encode_run(withdrawal.withdraw_run))
             .arg(withdrawal.supersession)
             .arg(millis(self.safety_ttl))
@@ -263,14 +255,9 @@ impl RedisStore {
         stream_id: &str,
         producer: &Producer,
         record: &[u8],
-        withdrawal: &Withdrawal<'_>,
     ) -> StreamResult<Closed> {
         let keys = self.keys(namespace, stream_id);
         let epoch = producer.epoch.unwrap_or_default();
-        let task = match ProducerKind::try_from(producer.kind).unwrap_or_default() {
-            ProducerKind::Workflow | ProducerKind::LocalActivity => task_key(&task_of(&epoch)),
-            _ => String::new(),
-        };
         let reply: Value = scripts::CLOSE_SCRIPT
             .key(keys.meta())
             .key(keys.log())
@@ -279,25 +266,15 @@ impl RedisStore {
             .arg(&producer.id)
             .arg(encode_run(&producer.run_id))
             .arg(epoch_key(&epoch))
-            .arg(task)
-            .arg(
-                withdrawal
-                    .previous_completed
-                    .map(task_key)
-                    .unwrap_or_default(),
-            )
-            .arg(failed_list(withdrawal.failed_tasks))
-            .arg(withdrawal.supersession)
             .arg(millis(TOMBSTONE))
             .arg(record)
             .invoke_async(&mut self.shared.clone())
             .await
             .mapped()?;
-        let [outcome, id, flag] = strings::<3>(reply, "close")?;
+        let [outcome, id] = strings::<2>(reply, "close")?;
         Ok(Closed {
             offset: offset_of_entry_id(&id)?,
             already: outcome == "already",
-            flagged: flag == "1",
         })
     }
 
@@ -408,9 +385,8 @@ impl Store for RedisStore {
         stream_id: &str,
         producer: &Producer,
         record: &[u8],
-        withdrawal: &Withdrawal<'_>,
     ) -> StreamResult<Closed> {
-        RedisStore::close(self, namespace, stream_id, producer, record, withdrawal).await
+        RedisStore::close(self, namespace, stream_id, producer, record).await
     }
 
     async fn read(
@@ -444,22 +420,6 @@ fn encode_run(run_id: &str) -> String {
     } else {
         encode_part(run_id)
     }
-}
-
-/// The previous completed task key of an append.
-fn completed_arg(withdrawal: &Withdrawal<'_>) -> String {
-    withdrawal
-        .previous_completed
-        .map(task_key)
-        .unwrap_or_default()
-}
-
-fn failed_list(failed: &[i64]) -> String {
-    failed
-        .iter()
-        .map(i64::to_string)
-        .collect::<Vec<_>>()
-        .join(" ")
 }
 
 fn bad_reply(call: &str, reply: impl std::fmt::Debug) -> StreamError {

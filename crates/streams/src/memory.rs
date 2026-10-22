@@ -4,10 +4,10 @@
 
 use crate::{
     Reason, StreamError, StreamResult,
-    epoch::{epoch_key, task_key, task_of},
+    epoch::epoch_key,
     ids::{StreamKeys, encode_part},
     offset::{entry_id_of_offset, offset_of_entry_id},
-    proto::{Producer, ProducerKind},
+    proto::Producer,
     store::{
         Appended, Batch, Capabilities, Closed, CreateOutcome, Created, Entry, FORMAT_VERSION,
         Owner, Store, StreamState, TOMBSTONE, Withdrawal,
@@ -85,49 +85,6 @@ fn parse_id(text: &str) -> Option<(u64, u64)> {
     Some((ms.parse().ok()?, seq.parse().ok()?))
 }
 
-fn words(text: Option<&String>) -> Vec<String> {
-    text.map(|text| text.split_whitespace().map(str::to_string).collect())
-        .unwrap_or_default()
-}
-
-fn started(task_key: &str) -> i64 {
-    i64::from_str_radix(&task_key[..16], 16).unwrap_or(0)
-}
-
-/// Whether a task key at c's started id is a lower attempt than c, as `below_completed` in
-/// `lib.lua`.
-fn below_completed(key: &str, c: &str) -> bool {
-    if &c[17..25] == "00000000" {
-        return key[26..] < c[26..];
-    }
-    key < c
-}
-
-/// The Workflow withdrawal rule over a task index, as `withdraw_tasks` in `lib.lua`.
-fn withdraw_tasks(
-    index: &[String],
-    t: &str,
-    c: &str,
-    failed: &[i64],
-) -> (Vec<String>, Vec<String>) {
-    let ts = started(t);
-    let cs = if c.is_empty() { 0 } else { started(c) };
-    let (mut withdrawn, mut kept) = (vec![], vec![]);
-    for key in index {
-        let s = started(key);
-        if failed.contains(&s)
-            || (cs < s && s < ts)
-            || (s == ts && key.as_str() < t)
-            || (!c.is_empty() && s == cs && below_completed(key, c))
-        {
-            withdrawn.push(key.clone());
-        } else if c.is_empty() || key.as_str() > c {
-            kept.push(key.clone());
-        }
-    }
-    (withdrawn, kept)
-}
-
 impl Keys {
     fn get(&self, field: &str) -> Option<&String> {
         self.meta.get(field)
@@ -197,29 +154,6 @@ impl Keys {
                 log.remove(&id);
             }
         }
-    }
-
-    fn keep_facts(&mut self, run: &str, t: &str, c: &str, failed: &str) {
-        self.set(&format!("lf|{run}"), format!("{t}|{c}|{failed}"));
-    }
-
-    fn withdrawn_by_facts(&self, run: &str, task: &str) -> bool {
-        let Some(facts) = self.get(&format!("lf|{run}")) else {
-            return false;
-        };
-        let mut parts = facts.splitn(3, '|');
-        let (t, c, failed) = (
-            parts.next().unwrap_or(""),
-            parts.next().unwrap_or(""),
-            parts.next().unwrap_or(""),
-        );
-        let failed: Vec<i64> = failed
-            .split_whitespace()
-            .filter_map(|id| id.parse().ok())
-            .collect();
-        !withdraw_tasks(&[task.to_string()], t, c, &failed)
-            .0
-            .is_empty()
     }
 
     fn withdraw_run(&mut self, run: &str) -> bool {
@@ -394,14 +328,6 @@ fn encode_run(run_id: &str) -> String {
     }
 }
 
-fn failed_text(failed: &[i64]) -> String {
-    failed
-        .iter()
-        .map(i64::to_string)
-        .collect::<Vec<_>>()
-        .join(" ")
-}
-
 fn offsets(first: &str, last: &str) -> StreamResult<Option<(i64, i64)>> {
     if first.is_empty() || last.is_empty() {
         return Ok(None);
@@ -512,25 +438,9 @@ impl Store for MemoryStore {
         batch: &Batch<'_>,
     ) -> StreamResult<Appended> {
         let producer = batch.producer;
-        let epoch = producer.epoch.unwrap_or_default();
-        let kind = ProducerKind::try_from(producer.kind).unwrap_or_default();
-        let (workflow, local_activity) = (
-            kind == ProducerKind::Workflow,
-            kind == ProducerKind::LocalActivity,
-        );
-        let task = if workflow || local_activity {
-            task_key(&task_of(&epoch))
-        } else {
-            String::new()
-        };
-        let epoch = epoch_key(&epoch);
+        let epoch = epoch_key(&producer.epoch.unwrap_or_default());
         let run = encode_run(&producer.run_id);
         let withdrawal = &batch.withdrawal;
-        let completed = withdrawal
-            .previous_completed
-            .map(task_key)
-            .unwrap_or_default();
-        let failed = withdrawal.failed_tasks;
         let withdrawn_run = encode_run(withdrawal.withdraw_run);
         let (safety, tombstone) = (millis(self.safety_ttl), millis(TOMBSTONE));
         let sequence = batch.sequence;
@@ -555,8 +465,7 @@ impl Store for MemoryStore {
                     }
                 }
             }
-            let settles = workflow && batch.records.is_empty();
-            if keys.auto_close(now, tombstone) && !settles {
+            if keys.auto_close(now, tombstone) {
                 return Err(refuse(Reason::Closed, "the Stream is closed"));
             }
             if !run.is_empty() && keys.get(&format!("wr|{run}")).is_some() {
@@ -574,32 +483,12 @@ impl Store for MemoryStore {
                     "the epoch is lower than the newest one of the Producer",
                 ));
             }
-            if local_activity
-                && (words(keys.get(&format!("wt|{run}"))).contains(&task)
-                    || keys.withdrawn_by_facts(&run, &task))
-            {
-                return Err(refuse(
-                    Reason::Fenced,
-                    "a Superseded item withdrew the Workflow Task of the call",
-                ));
-            }
             let records = batch.records.len() as u64;
             keys.check_ids_fit(now, records + 1)?;
 
-            let index_field = format!("ti|{run}");
-            let withdrawn_field = format!("wt|{run}");
-            let mut index = words(keys.get(&index_field));
-            let mut withdrawn = vec![];
-            let mut flagged;
-            if workflow {
-                (withdrawn, index) = withdraw_tasks(&index, &task, &completed, failed);
-                flagged = !withdrawn.is_empty();
-                keys.keep_facts(&run, &task, &completed, &failed_text(failed));
-            } else {
-                flagged = keys
-                    .get(&format!("h{suffix}"))
-                    .is_some_and(|holds| holds.as_str() < epoch.as_str());
-            }
+            let mut flagged = keys
+                .get(&format!("h{suffix}"))
+                .is_some_and(|holds| holds.as_str() < epoch.as_str());
             if keys.withdraw_run(&withdrawn_run) {
                 flagged = true;
             }
@@ -635,27 +524,10 @@ impl Store for MemoryStore {
                 &format!("d{suffix}"),
                 format!("{epoch}|{sequence}|{first}|{last}"),
             );
-            if !workflow {
-                if records > 0 {
-                    keys.set(&format!("h{suffix}"), epoch.clone());
-                } else if flagged {
-                    keys.meta.remove(&format!("h{suffix}"));
-                }
-            }
-            if (workflow || local_activity) && records > 0 && !index.contains(&task) {
-                index.push(task.clone());
-            }
-            if workflow || local_activity {
-                if index.is_empty() {
-                    keys.meta.remove(&index_field);
-                } else {
-                    keys.set(&index_field, index.join(" "));
-                }
-            }
-            if !withdrawn.is_empty() {
-                let mut all = words(keys.get(&withdrawn_field));
-                all.extend(withdrawn);
-                keys.set(&withdrawn_field, all.join(" "));
+            if records > 0 {
+                keys.set(&format!("h{suffix}"), epoch.clone());
+            } else if flagged {
+                keys.meta.remove(&format!("h{suffix}"));
             }
             if !run.is_empty() && records > 0 {
                 keys.set(&format!("run|{run}"), "1");
@@ -693,27 +565,16 @@ impl Store for MemoryStore {
         stream_id: &str,
         producer: &Producer,
         record: &[u8],
-        withdrawal: &Withdrawal<'_>,
     ) -> StreamResult<Closed> {
-        let epoch = producer.epoch.unwrap_or_default();
-        let kind = ProducerKind::try_from(producer.kind).unwrap_or_default();
-        let task = match kind {
-            ProducerKind::Workflow | ProducerKind::LocalActivity => task_key(&task_of(&epoch)),
-            _ => String::new(),
-        };
-        let epoch = epoch_key(&epoch);
+        let epoch = epoch_key(&producer.epoch.unwrap_or_default());
         let run = encode_run(&producer.run_id);
-        let completed = withdrawal
-            .previous_completed
-            .map(task_key)
-            .unwrap_or_default();
-        let failed = withdrawal.failed_tasks;
+        let suffix = format!("|{}|{}", producer.kind, producer.id);
         let tombstone = millis(TOMBSTONE);
         let closed = self.with(namespace, stream_id, |keys, now| {
             keys.check_live(now)?;
             if keys.auto_close(now, tombstone) {
                 let id = keys.get("close_id").cloned().unwrap_or_default();
-                return Ok((id, true, false));
+                return Ok((id, true));
             }
             if !run.is_empty() && keys.get(&format!("wr|{run}")).is_some() {
                 return Err(refuse(
@@ -721,70 +582,36 @@ impl Store for MemoryStore {
                     "a Workflow retry withdrew the run of the Producer",
                 ));
             }
+            if keys
+                .get(&format!("e{suffix}"))
+                .is_some_and(|newest| epoch.as_str() < newest.as_str())
+            {
+                return Err(refuse(
+                    Reason::Fenced,
+                    "the epoch is lower than the newest one of the Producer",
+                ));
+            }
             keys.check_ids_fit(now, 1)?;
-            if kind != ProducerKind::Workflow {
-                let suffix = format!("|{}|{}", producer.kind, producer.id);
-                if keys
-                    .get(&format!("e{suffix}"))
-                    .is_some_and(|newest| epoch.as_str() < newest.as_str())
-                {
-                    return Err(refuse(
-                        Reason::Fenced,
-                        "the epoch is lower than the newest one of the Producer",
-                    ));
-                }
-                if kind == ProducerKind::LocalActivity
-                    && (words(keys.get(&format!("wt|{run}"))).contains(&task)
-                        || keys.withdrawn_by_facts(&run, &task))
-                {
-                    return Err(refuse(
-                        Reason::Fenced,
-                        "a Superseded item withdrew the Workflow Task of the call",
-                    ));
-                }
-            }
-            let index_field = format!("ti|{run}");
-            let withdrawn_field = format!("wt|{run}");
-            let mut withdrawn = vec![];
-            let mut flagged = false;
-            if kind == ProducerKind::Workflow {
-                let index;
-                (withdrawn, index) =
-                    withdraw_tasks(&words(keys.get(&index_field)), &task, &completed, failed);
-                flagged = !withdrawn.is_empty();
-                keys.keep_facts(&run, &task, &completed, &failed_text(failed));
-                if index.is_empty() {
-                    keys.meta.remove(&index_field);
-                } else {
-                    keys.set(&index_field, index.join(" "));
-                }
-            }
             keys.trim(now);
             let id = keys.add(
                 now,
                 Fields {
                     record: Some(record.to_vec()),
-                    supersession: flagged.then(|| withdrawal.supersession.to_vec()),
+                    supersession: None,
                 },
             );
-            if !withdrawn.is_empty() {
-                let mut all = words(keys.get(&withdrawn_field));
-                all.extend(withdrawn);
-                keys.set(&withdrawn_field, all.join(" "));
-            }
             keys.set("closed", "1");
             keys.set("close_id", id.clone());
             keys.set("newest", id.clone());
             keys.refresh(now, 0, tombstone);
-            Ok((id, false, flagged))
+            Ok((id, false))
         });
-        let (id, already, flagged) = closed?;
+        let (id, already) = closed?;
         // An auto close that this step wrote also answers `already`.
         self.appended.notify_waiters();
         Ok(Closed {
             offset: offset_of_entry_id(&id)?,
             already,
-            flagged,
         })
     }
 

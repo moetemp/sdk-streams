@@ -89,3 +89,9 @@
 - Removed `durable_writes` and `durable_timeout` (`RedisStreamConfig` 6 and 7, now reserved), the
   `replica_wait` capability, `Store::wait_replicas` and `Store::durable_store`. Only the Workflow
   flush used them, and a Workflow write is now an Activity-path write with the same guarantee.
+- Removed the Workflow withdrawal rule from the Store, since no caller appends with a Workflow
+  Producer any more. The service refuses one, and S108's Local Activities write with their own
+  Producer. Gone are the task index, the withdrawn tasks, the last facts and the Local Activity
+  fence that used them, the facts-only batch after a close and the `Superseded` items that it
+  left after the close Record, and the previous completed task and failed tasks on
+  `Withdrawal`. A close takes no withdrawal. The `withdraws()` reader rule stays.
