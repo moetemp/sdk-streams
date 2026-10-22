@@ -843,3 +843,69 @@ async fn a_deferred_batch_that_withdraws_the_previous_run_keeps_this_run_s_recor
         assert_eq!(run.visible().await.0, texts(&["la0", "w"]));
     }
 }
+
+#[tokio::test]
+async fn a_completion_after_a_close_still_withdraws_a_failed_task() {
+    for run in runs().await {
+        // Task [3] wrote f, and its completion failed.
+        run.activation(vec![run.create(), run.publish(&["f"])])
+            .unwrap();
+        run.complete(&run.task(3, 1), false).await.unwrap();
+        // Task [7] runs the Activation again and writes early for a Local Activity.
+        run.activation(vec![run.create(), run.publish(&["f2"])])
+            .unwrap();
+        assert_eq!(run.flush_for_local_activity(7, 1).await.unwrap(), 1);
+        // Someone else closes the Stream before task [7] completes.
+        let close = CloseStreamRequest {
+            namespace: run.namespace.clone(),
+            stream: run.stream_ref(),
+            producer: Some(Producer {
+                kind: ProducerKind::Client as i32,
+                id: client_producer_id("me", "closer"),
+                epoch: Some(ProducerEpoch {
+                    attempt: 1,
+                    ..Default::default()
+                }),
+                run_id: String::new(),
+            }),
+            ..Default::default()
+        };
+        let bytes = run
+            .ext
+            .call_async("CloseStream".to_string(), close.encode_to_vec())
+            .await
+            .unwrap();
+        CloseStreamResponse::decode(bytes.as_slice()).unwrap();
+        assert_eq!(run.visible().await, (texts(&["f", "f2"]), true));
+        // The completion's facts still go in after the close, and a read gives them before the
+        // close Record.
+        run.complete(&run.task(7, 1).failed(&[3]), true)
+            .await
+            .unwrap();
+        assert_eq!(run.visible().await, (texts(&["f2"]), true));
+        let read = run.read().await;
+        assert!(read.done);
+        let last = read.records.last().unwrap();
+        assert_eq!(last.kind, StreamRecordKind::Close as i32);
+        // A read from the next offset gives nothing new but the close Record.
+        let request = ReadRecordsRequest {
+            namespace: run.namespace.clone(),
+            stream: run.stream_ref(),
+            from_offset: read.next_offset,
+            ..Default::default()
+        };
+        let bytes = run
+            .ext
+            .call_async("ReadRecords".to_string(), request.encode_to_vec())
+            .await
+            .unwrap();
+        let again = ReadRecordsResponse::decode(bytes.as_slice()).unwrap();
+        let kinds: Vec<i32> = again.records.iter().map(|r| r.kind).collect();
+        assert_eq!(kinds, [StreamRecordKind::Close as i32]);
+        assert!(again.done);
+        // A Workflow batch with Records is still refused after the close and dropped.
+        run.activation(vec![run.publish(&["late"])]).unwrap();
+        run.complete(&run.task(11, 1).after(7), true).await.unwrap();
+        assert_eq!(run.visible().await, (texts(&["f2"]), true));
+    }
+}
