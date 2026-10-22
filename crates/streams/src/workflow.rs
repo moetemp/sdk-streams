@@ -15,8 +15,8 @@ use crate::{
     record::{close_record, data_record, supersession},
     service::StreamService,
     store::{
-        Batch, Capabilities, CreateOutcome, MAX_BATCH_BYTES, MAX_RECORD_BYTES, RunOwner, Store,
-        Withdrawal,
+        Batch, Capabilities, CreateOutcome, MAX_BATCH_BYTES, MAX_RECORD_BYTES, Owner, RunOwner,
+        Store, Withdrawal,
     },
 };
 use parking_lot::Mutex;
@@ -749,12 +749,12 @@ impl StreamService {
                 stream: create.stream.as_ref(),
             };
             let created = retried(task.deadline, || {
-                store.create_owned(
+                store.create(
                     namespace,
                     id,
                     create.retention,
                     create.auto_close,
-                    &owner,
+                    Owner::Workflow(Some(owner)),
                     &withdrawal,
                 )
             })

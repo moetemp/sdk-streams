@@ -429,7 +429,7 @@ impl Store for MemoryStore {
         stream_id: &str,
         retention: Option<Duration>,
         auto_close: Option<Duration>,
-        owner: Owner,
+        owner: Owner<'_>,
         withdrawal: &Withdrawal<'_>,
     ) -> StreamResult<Created> {
         let retention = millis(retention.filter(|r| !r.is_zero()).unwrap_or(self.retention));
@@ -439,7 +439,7 @@ impl Store for MemoryStore {
             .map(|period| millis(period).max(1).to_string())
             .unwrap_or_default();
         let owner = match owner {
-            Owner::Workflow => "wf",
+            Owner::Workflow(_) => "wf",
             Owner::Client => "client",
         };
         let (safety, tombstone) = (millis(self.safety_ttl), millis(TOMBSTONE));

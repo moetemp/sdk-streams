@@ -218,7 +218,7 @@ impl Target {
         StreamKeys::new("streams-test", &self.namespace, &self.stream)
     }
 
-    pub(crate) async fn create(&self, owner: Owner) {
+    pub(crate) async fn create(&self, owner: Owner<'_>) {
         self.store
             .create(
                 &self.namespace,

@@ -13,7 +13,7 @@ use crate::{
     },
     store::{
         Appended, Batch, Capabilities, Closed, CreateOutcome, Created, Entry, Owner, RemoteReads,
-        RunOwner, Store, StreamState, Withdrawal,
+        Store, StreamState, Withdrawal,
     },
 };
 use bytes::Bytes;
@@ -195,38 +195,22 @@ impl Store for ServiceStore {
         stream_id: &str,
         retention: Option<Duration>,
         auto_close: Option<Duration>,
-        _owner: Owner,
+        owner: Owner<'_>,
         withdrawal: &Withdrawal<'_>,
     ) -> StreamResult<Created> {
-        let request = CreateStreamRequest {
-            namespace: namespace.to_string(),
-            stream_id: stream_id.to_string(),
-            retention: retention.map(proto_duration),
-            withdraw_run: withdrawal.withdraw_run.to_string(),
-            auto_close: auto_close.map(proto_duration),
-            ..Default::default()
+        let run = match owner {
+            Owner::Workflow(run) => run,
+            Owner::Client => None,
         };
-        self.create_request(request, retention).await
-    }
-
-    async fn create_owned(
-        &self,
-        namespace: &str,
-        stream_id: &str,
-        retention: Option<Duration>,
-        auto_close: Option<Duration>,
-        owner: &RunOwner<'_>,
-        withdrawal: &Withdrawal<'_>,
-    ) -> StreamResult<Created> {
         let request = CreateStreamRequest {
             namespace: namespace.to_string(),
             stream_id: stream_id.to_string(),
             retention: retention.map(proto_duration),
             withdraw_run: withdrawal.withdraw_run.to_string(),
             auto_close: auto_close.map(proto_duration),
-            owner: Some(owner.producer.clone()),
-            close_with_run: owner.close_with_run,
-            r#ref: owner.stream.cloned().or_else(|| stream_ref(stream_id)),
+            owner: run.map(|run| run.producer.clone()),
+            close_with_run: run.is_some_and(|run| run.close_with_run),
+            r#ref: run.and_then(|run| run.stream.cloned().or_else(|| stream_ref(stream_id))),
         };
         self.create_request(request, retention).await
     }

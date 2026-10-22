@@ -22,9 +22,11 @@ pub const TOMBSTONE: Duration = Duration::from_secs(30 * 24 * 60 * 60);
 
 /// Who created a Stream, which decides its TTL while it is open.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum Owner {
-    /// The Stream stays `safety_ttl` after its last write until it closes.
-    Workflow,
+pub enum Owner<'a> {
+    /// The Stream stays `safety_ttl` after its last write until it closes. The owning run, when
+    /// the create knows it, for a Store that keeps the owner, such as the server. Redis and
+    /// memory don't read it.
+    Workflow(Option<RunOwner<'a>>),
     /// The Stream stays one Retention after its last write.
     Client,
 }
@@ -279,32 +281,9 @@ pub trait Store: Send + Sync + 'static {
         stream_id: &str,
         retention: Option<Duration>,
         auto_close: Option<Duration>,
-        owner: Owner,
+        owner: Owner<'_>,
         withdrawal: &Withdrawal<'_>,
     ) -> StreamResult<Created>;
-
-    /// Creates a Stream that a Workflow run owns. A Store that keeps the owner, such as the
-    /// server, overrides it. The default is a Workflow-owned [Store::create].
-    async fn create_owned(
-        &self,
-        namespace: &str,
-        stream_id: &str,
-        retention: Option<Duration>,
-        auto_close: Option<Duration>,
-        owner: &RunOwner<'_>,
-        withdrawal: &Withdrawal<'_>,
-    ) -> StreamResult<Created> {
-        let _ = owner;
-        self.create(
-            namespace,
-            stream_id,
-            retention,
-            auto_close,
-            Owner::Workflow,
-            withdrawal,
-        )
-        .await
-    }
 
     /// Appends one batch whole, or nothing of it.
     async fn append(
@@ -377,7 +356,7 @@ pub trait Store: Send + Sync + 'static {
 }
 
 /// The Workflow run that owns a Stream, for a Store that keeps it.
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct RunOwner<'a> {
     /// The run's Producer in the task of the create.
     pub producer: &'a Producer,

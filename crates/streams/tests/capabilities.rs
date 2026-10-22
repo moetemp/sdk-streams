@@ -53,7 +53,7 @@ impl Store for Masked {
         stream_id: &str,
         retention: Option<Duration>,
         auto_close: Option<Duration>,
-        owner: Owner,
+        owner: Owner<'_>,
         withdrawal: &Withdrawal<'_>,
     ) -> StreamResult<Created> {
         self.inner
@@ -494,7 +494,7 @@ impl Store for Slow {
         stream_id: &str,
         retention: Option<Duration>,
         auto_close: Option<Duration>,
-        owner: Owner,
+        owner: Owner<'_>,
         withdrawal: &Withdrawal<'_>,
     ) -> StreamResult<Created> {
         self.inner

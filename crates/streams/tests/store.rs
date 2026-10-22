@@ -150,7 +150,7 @@ async fn a_resend_gets_its_first_positions_and_a_lower_sequence_is_refused() {
 #[tokio::test]
 async fn a_lower_epoch_is_fenced_for_each_producer_kind() {
     for target in stores().await {
-        target.create(Owner::Workflow).await;
+        target.create(Owner::Workflow(None)).await;
         let run = Run::new("r1");
         target
             .flush(&run.task(8, 1), None, &[], &["w8"])
@@ -263,7 +263,7 @@ async fn an_expired_stream_refuses_writes_and_its_create() {
 #[tokio::test]
 async fn an_activity_retry_flags_its_first_batch_only() {
     for target in stores().await {
-        target.create(Owner::Workflow).await;
+        target.create(Owner::Workflow(None)).await;
         let (a1, a2) = (activity("r1", 1, 10), activity("r1", 2, 20));
         let other = Producer {
             id: activity_producer_id("r1", "b", "s"),
@@ -280,7 +280,7 @@ async fn an_activity_retry_flags_its_first_batch_only() {
 #[tokio::test]
 async fn an_empty_batch_of_a_retry_withdraws_the_earlier_attempt() {
     for target in stores().await {
-        target.create(Owner::Workflow).await;
+        target.create(Owner::Workflow(None)).await;
         append(&target, &activity("r1", 1, 10), 1, &["x1"])
             .await
             .unwrap();
@@ -305,7 +305,7 @@ async fn an_empty_batch_of_a_retry_withdraws_the_earlier_attempt() {
 #[tokio::test]
 async fn the_appendix_e_examples_withdraw_the_right_records() {
     for target in stores().await {
-        target.create(Owner::Workflow).await;
+        target.create(Owner::Workflow(None)).await;
         let run = Run::new("r1");
         // 1. A retried task writes nothing. B at [5] fails, [8] writes nothing, C at [11].
         target
@@ -377,7 +377,7 @@ async fn the_appendix_e_examples_withdraw_the_right_records() {
 #[tokio::test]
 async fn a_local_activity_of_a_withdrawn_task_is_withdrawn_and_fenced() {
     for target in stores().await {
-        target.create(Owner::Workflow).await;
+        target.create(Owner::Workflow(None)).await;
         let run = Run::new("r1");
         target
             .flush(&run.task(5, 1), None, &[], &["w5"])
@@ -413,7 +413,7 @@ async fn a_local_activity_of_a_withdrawn_task_is_withdrawn_and_fenced() {
 #[tokio::test]
 async fn a_retry_run_withdraws_and_fences_the_previous_run() {
     for target in stores().await {
-        target.create(Owner::Workflow).await;
+        target.create(Owner::Workflow(None)).await;
         let (r1, r2) = (Run::new("r1"), Run::new("r2"));
         target
             .flush(&r1.task(3, 1), None, &[], &["A"])
@@ -446,7 +446,7 @@ async fn a_retry_run_withdraws_and_fences_the_previous_run() {
 #[tokio::test]
 async fn a_workflow_close_withdraws_a_failed_task() {
     for target in stores().await {
-        target.create(Owner::Workflow).await;
+        target.create(Owner::Workflow(None)).await;
         let run = Run::new("r1");
         target
             .flush(&run.task(5, 1), None, &[], &["w5"])
@@ -461,7 +461,7 @@ async fn a_workflow_close_withdraws_a_failed_task() {
 #[tokio::test]
 async fn the_ttl_follows_the_owner_and_the_close() {
     for target in stores().await {
-        target.create(Owner::Workflow).await;
+        target.create(Owner::Workflow(None)).await;
         let run = Run::new("r1");
         target
             .flush(&run.task(3, 1), None, &[], &["a"])
@@ -497,7 +497,7 @@ async fn an_append_trims_by_retention_and_keeps_the_watermark() {
                 Some(Duration::from_millis(200)),
                 None,
                 // An open Workflow Stream keeps its key, so only the Retention trims.
-                Owner::Workflow,
+                Owner::Workflow(None),
                 &none,
             )
             .await
@@ -585,7 +585,7 @@ async fn a_sequence_below_one_is_refused() {
 #[tokio::test]
 async fn a_local_activity_of_a_failed_task_that_wrote_nothing_is_fenced() {
     for target in stores().await {
-        target.create(Owner::Workflow).await;
+        target.create(Owner::Workflow(None)).await;
         let run = Run::new("r1");
         target
             .flush(&run.task(3, 1), None, &[], &["w3"])
@@ -612,7 +612,7 @@ async fn a_local_activity_of_a_failed_task_that_wrote_nothing_is_fenced() {
 async fn a_workflow_create_takes_over_a_stream_an_activity_created() {
     for target in stores().await {
         target.create(Owner::Client).await;
-        target.create(Owner::Workflow).await;
+        target.create(Owner::Workflow(None)).await;
         assert_eq!(target.meta("own").await.as_deref(), Some("wf"));
         let (_, ttl) = target.ttls().await;
         assert!(
@@ -671,7 +671,7 @@ async fn a_wait_for_replicas_holds_only_the_durable_connection() {
 #[tokio::test]
 async fn c_with_no_attempt_withdraws_by_started_time() {
     for target in stores().await {
-        target.create(Owner::Workflow).await;
+        target.create(Owner::Workflow(None)).await;
         let run = Run::new("r1");
         target
             .flush(&run.task_at(8, 1, 200), None, &[], &["D1"])
@@ -726,7 +726,7 @@ async fn every_store_keeps_the_meta_fields_of_the_shared_vectors() {
     )
     .unwrap();
     for target in stores().await {
-        target.create(Owner::Workflow).await;
+        target.create(Owner::Workflow(None)).await;
         let producer = activity("run:1", 1, 10);
         append(&target, &producer, 1, &["a"]).await.unwrap();
         let kind = ProducerKind::Activity as i32;
@@ -843,7 +843,7 @@ async fn an_auto_close_counts_from_the_create_and_each_step_applies_it_once() {
                 &target.stream,
                 None,
                 Some(Duration::from_millis(200)),
-                Owner::Workflow,
+                Owner::Workflow(None),
                 &none,
             )
             .await
@@ -894,7 +894,7 @@ async fn an_auto_close_counts_from_the_create_and_each_step_applies_it_once() {
 #[tokio::test]
 async fn a_deferred_workflow_batch_withdraws_nothing_until_its_task_sends_the_facts() {
     for target in stores().await {
-        target.create(Owner::Workflow).await;
+        target.create(Owner::Workflow(None)).await;
         let run = Run::new("run-d");
         target
             .flush(&run.task(3, 1), None, &[], &["A"])

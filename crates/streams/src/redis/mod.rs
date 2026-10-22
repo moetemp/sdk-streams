@@ -161,7 +161,7 @@ impl RedisStore {
         stream_id: &str,
         retention: Option<Duration>,
         auto_close: Option<Duration>,
-        owner: Owner,
+        owner: Owner<'_>,
         withdrawal: &Withdrawal<'_>,
     ) -> StreamResult<Created> {
         let keys = self.keys(namespace, stream_id);
@@ -172,7 +172,7 @@ impl RedisStore {
             .arg(FORMAT_VERSION)
             .arg(millis(retention))
             .arg(match owner {
-                Owner::Workflow => "wf",
+                Owner::Workflow(_) => "wf",
                 Owner::Client => "client",
             })
             .arg(millis(self.safety_ttl))
@@ -441,7 +441,7 @@ impl Store for RedisStore {
         stream_id: &str,
         retention: Option<Duration>,
         auto_close: Option<Duration>,
-        owner: Owner,
+        owner: Owner<'_>,
         withdrawal: &Withdrawal<'_>,
     ) -> StreamResult<Created> {
         RedisStore::create(
