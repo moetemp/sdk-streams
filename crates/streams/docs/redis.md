@@ -53,9 +53,7 @@ gives them only with the task's completion. The append script gets `*` as its co
 key. It then withdraws no task, flags nothing and keeps no `lf`, but it still fences, dedupes,
 adds the task to `ti` and applies a retry run's withdrawal. The task's completion sends the next
 batch of the same epoch with the facts, an empty one if it has no Records, so the withdrawal
-reaches the Stream then. Such a Workflow batch with facts and no Records goes in also after a
-close, so a failed task's Records are still withdrawn. A read that reaches the close Record
-gives the `SUPERSEDED` items written after it just before the close Record.
+reaches the Stream then.
 
 ## Auto close
 

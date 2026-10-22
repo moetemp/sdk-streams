@@ -50,6 +50,3 @@
   the withdrawal facts to each Stream the early write reached. A failed early write fails the
   task's completion, and a task that never completes has its early Records withdrawn and
   written again by the next task.
-- A Workflow batch with withdrawal facts and no Records goes in also after a close, and a read
-  that reaches the close Record gives the `Superseded` items written after it just before the
-  close Record. So a task that completes after a close still withdraws a failed task's Records.

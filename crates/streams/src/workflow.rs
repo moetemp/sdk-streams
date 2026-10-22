@@ -198,10 +198,7 @@ impl WorkflowRuns {
                 unsettled = streams_with_records(&early.calls);
                 written = early.calls;
             }
-            // That task never completed, so its Records go again in this task's epoch. Core path:
-            // a Local Activity of a failed attempt flushes late, after the retry buffered its
-            // calls, and takes them. With no failure or eviction, no later task buffers these
-            // calls again, so this writes nothing twice.
+            // That task never completed, so its Records go again in this task's epoch.
             Some(early) => drop(calls.splice(0..0, early.calls)),
             None => {}
         }

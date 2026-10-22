@@ -40,10 +40,7 @@ if last then
     end
   end
 end
--- A Workflow batch with facts and no Records still goes in after a close, so a task that
--- completes late can withdraw a failed task's Records. It adds no Record.
-local settles = workflow and records == 0 and completed ~= '*'
-if auto_close(meta, log, now, tombstone) and not settles then
+if auto_close(meta, log, now, tombstone) then
   return refuse('CLOSED', 'the Stream is closed')
 end
 if run ~= '' and redis.call('HGET', meta, 'wr|' .. run) then
