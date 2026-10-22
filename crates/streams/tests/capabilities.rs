@@ -9,16 +9,18 @@ use std::{
     time::{Duration, SystemTime, UNIX_EPOCH},
 };
 use temporalio_common::protos::temporal::api::common::v1::Payload;
-use temporalio_sdk_core::{ExtensionError, WorkerExtension, WorkflowTaskCompletionInfo};
+use temporalio_sdk_core::{
+    ExtensionError, WorkerExtension, WorkflowTaskCompletionInfo, WorkflowTaskFailedInfo,
+};
 use temporalio_streams::{
     MemoryStreamExtension, StreamExtension, StreamResult,
     ids::{client_producer_id, default_stream_id},
     memory::MemoryStore,
     proto::{
         AppendRecord, AppendRecordsRequest, BufferWorkflowCallsRequest, CloseStreamRequest,
-        CreateStreamRequest, DescribeStreamRequest, DescribeStreamResponse, Producer,
-        ProducerEpoch, ProducerKind, RedisStreamConfig, StreamErrorDetails, StreamRef,
-        StreamStatus, WorkflowCall, workflow_call::Call,
+        CreateStreamRequest, DescribeStreamRequest, DescribeStreamResponse, FlushRunBufferRequest,
+        Producer, ProducerEpoch, ProducerKind, RedisStreamConfig, StreamErrorDetails, StreamRef,
+        StreamStatus, WorkflowCall, WorkflowTaskEpoch, workflow_call::Call,
     },
     redis::{RedisStore, RedisStoreOptions},
     store::{
@@ -297,6 +299,38 @@ async fn an_append_without_the_fence_or_the_flag_is_refused_with_nothing_written
 }
 
 #[tokio::test]
+async fn a_failed_local_activity_flush_fails_the_task_with_nothing_written() {
+    let case = case(Capabilities::WITHDRAWAL);
+    let request = BufferWorkflowCallsRequest {
+        run_id: case.run_id.clone(),
+        calls: vec![case.create_call(), case.publish_call()],
+        ..Default::default()
+    };
+    case.ext
+        .call("BufferWorkflowCalls", &request.encode_to_vec())
+        .unwrap();
+    let flush = FlushRunBufferRequest {
+        namespace: NAMESPACE.to_string(),
+        run_id: case.run_id.clone(),
+        workflow_task: Some(WorkflowTaskEpoch {
+            started_event_id: 3,
+            attempt: 1,
+            started_time: Some(prost_types::Timestamp {
+                seconds: 100,
+                nanos: 0,
+            }),
+        }),
+        timeout: None,
+    };
+    let error = case.call("FlushRunBuffer", flush).await.unwrap_err();
+    assert_eq!(refused_capability(&error), "withdrawal");
+    // The completion of the task fails with the same error, though its buffer is empty.
+    let error = case.flush("", vec![]).await.unwrap_err();
+    assert!(error.ends_with("withdrawal"), "{error}");
+    assert!(!case.created());
+}
+
+#[tokio::test]
 async fn a_close_without_the_capability_is_refused_and_the_stream_stays_open() {
     let case = case(Capabilities::CLOSE);
     case.create().await;
@@ -405,6 +439,11 @@ async fn durable_writes_on_the_memory_store_fail_by_name() {
         .await
         .unwrap_err();
     assert!(error.ends_with("replica_wait"), "{error}");
+    // The Workflow Task failure names the Stream and the Topic, which lang can't add.
+    assert!(
+        error.contains(&format!("Stream {}, Topic \"\": ", case.stream)),
+        "{error}"
+    );
 }
 
 #[tokio::test]
@@ -432,4 +471,134 @@ async fn every_store_and_wrapper_says_what_it_can_do() {
     assert_eq!(Store::capabilities(&redis), Capabilities::ALL);
     let durable = redis.durable_store().expect("a durable connection");
     assert_eq!(durable.capabilities(), Capabilities::ALL);
+}
+
+/// A memory Store whose appends take a while, so a test can act while a flush runs.
+struct Slow {
+    inner: Arc<MemoryStore>,
+}
+
+#[async_trait::async_trait]
+impl Store for Slow {
+    fn capabilities(&self) -> Capabilities {
+        self.inner.capabilities()
+    }
+
+    fn default_retention(&self) -> Duration {
+        self.inner.default_retention()
+    }
+
+    async fn create(
+        &self,
+        namespace: &str,
+        stream_id: &str,
+        retention: Option<Duration>,
+        auto_close: Option<Duration>,
+        owner: Owner,
+        withdrawal: &Withdrawal<'_>,
+    ) -> StreamResult<Created> {
+        self.inner
+            .create(
+                namespace, stream_id, retention, auto_close, owner, withdrawal,
+            )
+            .await
+    }
+
+    async fn append(
+        &self,
+        namespace: &str,
+        stream_id: &str,
+        batch: &Batch<'_>,
+    ) -> StreamResult<Appended> {
+        tokio::time::sleep(Duration::from_millis(300)).await;
+        self.inner.append(namespace, stream_id, batch).await
+    }
+
+    async fn read(
+        &self,
+        namespace: &str,
+        stream_id: &str,
+        from: i64,
+        count: usize,
+    ) -> StreamResult<(StreamState, Vec<Entry>)> {
+        self.inner.read(namespace, stream_id, from, count).await
+    }
+
+    async fn wait_after(
+        &self,
+        namespace: &str,
+        stream_id: &str,
+        after: i64,
+        deadline: Instant,
+    ) -> StreamResult<bool> {
+        self.inner
+            .wait_after(namespace, stream_id, after, deadline)
+            .await
+    }
+}
+
+#[tokio::test]
+async fn a_task_that_fails_while_its_early_flush_runs_writes_each_record_once() {
+    let mut case = case(Capabilities::default());
+    case.ext = MemoryStreamExtension::with_store(
+        Arc::new(Slow {
+            inner: case.memory.clone(),
+        }),
+        0,
+        None,
+    );
+    let request = BufferWorkflowCallsRequest {
+        run_id: case.run_id.clone(),
+        calls: vec![case.create_call(), case.publish_call()],
+        ..Default::default()
+    };
+    case.ext
+        .call("BufferWorkflowCalls", &request.encode_to_vec())
+        .unwrap();
+    let flush = FlushRunBufferRequest {
+        namespace: NAMESPACE.to_string(),
+        run_id: case.run_id.clone(),
+        workflow_task: Some(WorkflowTaskEpoch {
+            started_event_id: 3,
+            attempt: 1,
+            started_time: Some(prost_types::Timestamp {
+                seconds: 100,
+                nanos: 0,
+            }),
+        }),
+        timeout: None,
+    };
+    let ext = case.ext.clone();
+    let early = tokio::spawn(async move {
+        ext.call_async("FlushRunBuffer".to_string(), flush.encode_to_vec())
+            .await
+    });
+    tokio::time::sleep(Duration::from_millis(100)).await;
+    // The task fails while the early write runs. Its retry buffers the same calls again.
+    let hooks = case.ext.workflow_task_interceptor().unwrap();
+    let failed = WorkflowTaskFailedInfo::builder()
+        .run_id(case.run_id.clone())
+        .attempt(1)
+        .reported(true)
+        .build();
+    hooks.on_task_failed(&failed);
+    early.await.unwrap().unwrap();
+    let info = WorkflowTaskCompletionInfo::builder()
+        .namespace(NAMESPACE)
+        .workflow_id("wf")
+        .run_id(case.run_id.clone())
+        .first_execution_run_id(case.run_id.clone())
+        .workflow_type("t")
+        .started_event_id(3)
+        .attempt(2)
+        .started_time(UNIX_EPOCH + Duration::from_secs(100))
+        .deadline(std::time::Instant::now() + Duration::from_secs(10))
+        .build();
+    case.ext
+        .call("BufferWorkflowCalls", &request.encode_to_vec())
+        .unwrap();
+    hooks.before_complete(&info).await.unwrap();
+    // One copy from the failed attempt, and one from the retry, whose entry also has the
+    // `Superseded` item that drops the first copy.
+    assert_eq!(case.log_len(), 2);
 }

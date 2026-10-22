@@ -8,8 +8,9 @@ use crate::{
         AppendRecordsRequest, BufferWorkflowCallsRequest, BufferWorkflowCallsResponse,
         CloseStreamRequest, CloseWriterRequest, CloseWriterResponse, CloseWritersRequest,
         CloseWritersResponse, DescribeStreamRequest, DrainClosesRequest, DrainClosesResponse,
-        FlushWriterRequest, FlushWriterResponse, OpenWriterRequest, OpenWriterResponse,
-        PublishRequest, PublishResponse, ReadRecordsRequest, RedisStreamConfig,
+        FlushRunBufferRequest, FlushRunBufferResponse, FlushWriterRequest, FlushWriterResponse,
+        OpenWriterRequest, OpenWriterResponse, PublishRequest, PublishResponse, ReadRecordsRequest,
+        RedisStreamConfig,
     },
     redis::{RedisStore, RedisStoreOptions},
     service::StreamService,
@@ -220,6 +221,22 @@ impl StreamExtension {
             let pending = self.shared.runs.drain(timeout).await;
             return Ok(DrainClosesResponse {
                 pending: pending as i32,
+            }
+            .encode_to_vec());
+        }
+        if method == "FlushRunBuffer" {
+            let request = decode::<FlushRunBufferRequest>(input)?;
+            // A run with nothing buffered needs no Store, so a Local Activity of a Workflow
+            // that never publishes never connects.
+            if !self.shared.runs.has_work(&request.run_id) {
+                return Ok(FlushRunBufferResponse { records: 0 }.encode_to_vec());
+            }
+            let service = self.shared.service().await?;
+            let records = service
+                .flush_for_local_activity(&self.shared.runs, request, self.shared.flush_options())
+                .await?;
+            return Ok(FlushRunBufferResponse {
+                records: records as i32,
             }
             .encode_to_vec());
         }

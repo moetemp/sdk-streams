@@ -892,6 +892,38 @@ async fn an_auto_close_counts_from_the_create_and_each_step_applies_it_once() {
 }
 
 #[tokio::test]
+async fn a_deferred_workflow_batch_withdraws_nothing_until_its_task_sends_the_facts() {
+    for target in stores().await {
+        target.create(Owner::Workflow).await;
+        let run = Run::new("run-d");
+        target
+            .flush(&run.task(3, 1), None, &[], &["A"])
+            .await
+            .unwrap();
+        let facts = target.meta("lf|run-d").await;
+        assert!(facts.is_some());
+        // With no previous completed task, a batch with facts would withdraw task [3].
+        let early = target
+            .flush_deferred(&run.task(5, 1), 1, &["B"])
+            .await
+            .unwrap();
+        assert!(!early.flagged);
+        assert_eq!(target.visible().await, ["A", "B"]);
+        // The deferred batch keeps no facts, so the Local Activity fence still has task [3]'s.
+        assert_eq!(target.meta("lf|run-d").await, facts);
+        // The task's completion sends the facts in the same epoch, numbered after the early
+        // batch, and withdraws the failed task [3].
+        let settled = target
+            .flush_next(&run.task(5, 1), 2, None, &[3], &[])
+            .await
+            .unwrap();
+        assert!(settled.flagged);
+        assert_eq!(target.visible().await, ["B"]);
+        assert_ne!(target.meta("lf|run-d").await, facts);
+    }
+}
+
+#[tokio::test]
 async fn an_auto_close_period_at_the_edges_neither_overflows_nor_rounds_to_zero() {
     for target in stores().await {
         let none = Withdrawal::default();

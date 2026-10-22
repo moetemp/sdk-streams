@@ -16,13 +16,13 @@ use temporalio_sdk_core::{
 use temporalio_streams::{
     ExtensionOptions, RedisStreamExtension,
     epoch::withdraws,
-    ids::{client_producer_id, default_stream_id},
+    ids::{client_producer_id, default_stream_id, local_activity_producer_id},
     proto::{
-        AppendRecord, AppendRecordsRequest, BufferWorkflowCallsRequest, CloseStreamRequest,
-        CloseStreamResponse, CreateStreamRequest, DrainClosesRequest, DrainClosesResponse,
-        Producer, ProducerEpoch, ProducerKind, ReadRecordsRequest, ReadRecordsResponse,
-        RedisStreamConfig, StreamRecord, StreamRecordKind, StreamRef, WorkflowCall,
-        workflow_call::Call,
+        AppendRecord, AppendRecordsRequest, AppendRecordsResponse, BufferWorkflowCallsRequest,
+        CloseStreamRequest, CloseStreamResponse, CreateStreamRequest, DrainClosesRequest,
+        DrainClosesResponse, FlushRunBufferRequest, FlushRunBufferResponse, Producer,
+        ProducerEpoch, ProducerKind, ReadRecordsRequest, ReadRecordsResponse, RedisStreamConfig,
+        StreamRecord, StreamRecordKind, StreamRef, WorkflowCall, workflow_call::Call,
     },
 };
 
@@ -203,6 +203,86 @@ impl Run {
             .map_err(|error| error.message)?;
         self.hooks.after_complete(&info, accepted).await;
         Ok(())
+    }
+
+    /// Lang's call before a Local Activity that task `[started]` at `attempt` dispatched.
+    async fn flush_for_local_activity(&self, started: i64, attempt: i32) -> Result<i32, String> {
+        let request = FlushRunBufferRequest {
+            namespace: self.namespace.clone(),
+            run_id: self.run_id.clone(),
+            workflow_task: Some(temporalio_streams::proto::WorkflowTaskEpoch {
+                started_event_id: started,
+                attempt,
+                started_time: Some(prost_types::Timestamp {
+                    seconds: 100,
+                    nanos: 0,
+                }),
+            }),
+            timeout: None,
+        };
+        let bytes = self
+            .ext
+            .call_async("FlushRunBuffer".to_string(), request.encode_to_vec())
+            .await
+            .map_err(|error| error.message)?;
+        Ok(FlushRunBufferResponse::decode(bytes.as_slice())
+            .unwrap()
+            .records)
+    }
+
+    /// A publish of the Local Activity `call` that task `[started]` at `attempt` dispatched.
+    async fn local_activity_publish(&self, call: &str, started: i64, attempt: i32, text: &str) {
+        let request = AppendRecordsRequest {
+            namespace: self.namespace.clone(),
+            stream: self.stream_ref(),
+            producer: Some(Producer {
+                kind: ProducerKind::LocalActivity as i32,
+                id: local_activity_producer_id(&self.run_id, call),
+                epoch: Some(ProducerEpoch {
+                    task_started_event_id: started,
+                    task_attempt: attempt,
+                    task_started_time: Some(prost_types::Timestamp {
+                        seconds: 100,
+                        nanos: 0,
+                    }),
+                    attempt: 1,
+                    ..Default::default()
+                }),
+                run_id: self.run_id.clone(),
+            }),
+            sequence: 1,
+            records: vec![AppendRecord {
+                topic: "turns".to_string(),
+                body: payload(text),
+            }],
+            ..Default::default()
+        };
+        let bytes = self
+            .ext
+            .call_async("AppendRecords".to_string(), request.encode_to_vec())
+            .await
+            .unwrap();
+        AppendRecordsResponse::decode(bytes.as_slice()).unwrap();
+    }
+
+    fn fail_task(&self, attempt: u32) {
+        let failed = WorkflowTaskFailedInfo::builder()
+            .run_id(self.run_id.clone())
+            .attempt(attempt)
+            .reported(true)
+            .build();
+        self.hooks.on_task_failed(&failed);
+    }
+
+    /// Every data text in the log, withdrawn or not.
+    async fn all_texts(&self) -> Vec<String> {
+        self.read()
+            .await
+            .records
+            .into_iter()
+            .filter(|record| record.kind == StreamRecordKind::Data as i32)
+            .map(|record| String::from_utf8(record.body.unwrap().data).unwrap())
+            .collect()
     }
 
     async fn drain(&self) {
@@ -446,6 +526,9 @@ async fn a_stale_task_fails_on_the_fence() {
         run.activation(vec![run.publish(&["stale"])]).unwrap();
         let error = run.complete(&run.task(5, 1), true).await.unwrap_err();
         assert!(error.contains("stream_fenced"), "{error}");
+        // The task failure names the Stream and the Topic, which lang can't add.
+        let named = format!("Stream {}, Topic \"turns\": ", run.stream);
+        assert!(error.contains(&named), "{error}");
         assert_eq!(run.visible().await.0, ["new"]);
     }
 }
@@ -624,5 +707,239 @@ async fn a_workflow_create_with_an_auto_close_closes_its_quiet_stream() {
         run.activation(vec![run.publish(&["late"])]).unwrap();
         run.complete(&run.task(7, 1).after(3), true).await.unwrap();
         assert_eq!(run.visible().await, (vec!["a".to_string()], true));
+    }
+}
+
+fn texts(texts: &[&str]) -> Vec<String> {
+    texts.iter().map(|text| text.to_string()).collect()
+}
+
+#[tokio::test]
+async fn a_local_activity_flush_writes_the_run_first_and_the_completion_writes_the_rest_once() {
+    for run in runs().await {
+        run.activation(vec![run.create(), run.publish(&["a", "b"])])
+            .unwrap();
+        assert_eq!(run.flush_for_local_activity(3, 1).await.unwrap(), 2);
+        // A second Local Activity of the same Activation finds nothing left.
+        assert_eq!(run.flush_for_local_activity(3, 1).await.unwrap(), 0);
+        run.local_activity_publish("la-1", 3, 1, "la1").await;
+        // The Local Activity's result wakes the Workflow in the same task, and it publishes
+        // and starts another one.
+        run.activation(vec![run.publish(&["c"])]).unwrap();
+        assert_eq!(run.flush_for_local_activity(3, 1).await.unwrap(), 1);
+        run.local_activity_publish("la-2", 3, 1, "la2").await;
+        run.activation(vec![run.publish(&["d"])]).unwrap();
+        run.complete(&run.task(3, 1), true).await.unwrap();
+        let expected = texts(&["a", "b", "la1", "c", "la2", "d"]);
+        assert_eq!(run.all_texts().await, expected);
+        assert_eq!(run.visible().await.0, expected);
+    }
+}
+
+#[tokio::test]
+async fn the_completion_takes_its_facts_to_a_stream_that_only_the_early_flush_wrote() {
+    for run in runs().await {
+        // Task [3] wrote x, and its completion then failed, so History shows it failed.
+        run.activation(vec![run.create(), run.publish(&["x"])])
+            .unwrap();
+        run.complete(&run.task(3, 1), false).await.unwrap();
+        // Task [7] runs the Activation again and starts a Local Activity.
+        run.activation(vec![run.create(), run.publish(&["x2"])])
+            .unwrap();
+        assert_eq!(run.flush_for_local_activity(7, 1).await.unwrap(), 1);
+        run.local_activity_publish("la", 7, 1, "la").await;
+        // The early write had no facts, so x still counts until the completion.
+        assert_eq!(run.visible().await.0, texts(&["x", "x2", "la"]));
+        run.complete(&run.task(7, 1).failed(&[3]), true)
+            .await
+            .unwrap();
+        assert_eq!(run.visible().await.0, texts(&["x2", "la"]));
+    }
+}
+
+#[tokio::test]
+async fn a_task_that_fails_after_an_early_flush_has_its_records_withdrawn() {
+    for run in runs().await {
+        run.activation(vec![run.create(), run.publish(&["a"])])
+            .unwrap();
+        assert_eq!(run.flush_for_local_activity(3, 1).await.unwrap(), 1);
+        run.local_activity_publish("la", 3, 1, "la").await;
+        run.fail_task(1);
+        // The retry attempt runs the Activation again. A late Local Activity of the failed
+        // attempt then flushes, so its write takes the retry's calls in the old epoch, with
+        // the next batch number of that epoch.
+        run.activation(vec![run.create(), run.publish(&["a2"])])
+            .unwrap();
+        assert_eq!(run.flush_for_local_activity(3, 1).await.unwrap(), 1);
+        // The retry's completion writes those calls again in its own epoch, and its facts
+        // withdraw everything of the failed attempt.
+        run.complete(&run.task(3, 2), true).await.unwrap();
+        assert_eq!(run.all_texts().await, texts(&["a", "la", "a2", "a2"]));
+        assert_eq!(run.visible().await.0, texts(&["a2"]));
+    }
+}
+
+#[tokio::test]
+async fn a_local_activity_of_a_completed_task_writes_nothing() {
+    for run in runs().await {
+        run.activation(vec![run.create(), run.publish(&["a"])])
+            .unwrap();
+        run.complete(&run.task(3, 1), true).await.unwrap();
+        // A retry of a Local Activity that task [3] dispatched, after a heartbeat completion.
+        run.activation(vec![run.publish(&["b"])]).unwrap();
+        assert_eq!(run.flush_for_local_activity(3, 1).await.unwrap(), 0);
+        run.complete(&run.task(7, 1).after(3), true).await.unwrap();
+        assert_eq!(run.visible().await.0, texts(&["a", "b"]));
+    }
+}
+
+#[tokio::test]
+async fn a_local_activity_flush_with_nothing_buffered_needs_no_redis() {
+    let config = RedisStreamConfig {
+        urls: vec!["redis://127.0.0.1:1".to_string()],
+        ..Default::default()
+    };
+    let ext = RedisStreamExtension::new(ExtensionOptions::from_config(config).unwrap(), None);
+    let run = runs_on(vec![ext]).pop().unwrap();
+    assert_eq!(run.flush_for_local_activity(3, 1).await.unwrap(), 0);
+}
+
+#[tokio::test]
+async fn two_local_activities_that_start_together_both_wait_for_the_run_s_records() {
+    for run in runs().await {
+        run.activation(vec![run.create(), run.publish(&["a", "b"])])
+            .unwrap();
+        // Each Local Activity may start only once the run's Records are in, also the one
+        // whose flush found the buffer already taken.
+        let start = || async {
+            let records = run.flush_for_local_activity(3, 1).await.unwrap();
+            (records, run.all_texts().await)
+        };
+        let ((one, seen_one), (two, seen_two)) = tokio::join!(start(), start());
+        assert_eq!(one + two, 2);
+        assert_eq!(seen_one, texts(&["a", "b"]));
+        assert_eq!(seen_two, texts(&["a", "b"]));
+    }
+}
+
+#[tokio::test]
+async fn a_deferred_batch_that_withdraws_the_previous_run_keeps_this_run_s_records() {
+    for run in runs().await {
+        let previous = format!("{}-previous", run.run_id);
+        run.activation_of(&previous, "", vec![run.create(), run.publish(&["old"])])
+            .unwrap();
+        let mut task = run.task(3, 1);
+        task.run_id = previous.clone();
+        run.complete(&task, true).await.unwrap();
+        // The retry run's task [3] has only a Local Activity write on the Stream.
+        run.local_activity_publish("la", 3, 1, "la0").await;
+        // In task [7] the run's first Workflow batch on the Stream comes from an early flush,
+        // so it withdraws the previous run with no facts of its own.
+        run.activation_of(&run.run_id, &previous, vec![run.publish(&["w"])])
+            .unwrap();
+        assert_eq!(run.flush_for_local_activity(7, 1).await.unwrap(), 1);
+        assert_eq!(run.visible().await.0, texts(&["la0", "w"]));
+        run.complete(&run.task(7, 1).after(3), true).await.unwrap();
+        assert_eq!(run.visible().await.0, texts(&["la0", "w"]));
+    }
+}
+
+#[tokio::test]
+async fn a_completion_after_a_close_still_withdraws_a_failed_task() {
+    for run in runs().await {
+        // Task [3] wrote f, and its completion failed.
+        run.activation(vec![run.create(), run.publish(&["f"])])
+            .unwrap();
+        run.complete(&run.task(3, 1), false).await.unwrap();
+        // Task [7] runs the Activation again and writes early for a Local Activity.
+        run.activation(vec![run.create(), run.publish(&["f2"])])
+            .unwrap();
+        assert_eq!(run.flush_for_local_activity(7, 1).await.unwrap(), 1);
+        // Someone else closes the Stream before task [7] completes.
+        let close = CloseStreamRequest {
+            namespace: run.namespace.clone(),
+            stream: run.stream_ref(),
+            producer: Some(Producer {
+                kind: ProducerKind::Client as i32,
+                id: client_producer_id("me", "closer"),
+                epoch: Some(ProducerEpoch {
+                    attempt: 1,
+                    ..Default::default()
+                }),
+                run_id: String::new(),
+            }),
+            ..Default::default()
+        };
+        let bytes = run
+            .ext
+            .call_async("CloseStream".to_string(), close.encode_to_vec())
+            .await
+            .unwrap();
+        CloseStreamResponse::decode(bytes.as_slice()).unwrap();
+        assert_eq!(run.visible().await, (texts(&["f", "f2"]), true));
+        // The completion's facts still go in after the close, and a read gives them before the
+        // close Record.
+        run.complete(&run.task(7, 1).failed(&[3]), true)
+            .await
+            .unwrap();
+        assert_eq!(run.visible().await, (texts(&["f2"]), true));
+        let read = run.read().await;
+        assert!(read.done);
+        let last = read.records.last().unwrap();
+        assert_eq!(last.kind, StreamRecordKind::Close as i32);
+        // A read from the next offset gives nothing new but the close Record.
+        let request = ReadRecordsRequest {
+            namespace: run.namespace.clone(),
+            stream: run.stream_ref(),
+            from_offset: read.next_offset,
+            ..Default::default()
+        };
+        let bytes = run
+            .ext
+            .call_async("ReadRecords".to_string(), request.encode_to_vec())
+            .await
+            .unwrap();
+        let again = ReadRecordsResponse::decode(bytes.as_slice()).unwrap();
+        let kinds: Vec<i32> = again.records.iter().map(|r| r.kind).collect();
+        assert_eq!(kinds, [StreamRecordKind::Close as i32]);
+        assert!(again.done);
+        // A Workflow batch with Records is still refused after the close and dropped.
+        run.activation(vec![run.publish(&["late"])]).unwrap();
+        run.complete(&run.task(11, 1).after(7), true).await.unwrap();
+        assert_eq!(run.visible().await, (texts(&["f2"]), true));
+    }
+}
+
+#[tokio::test]
+async fn a_completion_with_records_after_a_close_still_withdraws_a_failed_task() {
+    for run in runs().await {
+        run.activation(vec![run.create(), run.publish(&["f"])])
+            .unwrap();
+        run.complete(&run.task(3, 1), false).await.unwrap();
+        let close = CloseStreamRequest {
+            namespace: run.namespace.clone(),
+            stream: run.stream_ref(),
+            producer: Some(Producer {
+                kind: ProducerKind::Client as i32,
+                id: client_producer_id("me", "closer"),
+                epoch: Some(ProducerEpoch {
+                    attempt: 1,
+                    ..Default::default()
+                }),
+                run_id: String::new(),
+            }),
+            ..Default::default()
+        };
+        run.ext
+            .call_async("CloseStream".to_string(), close.encode_to_vec())
+            .await
+            .unwrap();
+        // The retry's Records are dropped, but its facts still withdraw task [3].
+        run.activation(vec![run.create(), run.publish(&["f2"])])
+            .unwrap();
+        run.complete(&run.task(7, 1).failed(&[3]), true)
+            .await
+            .unwrap();
+        assert_eq!(run.visible().await, (vec![], true));
     }
 }

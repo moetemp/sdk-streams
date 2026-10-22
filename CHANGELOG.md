@@ -43,3 +43,14 @@
 - Added `StreamRef.backend` (4) and `RedisStreamConfig.backend` (10). The crate puts the
   configured backend name in each ref it builds, such as the one in a create answer, so every
   process routes a ref it receives. The Store never reads it.
+- Added `FlushRunBuffer`. Lang calls it before a Local Activity starts, with the dispatching
+  Workflow Task from `ActivityTask.Start` field 20. The crate writes the run's buffered creates
+  and appends in that task's epoch, so the run's Records come before the Local Activity's. The
+  task's completion writes only what came later, numbered after the early batches, and sends
+  the withdrawal facts to each Stream the early write reached. A failed early write fails the
+  task's completion, and a task that never completes has its early Records withdrawn and
+  written again by the next task.
+- A Workflow batch with withdrawal facts and no Records goes in also after a close, and a read
+  that reaches the close Record gives the `Superseded` items written after it just before the
+  close Record. So a task that completes after a close still withdraws a failed task's Records.
+  A Workflow batch with Records that a close refuses is followed by one with only the facts.

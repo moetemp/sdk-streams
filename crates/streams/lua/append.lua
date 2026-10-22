@@ -1,8 +1,9 @@
 -- Appends one batch of one Producer.
 --
 -- ARGV: format version, kind, Producer id, encoded run id, epoch key, task key, sequence,
--- previous completed task key, failed task ids, encoded withdrawn run, Supersession bytes,
--- safety TTL ms, Tombstone ms, then one Record per argument.
+-- previous completed task key (`*` for a Workflow batch whose facts come later), failed task
+-- ids, encoded withdrawn run, Supersession bytes, safety TTL ms, Tombstone ms, then one Record
+-- per argument.
 --
 -- Answers {'ok' or 'resend', first id, last id, '1' when flagged}.
 local meta, log = KEYS[1], KEYS[2]
@@ -39,7 +40,10 @@ if last then
     end
   end
 end
-if auto_close(meta, log, now, tombstone) then
+-- A Workflow batch with facts and no Records still goes in after a close, so a task that
+-- completes late can withdraw a failed task's Records. It adds no Record.
+local settles = workflow and records == 0 and completed ~= '*'
+if auto_close(meta, log, now, tombstone) and not settles then
   return refuse('CLOSED', 'the Stream is closed')
 end
 if run ~= '' and redis.call('HGET', meta, 'wr|' .. run) then
@@ -64,14 +68,16 @@ local flagged = false
 local index_field, withdrawn_field = 'ti|' .. run, 'wt|' .. run
 local index = words(redis.call('HGET', meta, index_field))
 local withdrawn = {}
-if workflow then
+-- A Workflow batch with no facts yet withdraws nothing. The task's completion sends them.
+local deferred = workflow and completed == '*'
+if workflow and not deferred then
   withdrawn, index = withdraw_tasks(index, task, completed, failed)
   flagged = #withdrawn > 0
-else
+elseif not workflow then
   local holds = redis.call('HGET', meta, 'h' .. suffix)
   flagged = holds ~= false and holds < epoch
 end
-if workflow then
+if workflow and not deferred then
   keep_facts(meta, run, task, completed, failed)
 end
 if withdraw_run(meta, withdrawn_run) then
