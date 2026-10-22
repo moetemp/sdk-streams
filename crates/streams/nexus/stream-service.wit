@@ -174,15 +174,6 @@ interface stream-service {
     stream-status-expired,
   }
 
-  /// @nexus.proto "temporal.api.streamservice.v1.CreateStreamResponse"
-  record create-stream-response {
-    %stream: option<stream-ref>,
-    /// @nexus.doc "False when the Stream existed with the same Retention."
-    created: option<bool>,
-    /// @nexus.doc "Closed when an earlier create and close used the id."
-    status: option<stream-status>,
-  }
-
   // The meta key of each Stream has a format version v. Lua refuses a write to a Stream with a
   // higher v with FAILED_PRECONDITION and the detail stream_format_too_new.
   /// @nexus.doc
@@ -290,8 +281,65 @@ interface stream-service {
     auto-close: option<duration>,
   }
 
+  // Its stream-ref is its serialized form, so a handle passes through Workflow input, Activity
+  // input and Signals as the ref. Each method fills in the ref of its request and takes the rest.
+  // The wire operations stay the same. A handle never changes: offsets are values that the
+  // methods return.
+  /// @nexus.doc "A handle on one Stream. Build it from a stream-ref, or get it from a create."
+  resource %stream {
+    constructor(%stream: stream-ref);
+
+    /// @nexus.doc "Append Records. The answer has the first and the last offset."
+    /// @nexus.operation "append-records"
+    append-records: func(
+      producer: option<producer>,
+      sequence: option<s64>,
+      records: list<append-record>,
+      previous-completed-task: option<workflow-task-epoch>,
+      failed-tasks: list<s64>,
+      withdraw-run: option<string>,
+    ) -> append-records-response;
+
+    /// @nexus.doc "Close the Stream. Readers drain what is left, then end."
+    /// @nexus.operation "close-stream"
+    close: func(
+      producer: option<producer>,
+      %result: option<payload>,
+      failure: option<failure>,
+      previous-completed-task: option<workflow-task-epoch>,
+      failed-tasks: list<s64>,
+    );
+
+    /// @nexus.doc "Read one page of Records. The iterator of the same name reads them all."
+    /// @nexus.operation "read-records"
+    read-records: func(
+      from-offset: option<s64>,
+      start: option<read-start>,
+      topics: list<string>,
+      topic-prefixes: list<string>,
+      max-records: option<s32>,
+      wait: option<duration>,
+      create-wait: option<duration>,
+    ) -> read-records-response;
+
+    /// @nexus.doc "Describe the Stream: its status, newest offset, Retention and auto-close."
+    /// @nexus.operation "describe-stream"
+    describe: func() -> describe-stream-response;
+  }
+
+  // The handle is built from the stream field of the response. The other fields stay beside
+  // it, since they describe this create, not the Stream.
+  /// @nexus.proto "temporal.api.streamservice.v1.CreateStreamResponse"
+  record create-stream-result {
+    %stream: own<%stream>,
+    /// @nexus.doc "False when the Stream existed with the same Retention."
+    created: option<bool>,
+    /// @nexus.doc "Closed when an earlier create and close used the id."
+    status: option<stream-status>,
+  }
+
   /// @nexus.operation name="CreateStream"
-  create-stream: func(request: create-stream-request) -> create-stream-response;
+  create-stream: func(request: create-stream-request) -> create-stream-result;
 
   /// @nexus.doc
   ///   "In Workflow code, Brook buffers this call in the run, and the facade drops the answer."
@@ -301,6 +349,8 @@ interface stream-service {
   /// @nexus.operation name="CloseStream"
   close-stream: func(request: close-stream-request) -> close-stream-response;
 
+  // The long poll moves from-offset, so nexgen also reads its pages as one async iterator. A WIT
+  // stream can't cross a Nexus call, so the read stays request and response on the wire.
   /// @nexus.doc "Not for Workflow code in Brook. A long poll. NOT_FOUND for an uncreated Stream."
   /// @nexus.operation name="ReadRecords"
   /// @nexus.long-poll
