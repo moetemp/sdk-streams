@@ -80,3 +80,9 @@
   code, such as S108's Local Activities. `CreateStreamRequest.owner` (6) makes the Stream
   Workflow-owned, and `withdraw_run` on both withdraws a retry run's previous run. The proto
   also has `close_with_run` (7) and `ref` (8), which only the server reads.
+- Removed the Workflow write path that S108 replaced, since a Workflow now makes each create,
+  publish and close from a Local Activity on the service calls. Gone are `BufferWorkflowCalls`,
+  `FlushRunBuffer` and `DrainCloses` with their messages, the run buffer, the Workflow Task
+  interceptor, the deferred withdrawal of the batch before a Local Activity, and the metrics
+  only they kept (`stream_hook_latency`, `stream_flush_failures`, `stream_close_retries`,
+  `stream_records_dropped`).

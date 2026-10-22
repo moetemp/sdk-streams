@@ -556,7 +556,7 @@ impl Store for MemoryStore {
                     }
                 }
             }
-            let settles = workflow && batch.records.is_empty() && !withdrawal.defer;
+            let settles = workflow && batch.records.is_empty();
             if keys.auto_close(now, tombstone) && !settles {
                 return Err(refuse(Reason::Closed, "the Stream is closed"));
             }
@@ -592,9 +592,7 @@ impl Store for MemoryStore {
             let mut index = words(keys.get(&index_field));
             let mut withdrawn = vec![];
             let mut flagged;
-            if workflow && withdrawal.defer {
-                flagged = false;
-            } else if workflow {
+            if workflow {
                 (withdrawn, index) = withdraw_tasks(&index, &task, &completed, failed);
                 flagged = !withdrawn.is_empty();
                 keys.keep_facts(&run, &task, &completed, &failed_text(failed));
