@@ -14,6 +14,8 @@ message NativeStreamConfig {
     // The backend name that lang registered this extension under. Empty is `native`. The crate
     // puts it in each StreamRef it builds.
     string backend = 1;
+    // The Retention of a create that gives none. Empty leaves it to the server's default.
+    google.protobuf.Duration retention = 2;
 }
 
 // The settings of the Redis Stream extension. Lang builds it from the plugin options.

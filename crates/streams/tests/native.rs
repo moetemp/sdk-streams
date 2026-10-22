@@ -432,3 +432,45 @@ async fn a_deferred_batch_on_the_server_is_withdrawn_when_its_task_fails() {
         ["before".to_string(), "retry".into()]
     );
 }
+
+#[tokio::test]
+async fn a_create_with_no_retention_takes_the_config_default() {
+    let Some(mut case) = case().await else {
+        return;
+    };
+    let config = temporalio_streams::proto::NativeStreamConfig {
+        retention: Some(prost_types::Duration {
+            seconds: 3 * 60 * 60,
+            nanos: 0,
+        }),
+        ..Default::default()
+    };
+    let url = support::server_url("STREAMS_NATIVE_URL").unwrap();
+    let options = ConnectionOptions::new(Url::parse(&url).unwrap())
+        .identity("streams-native-test")
+        .build();
+    case.ext = NativeStreamExtension::from_config_bytes(&config.encode_to_vec(), None).unwrap();
+    case.ext.attach(Connection::connect(options).await.unwrap());
+    let _: CreateStreamResponse = case
+        .call(
+            "CreateStream",
+            CreateStreamRequest {
+                namespace: case.namespace.clone(),
+                stream_id: case.stream.clone(),
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+    let described: DescribeStreamResponse = case
+        .call(
+            "DescribeStream",
+            DescribeStreamRequest {
+                namespace: case.namespace.clone(),
+                stream: case.stream_ref(),
+            },
+        )
+        .await
+        .unwrap();
+    assert_eq!(described.retention.unwrap().seconds, 3 * 60 * 60);
+}

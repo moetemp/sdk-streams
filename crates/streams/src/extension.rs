@@ -411,7 +411,8 @@ impl NativeStreamExtension {
             "" => NATIVE_BACKEND.to_string(),
             name => name.to_string(),
         };
-        Ok(Self::create(backend, meter))
+        let native = Arc::new(ServiceStore::with_retention(duration(config.retention)));
+        Ok(Self::build(backend, native, meter))
     }
 
     /// Builds an extension with no connection yet. `backend` is the name in the refs it builds.
@@ -419,14 +420,21 @@ impl NativeStreamExtension {
         backend: impl Into<String>,
         meter: Option<TemporalMeter>,
     ) -> Arc<StreamExtension> {
-        let native = Arc::new(ServiceStore::new());
+        Self::build(backend.into(), Arc::new(ServiceStore::new()), meter)
+    }
+
+    fn build(
+        backend: String,
+        native: Arc<ServiceStore>,
+        meter: Option<TemporalMeter>,
+    ) -> Arc<StreamExtension> {
         let mut options = RedisStoreOptions::new(String::new());
         options.retention = native.default_retention();
         let options = ExtensionOptions {
             store: options,
             durable_writes: 0,
             durable_timeout: Duration::from_secs(1),
-            backend: backend.into(),
+            backend,
         };
         let store: Arc<dyn Store> = native.clone();
         StreamExtension::build(
@@ -477,6 +485,7 @@ mod tests {
         assert_eq!(ext.options().backend, "native");
         let config = NativeStreamConfig {
             backend: "server".to_string(),
+            ..Default::default()
         };
         let ext = StreamExtension::for_backend("native", &config.encode_to_vec(), None).unwrap();
         assert_eq!(ext.options().backend, "server");

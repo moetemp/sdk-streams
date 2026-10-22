@@ -40,6 +40,8 @@ const SERVER_RETENTION: Duration = Duration::from_secs(7 * 24 * 60 * 60);
 #[derive(Default)]
 pub struct ServiceStore {
     connection: RwLock<Option<Connection>>,
+    /// The Retention of a create that gives none, or the server's default.
+    retention: Option<Duration>,
 }
 
 impl std::fmt::Debug for ServiceStore {
@@ -65,6 +67,14 @@ impl ServiceStore {
     /// A Store with no connection yet. [ServiceStore::attach] gives it one.
     pub fn new() -> Self {
         Self::default()
+    }
+
+    /// A Store whose creates with no Retention take `retention`, as a Redis Store's do.
+    pub fn with_retention(retention: Option<Duration>) -> Self {
+        Self {
+            retention,
+            ..Self::default()
+        }
     }
 
     /// Uses `connection` for every later call, for example the Worker's after a rotation.
@@ -186,7 +196,7 @@ impl Store for ServiceStore {
     }
 
     fn default_retention(&self) -> Duration {
-        SERVER_RETENTION
+        self.retention.unwrap_or(SERVER_RETENTION)
     }
 
     async fn create(
@@ -202,6 +212,7 @@ impl Store for ServiceStore {
             Owner::Workflow(run) => run,
             Owner::Client => None,
         };
+        let retention = retention.or(self.retention);
         let request = CreateStreamRequest {
             namespace: namespace.to_string(),
             stream_id: stream_id.to_string(),
