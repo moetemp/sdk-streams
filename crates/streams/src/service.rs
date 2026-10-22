@@ -14,7 +14,8 @@ use crate::{
     },
     record::{close_record, data_records, supersession},
     store::{
-        Batch, Capabilities, CreateOutcome, FORMAT_VERSION, Owner, Store, StreamState, Withdrawal,
+        Batch, Capabilities, CreateOutcome, FORMAT_VERSION, Owner, RunOwner, Store, StreamState,
+        Withdrawal,
     },
 };
 use prost::Message;
@@ -102,11 +103,14 @@ impl StreamService {
         // A Workflow's call that runs outside Workflow code, such as a Local Activity, names the
         // owning run, so the Stream keeps the safety TTL of a Workflow-owned one.
         let owner = match &request.owner {
-            Some(_) => {
+            Some(producer) => {
                 self.store
                     .capabilities()
                     .require(Capabilities::SAFETY_TTL)?;
-                Owner::Workflow
+                Owner::Workflow(Some(RunOwner {
+                    producer,
+                    close_with_run: request.close_with_run,
+                }))
             }
             None => Owner::Client,
         };
