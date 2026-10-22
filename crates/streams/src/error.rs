@@ -36,8 +36,6 @@ pub enum Reason {
     Invalid,
     /// The Store failed or did not answer.
     Storage,
-    /// A writer's buffer is full.
-    BufferFull,
     /// No writer has the id.
     UnknownWriter,
     /// The Store lacks a capability that the call needs.
@@ -59,7 +57,6 @@ impl Reason {
             Reason::TooLarge => "stream_too_large",
             Reason::Invalid => "stream_invalid",
             Reason::Storage => "stream_storage",
-            Reason::BufferFull => "stream_buffer_full",
             Reason::UnknownWriter => "stream_unknown_writer",
             Reason::Unsupported => "stream_unsupported",
         }
@@ -75,7 +72,6 @@ impl Reason {
             Reason::AlreadyExists => Code::AlreadyExists,
             Reason::Offset | Reason::TooLarge | Reason::Invalid => Code::InvalidArgument,
             Reason::Storage => Code::Unavailable,
-            Reason::BufferFull => Code::ResourceExhausted,
             Reason::Unsupported => Code::Unimplemented,
         }
     }

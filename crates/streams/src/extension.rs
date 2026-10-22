@@ -8,9 +8,8 @@ use crate::{
         AppendRecordsRequest, BufferWorkflowCallsRequest, BufferWorkflowCallsResponse,
         CloseStreamRequest, CloseWriterRequest, CloseWriterResponse, CloseWritersRequest,
         CloseWritersResponse, DescribeStreamRequest, DrainClosesRequest, DrainClosesResponse,
-        FlushRunBufferRequest, FlushRunBufferResponse, FlushWriterRequest, FlushWriterResponse,
-        OpenWriterRequest, OpenWriterResponse, PublishRequest, PublishResponse, ReadRecordsRequest,
-        RedisStreamConfig, WriteRecordsRequest, WriteRecordsResponse,
+        FlushRunBufferRequest, FlushRunBufferResponse, OpenWriterRequest, OpenWriterResponse,
+        ReadRecordsRequest, RedisStreamConfig, WriteRecordsRequest, WriteRecordsResponse,
     },
     redis::{RedisStore, RedisStoreOptions},
     service::StreamService,
@@ -195,15 +194,6 @@ impl StreamExtension {
                     .buffer(decode::<BufferWorkflowCallsRequest>(input)?)?;
                 BufferWorkflowCallsResponse {}.encode_to_vec()
             }
-            "Publish" => {
-                let request = decode::<PublishRequest>(input)?;
-                self.shared.writers.publish(
-                    request.writer_id,
-                    request.records,
-                    request.force_flush,
-                )?;
-                PublishResponse {}.encode_to_vec()
-            }
             _ => return Err(ExtensionError::unknown_method(method)),
         };
         Ok(output)
@@ -276,11 +266,6 @@ impl StreamExtension {
                     last_offset,
                 }
                 .encode_to_vec()
-            }
-            "FlushWriter" => {
-                let request = decode::<FlushWriterRequest>(input)?;
-                let last_offset = self.shared.writers.flush(request.writer_id).await?;
-                FlushWriterResponse { last_offset }.encode_to_vec()
             }
             "CloseWriters" => {
                 decode::<CloseWritersRequest>(input)?;
