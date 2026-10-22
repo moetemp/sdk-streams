@@ -46,20 +46,10 @@ Each entry has `r`, the encoded `temporal.api.streamservice.v1.StreamRecord` wit
 only `s` withdraws and has no Record. A reader gives a `SUPERSEDED` item for `s` just before the
 Record of the same entry. An offset is the entry id `<ms>-<seq>` packed as `ms << 20 | seq`.
 
-## Workflow batches before a Local Activity
-
-A Workflow batch that a Local Activity flush writes has no withdrawal facts yet, since Core
-gives them only with the task's completion. The append script gets `*` as its completed task
-key. It then withdraws no task, flags nothing and keeps no `lf`, but it still fences, dedupes,
-adds the task to `ti` and applies a retry run's withdrawal. The task's completion sends the next
-batch of the same epoch with the facts, an empty one if it has no Records, so the withdrawal
-reaches the Stream then.
-
 ## Withdrawals after a close
 
 A Workflow batch with facts and no Records goes in also after a close, so a task that completes
-after a close still withdraws a failed task's Records. When a close refuses a Workflow batch with
-Records, the crate drops the Records and sends a batch with only the facts. A read that reaches
+after a close still withdraws a failed task's Records. A read that reaches
 the close Record gives the `SUPERSEDED` items written after it just before the close Record.
 
 ## Auto close
