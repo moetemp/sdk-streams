@@ -162,6 +162,12 @@ interface stream-service {
     withdraw-run: option<string>,
     /// @nexus.doc "Close with no result after this long with no append. Empty never auto-closes."
     auto-close: option<duration>,
+    /// @nexus.doc "The Workflow run that owns the Stream. The Workflow transport sets it."
+    owner: option<producer>,
+    /// @nexus.doc "Close with the owner run chain's result when it closes. Native only."
+    close-with-run: option<bool>,
+    /// @nexus.doc "The Stream's ref, with the owner fields."
+    %ref: option<stream-ref>,
     /// @nexus.omit
     namespace: placeholder,
   }

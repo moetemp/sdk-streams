@@ -103,6 +103,12 @@ impl StreamService {
             None => Owner::Client,
         };
         if !request.withdraw_run.is_empty() {
+            // The Superseded item names its Producer, and only the owner can be it here.
+            if request.owner.is_none() {
+                return Err(StreamError::invalid(
+                    "A create with withdraw_run needs the owner run",
+                ));
+            }
             self.store.capabilities().require(Capabilities::RUN_FENCE)?;
         }
         let bytes = run_supersession(request.owner.as_ref(), &request.withdraw_run);
