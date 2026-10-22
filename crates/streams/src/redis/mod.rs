@@ -182,7 +182,8 @@ impl RedisStore {
             .arg(
                 auto_close
                     .filter(|period| !period.is_zero())
-                    .map(|period| millis(period).to_string())
+                    // Stored in ms, so a period below 1 ms rounds up and never stores as no wait.
+                    .map(|period| millis(period).max(1).to_string())
                     .unwrap_or_default(),
             )
             .invoke_async(&mut self.shared.clone())
