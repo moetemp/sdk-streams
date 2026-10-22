@@ -96,6 +96,7 @@ impl Run {
             id: self.stream.clone(),
             workflow_id: self.workflow_id.clone(),
             first_execution_run_id: self.first_run_id.clone(),
+            ..Default::default()
         })
     }
 
