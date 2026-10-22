@@ -171,3 +171,29 @@ end
 local function add(log, fields)
   return redis.call('XADD', log, '*', unpack(fields))
 end
+
+-- The close Record of an auto close: an encoded StreamRecord with only kind = CLOSE (3). It has
+-- no Producer, result or failure, so every script can write it with no argument.
+local AUTO_CLOSE_RECORD = '\8\3'
+
+-- Closes an open Stream whose auto close period passed since its last append, so the call that
+-- finds it late acts as if the close came on time. Answers true when the Stream is closed after
+-- the call, by this auto close or by an earlier close.
+local function auto_close(meta, log, now, tombstone)
+  if redis.call('HGET', meta, 'closed') then
+    return true
+  end
+  local period = tonumber(redis.call('HGET', meta, 'ac'))
+  if not period then
+    return false
+  end
+  local last = tonumber(redis.call('HGET', meta, 'la')) or 0
+  if now < last + period or check_ids_fit(log, now, 1) then
+    return false
+  end
+  trim(meta, log, now)
+  local id = add(log, {'r', AUTO_CLOSE_RECORD})
+  redis.call('HSET', meta, 'closed', '1', 'close_id', id, 'newest', id)
+  refresh(meta, log, now, 0, tombstone)
+  return true
+end

@@ -39,7 +39,7 @@ if last then
     end
   end
 end
-if redis.call('HGET', meta, 'closed') then
+if auto_close(meta, log, now, tombstone) then
   return refuse('CLOSED', 'the Stream is closed')
 end
 if run ~= '' and redis.call('HGET', meta, 'wr|' .. run) then
@@ -124,6 +124,10 @@ if #withdrawn > 0 then
 end
 if run ~= '' and records > 0 then
   redis.call('HSET', meta, 'run|' .. run, '1')
+end
+-- Only Records hold off the auto close. An empty batch that withdraws adds no data.
+if records > 0 and redis.call('HGET', meta, 'ac') then
+  redis.call('HSET', meta, 'la', now)
 end
 if last_id ~= '' then
   redis.call('HSET', meta, 'newest', last_id)

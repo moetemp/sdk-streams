@@ -4,6 +4,7 @@
 
 mod support;
 
+use prost::Message;
 use prost_types::Timestamp;
 use std::time::Duration;
 use support::{Run, Target, record, records_of, stores, supersession};
@@ -81,13 +82,27 @@ async fn a_create_writes_the_key_once_and_keeps_its_retention() {
         let day = Some(Duration::from_secs(86_400));
         let created = target
             .store
-            .create(&target.namespace, &target.stream, day, Owner::Client, &none)
+            .create(
+                &target.namespace,
+                &target.stream,
+                day,
+                None,
+                Owner::Client,
+                &none,
+            )
             .await
             .unwrap();
         assert_eq!(created.outcome, CreateOutcome::Created);
         let again = target
             .store
-            .create(&target.namespace, &target.stream, day, Owner::Client, &none)
+            .create(
+                &target.namespace,
+                &target.stream,
+                day,
+                None,
+                Owner::Client,
+                &none,
+            )
             .await
             .unwrap();
         assert_eq!(again.outcome, CreateOutcome::Exists);
@@ -96,6 +111,7 @@ async fn a_create_writes_the_key_once_and_keeps_its_retention() {
             .create(
                 &target.namespace,
                 &target.stream,
+                None,
                 None,
                 Owner::Client,
                 &none,
@@ -185,6 +201,7 @@ async fn a_close_stops_appends_but_not_a_resend() {
                 &target.namespace,
                 &target.stream,
                 None,
+                None,
                 Owner::Client,
                 &Withdrawal::default(),
             )
@@ -211,6 +228,7 @@ async fn a_newer_format_refuses_every_write() {
                 &target.namespace,
                 &target.stream,
                 None,
+                None,
                 Owner::Client,
                 &Withdrawal::default(),
             )
@@ -231,6 +249,7 @@ async fn an_expired_stream_refuses_writes_and_its_create() {
             .create(
                 &target.namespace,
                 &target.stream,
+                None,
                 None,
                 Owner::Client,
                 &Withdrawal::default(),
@@ -476,6 +495,7 @@ async fn an_append_trims_by_retention_and_keeps_the_watermark() {
                 &target.namespace,
                 &target.stream,
                 Some(Duration::from_millis(200)),
+                None,
                 // An open Workflow Stream keeps its key, so only the Retention trims.
                 Owner::Workflow,
                 &none,
@@ -723,5 +743,188 @@ async fn every_store_keeps_the_meta_fields_of_the_shared_vectors() {
         ] {
             assert!(target.meta(&field).await.is_some(), "{field}");
         }
+    }
+}
+
+#[tokio::test]
+async fn an_auto_close_closes_a_quiet_stream_on_its_next_write() {
+    for target in stores().await {
+        let none = Withdrawal::default();
+        let period = Some(Duration::from_millis(300));
+        let create = || {
+            target.store.create(
+                &target.namespace,
+                &target.stream,
+                None,
+                period,
+                Owner::Client,
+                &none,
+            )
+        };
+        let created = create().await.unwrap();
+        assert_eq!(created.outcome, CreateOutcome::Created);
+        assert_eq!(created.auto_close, period);
+        assert_eq!(create().await.unwrap().outcome, CreateOutcome::Exists);
+        let other = target
+            .store
+            .create(
+                &target.namespace,
+                &target.stream,
+                None,
+                None,
+                Owner::Client,
+                &none,
+            )
+            .await
+            .unwrap();
+        assert_eq!(other.outcome, CreateOutcome::Conflict);
+        assert_eq!(other.auto_close, period);
+
+        // Each append holds the close off for one more period.
+        let p = client(1);
+        append(&target, &p, 1, &["a"]).await.unwrap();
+        tokio::time::sleep(Duration::from_millis(200)).await;
+        append(&target, &p, 2, &["b"]).await.unwrap();
+        tokio::time::sleep(Duration::from_millis(200)).await;
+        let last = append(&target, &p, 3, &["c"]).await.unwrap();
+        let (state, _) = target
+            .store
+            .read(&target.namespace, &target.stream, 0, 0)
+            .await
+            .unwrap();
+        assert_eq!(state.auto_close, period);
+        assert!(!state.auto_close_due());
+
+        tokio::time::sleep(Duration::from_millis(400)).await;
+        let (state, _) = target
+            .store
+            .read(&target.namespace, &target.stream, 0, 0)
+            .await
+            .unwrap();
+        assert!(state.auto_close_due());
+        assert_eq!(state.closed_at, None);
+        // The append that finds the period passed writes the close Record and is refused.
+        assert_eq!(
+            append(&target, &p, 4, &["d"]).await.unwrap_err().reason,
+            Reason::Closed
+        );
+        // A resend still gets its first answer.
+        assert_eq!(
+            append(&target, &p, 3, &["c"]).await.unwrap().offsets,
+            last.offsets
+        );
+        let entries = target.entries().await;
+        let close = entries.last().unwrap();
+        let record =
+            temporalio_streams::proto::StreamRecord::decode(close.record.as_deref().unwrap())
+                .unwrap();
+        assert_eq!(
+            record.kind,
+            temporalio_streams::proto::StreamRecordKind::Close as i32
+        );
+        assert!(record.producer.is_none());
+        assert!(record.close_result.is_none() && record.close_failure.is_none());
+        assert_eq!(target.texts().await, ["a", "b", "c"]);
+        let closed = target.close(&p).await.unwrap();
+        assert!(closed.already);
+        assert_eq!(closed.offset, close.offset);
+        assert_eq!(create().await.unwrap().outcome, CreateOutcome::Closed);
+    }
+}
+
+#[tokio::test]
+async fn an_auto_close_counts_from_the_create_and_each_step_applies_it_once() {
+    for target in stores().await {
+        let none = Withdrawal::default();
+        target
+            .store
+            .create(
+                &target.namespace,
+                &target.stream,
+                None,
+                Some(Duration::from_millis(200)),
+                Owner::Workflow,
+                &none,
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            target
+                .store
+                .auto_close(&target.namespace, &target.stream)
+                .await
+                .unwrap(),
+            None
+        );
+        tokio::time::sleep(Duration::from_millis(300)).await;
+        let first = target
+            .store
+            .auto_close(&target.namespace, &target.stream)
+            .await
+            .unwrap();
+        let again = target
+            .store
+            .auto_close(&target.namespace, &target.stream)
+            .await
+            .unwrap();
+        assert!(first.is_some());
+        assert_eq!(first, again);
+        assert_eq!(target.log_len().await, 1);
+        let (state, _) = target
+            .store
+            .read(&target.namespace, &target.stream, 0, 0)
+            .await
+            .unwrap();
+        assert_eq!(state.closed_at, first);
+        // A closed Stream keeps its Retention, not the safety TTL.
+        let (log, _) = target.ttls().await;
+        assert!(
+            log <= Duration::from_secs(7 * 86_400).as_millis() as i64,
+            "{log}"
+        );
+        assert!(
+            target
+                .store
+                .capabilities()
+                .contains(Capabilities::AUTO_CLOSE)
+        );
+    }
+}
+
+#[tokio::test]
+async fn an_auto_close_period_at_the_edges_neither_overflows_nor_rounds_to_zero() {
+    for target in stores().await {
+        let none = Withdrawal::default();
+        let created = target
+            .store
+            .create(
+                &target.namespace,
+                &target.stream,
+                None,
+                Some(Duration::from_micros(500)),
+                Owner::Client,
+                &none,
+            )
+            .await
+            .unwrap();
+        assert_eq!(created.auto_close, Some(Duration::from_millis(1)));
+    }
+    for target in stores().await {
+        let none = Withdrawal::default();
+        target
+            .store
+            .create(
+                &target.namespace,
+                &target.stream,
+                None,
+                Some(Duration::from_secs(u64::MAX / 4)),
+                Owner::Client,
+                &none,
+            )
+            .await
+            .unwrap();
+        append(&target, &client(1), 1, &["a"]).await.unwrap();
+        append(&target, &client(1), 2, &["b"]).await.unwrap();
+        assert_eq!(target.texts().await, ["a", "b"]);
     }
 }

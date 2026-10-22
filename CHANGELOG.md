@@ -34,3 +34,9 @@
 - Reserved `ReadRecordsRequest.idle_timeout` (9) and `STREAM_RECORD_KIND_IDLE` (4). A read ends
   with Records, the close Record, or nothing after `wait`. A Reader that stops after a quiet
   period sets its own timer and resumes from `next_offset`.
+- Added `CreateStreamRequest.auto_close` (5) and `DescribeStreamResponse.auto_close` (4). A
+  Stream with an auto close closes with no result when no Record was appended for that long,
+  counted from the create. Each write step applies it before it acts, and a read or a describe
+  that finds it due applies it with the new auto close script. A long-polling read wakes when it
+  comes due. A create with another auto close is a conflict. A Store without the new
+  `auto_close` capability refuses such a create with `stream_unsupported`.

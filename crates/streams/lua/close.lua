@@ -14,7 +14,7 @@ local refused = check_live(meta, version, now)
 if refused then
   return refused
 end
-if redis.call('HGET', meta, 'closed') then
+if auto_close(meta, log, now, tombstone) then
   return {'already', redis.call('HGET', meta, 'close_id'), ''}
 end
 if run ~= '' and redis.call('HGET', meta, 'wr|' .. run) then

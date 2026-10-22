@@ -20,6 +20,9 @@ use std::{
 };
 use tokio::{sync::Notify, time::Instant};
 
+/// The close Record of an auto close, as `AUTO_CLOSE_RECORD` in `lib.lua`.
+const AUTO_CLOSE_RECORD: &[u8] = b"\x08\x03";
+
 /// The most sequence numbers of one millisecond, as an offset packs them in 20 bits.
 const SEQ_LIMIT: u64 = 1 << crate::offset::SEQ_BITS;
 
@@ -244,6 +247,34 @@ impl Keys {
         Ok(())
     }
 
+    /// The `auto_close` step: closes an open Stream whose period passed since its last append.
+    /// Answers true when the Stream is closed after the step.
+    fn auto_close(&mut self, now: i64, tombstone: i64) -> bool {
+        if self.get("closed").is_some() {
+            return true;
+        }
+        let Some(period) = self.get("ac").and_then(|ac| ac.parse::<i64>().ok()) else {
+            return false;
+        };
+        let last: i64 = self.get("la").and_then(|la| la.parse().ok()).unwrap_or(0);
+        if now < last.saturating_add(period) || self.check_ids_fit(now, 1).is_err() {
+            return false;
+        }
+        self.trim(now);
+        let id = self.add(
+            now,
+            Fields {
+                record: Some(AUTO_CLOSE_RECORD.to_vec()),
+                supersession: None,
+            },
+        );
+        self.set("closed", "1");
+        self.set("close_id", id.clone());
+        self.set("newest", id);
+        self.refresh(now, 0, tombstone);
+        true
+    }
+
     /// `XADD *`: the next id after the newest one, in this millisecond or a later one.
     fn add(&mut self, now: i64, fields: Fields) -> String {
         let now = now.max(0) as u64;
@@ -397,10 +428,16 @@ impl Store for MemoryStore {
         namespace: &str,
         stream_id: &str,
         retention: Option<Duration>,
+        auto_close: Option<Duration>,
         owner: Owner,
         withdrawal: &Withdrawal<'_>,
     ) -> StreamResult<Created> {
         let retention = millis(retention.filter(|r| !r.is_zero()).unwrap_or(self.retention));
+        let period = auto_close
+            .filter(|period| !period.is_zero())
+            // Stored in ms, so a period below 1 ms rounds up and never stores as no wait.
+            .map(|period| millis(period).max(1).to_string())
+            .unwrap_or_default();
         let owner = match owner {
             Owner::Workflow => "wf",
             Owner::Client => "client",
@@ -412,22 +449,27 @@ impl Store for MemoryStore {
                 keys.set("v", FORMAT_VERSION.to_string());
                 keys.set("ret", retention.to_string());
                 keys.set("own", owner);
+                if !period.is_empty() {
+                    keys.set("ac", period.clone());
+                    keys.set("la", now.to_string());
+                }
                 keys.withdraw_run(&withdrawn_run);
                 keys.refresh(now, safety, tombstone);
-                return Ok((CreateOutcome::Created, retention, false));
+                return Ok((CreateOutcome::Created, retention, false, period.clone()));
             };
             let stored_ms: i64 = stored.parse().unwrap_or(0);
+            let stored_period = keys.get("ac").cloned().unwrap_or_default();
             match keys.check_live(now) {
                 Err(error) if error.reason == Reason::Expired => {
-                    return Ok((CreateOutcome::Expired, stored_ms, false));
+                    return Ok((CreateOutcome::Expired, stored_ms, false, stored_period));
                 }
                 Err(error) => return Err(error),
                 Ok(()) => {}
             }
-            if keys.get("closed").is_some() {
-                return Ok((CreateOutcome::Closed, stored_ms, false));
+            if keys.auto_close(now, tombstone) {
+                return Ok((CreateOutcome::Closed, stored_ms, false, stored_period));
             }
-            let outcome = if stored_ms != retention {
+            let outcome = if stored_ms != retention || stored_period != period {
                 CreateOutcome::Conflict
             } else {
                 CreateOutcome::Exists
@@ -449,16 +491,18 @@ impl Store for MemoryStore {
                 keys.refresh(now, safety, tombstone);
                 flagged = true;
             }
-            Ok((outcome, stored_ms, flagged))
+            Ok((outcome, stored_ms, flagged, stored_period))
         });
-        let (outcome, stored, flagged) = created?;
-        if flagged {
+        let (outcome, stored, flagged, period) = created?;
+        // A create that finds an auto close due writes the close Record.
+        if flagged || outcome == CreateOutcome::Closed {
             self.appended.notify_waiters();
         }
         Ok(Created {
             outcome,
             retention: Duration::from_millis(stored.max(0) as u64),
             flagged,
+            auto_close: period.parse().ok().map(Duration::from_millis),
         })
     }
 
@@ -512,7 +556,7 @@ impl Store for MemoryStore {
                     }
                 }
             }
-            if keys.get("closed").is_some() {
+            if keys.auto_close(now, tombstone) {
                 return Err(refuse(Reason::Closed, "the Stream is closed"));
             }
             if !run.is_empty() && keys.get(&format!("wr|{run}")).is_some() {
@@ -616,12 +660,22 @@ impl Store for MemoryStore {
             if !run.is_empty() && records > 0 {
                 keys.set(&format!("run|{run}"), "1");
             }
+            if records > 0 && keys.get("ac").is_some() {
+                keys.set("la", now.to_string());
+            }
             if !last.is_empty() {
                 keys.set("newest", last.clone());
             }
             keys.refresh(now, safety, tombstone);
             Ok((false, first, last, flagged))
         });
+        // A refusal may come from an auto close that this step wrote, so waiters look again.
+        if appended
+            .as_ref()
+            .is_err_and(|error| error.reason == Reason::Closed)
+        {
+            self.appended.notify_waiters();
+        }
         let (resend, first, last, flagged) = appended?;
         if !resend && !last.is_empty() {
             self.appended.notify_waiters();
@@ -657,7 +711,7 @@ impl Store for MemoryStore {
         let tombstone = millis(TOMBSTONE);
         let closed = self.with(namespace, stream_id, |keys, now| {
             keys.check_live(now)?;
-            if keys.get("closed").is_some() {
+            if keys.auto_close(now, tombstone) {
                 let id = keys.get("close_id").cloned().unwrap_or_default();
                 return Ok((id, true, false));
             }
@@ -725,9 +779,8 @@ impl Store for MemoryStore {
             Ok((id, false, flagged))
         });
         let (id, already, flagged) = closed?;
-        if !already {
-            self.appended.notify_waiters();
-        }
+        // An auto close that this step wrote also answers `already`.
+        self.appended.notify_waiters();
         Ok(Closed {
             offset: offset_of_entry_id(&id)?,
             already,
@@ -766,6 +819,10 @@ impl Store for MemoryStore {
                 retention: Duration::from_millis(number("ret").max(0) as u64),
                 expires_ms: number("exp"),
                 now_ms: now,
+                auto_close: keys
+                    .get("ac")
+                    .map(|_| Duration::from_millis(number("ac").max(0) as u64)),
+                last_append_ms: number("la"),
             };
             let mut entries = vec![];
             if let Some(log) = keys.log.as_ref() {
@@ -779,6 +836,24 @@ impl Store for MemoryStore {
             }
             Ok((state, entries))
         })
+    }
+
+    async fn auto_close(&self, namespace: &str, stream_id: &str) -> StreamResult<Option<i64>> {
+        let tombstone = millis(TOMBSTONE);
+        let closed = self.with(namespace, stream_id, |keys, now| {
+            keys.check_live(now)?;
+            let was_open = keys.get("closed").is_none();
+            if !keys.auto_close(now, tombstone) {
+                return Ok((None, false));
+            }
+            let id = keys.get("close_id").cloned().unwrap_or_default();
+            Ok((Some(id), was_open))
+        });
+        let (id, wrote) = closed?;
+        if wrote {
+            self.appended.notify_waiters();
+        }
+        id.map(|id| offset_of_entry_id(&id)).transpose()
     }
 
     async fn wait_after(
