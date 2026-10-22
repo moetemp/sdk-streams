@@ -46,6 +46,10 @@ needs CMake and Go.
 - `nexus/stream-service.wit` is the Stream service as a System Nexus service, backed by the
   proto above. Each SDK copies it and generates its bindings with nexgen. A test keeps every
   line at most 100 columns.
+- `nexus/stream-writer.wit` is the crate's writer calls (`OpenWriter`, `WriteRecords`,
+  `CloseWriter`, `CloseWriters`) as an internal, client-only interface, backed by
+  `extension.proto`. It is not a Temporal API, and no server serves it. Each SDK copies it beside
+  the Stream service WIT and generates a `Writer` for Activities and clients.
 - `protos/api_include` is a copy of the Temporal API protos, for imports only.
   `scripts/sync-api-protos.sh` refreshes it from the pinned sdk-rust commit, and CI fails when the
   copy differs.
