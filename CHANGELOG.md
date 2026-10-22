@@ -64,6 +64,10 @@
   A Workflow batch with Records that a close refuses is followed by one with only the facts.
 - Added `nexus/stream-service.wit`, the source of the Stream service WIT that each SDK copies,
   with each line at most 100 columns.
+- The WIT declares the Stream handle as `resource stream`, built from its `stream-ref`, with
+  the methods `append-records`, `close`, `read-records` and `describe`. Each method takes its
+  request without the `stream` field. `create-stream` returns the handle. The proto messages and
+  the operation names on the wire stay the same.
 - Removed the buffered writer path: the `Publish` and `FlushWriter` calls and their messages,
   the interval flush, the buffer limit, the `stream_buffer_full` reason and its metric.
   `OpenWriterRequest` reserves `batch_interval` (4) and `max_buffered_records` (7). An SDK

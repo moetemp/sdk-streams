@@ -290,8 +290,54 @@ interface stream-service {
     auto-close: option<duration>,
   }
 
+  // A handle on one Stream. Its stream-ref is its serialized form, so a handle passes through
+  // Workflow input, Activity input and Signals as the ref. Each method fills in the ref of its
+  // request and takes the rest. The wire operations stay the same. nexgen has no doc directive
+  // on a resource yet, so the docs stay on the operations.
+  resource %stream {
+    constructor(%stream: stream-ref);
+
+    /// @nexus.operation "append-records"
+    append-records: func(
+      producer: option<producer>,
+      sequence: option<s64>,
+      records: list<append-record>,
+      previous-completed-task: option<workflow-task-epoch>,
+      failed-tasks: list<s64>,
+      withdraw-run: option<string>,
+    ) -> append-records-response;
+
+    /// @nexus.operation "close-stream"
+    close: func(
+      producer: option<producer>,
+      %result: option<payload>,
+      failure: option<failure>,
+      previous-completed-task: option<workflow-task-epoch>,
+      failed-tasks: list<s64>,
+    );
+
+    /// @nexus.operation "read-records"
+    read-records: func(
+      from-offset: option<s64>,
+      start: option<read-start>,
+      topics: list<string>,
+      topic-prefixes: list<string>,
+      max-records: option<s32>,
+      wait: option<duration>,
+      create-wait: option<duration>,
+    ) -> read-records-response;
+
+    /// @nexus.operation "describe-stream"
+    describe: func() -> describe-stream-response;
+  }
+
+  // The handle is built from the response. The created and status fields of the response are
+  // not on the handle.
+  /// @nexus.proto "temporal.api.streamservice.v1.CreateStreamResponse"
+  type create-stream-result = own<%stream>;
+
   /// @nexus.operation name="CreateStream"
-  create-stream: func(request: create-stream-request) -> create-stream-response;
+  create-stream: func(request: create-stream-request) -> create-stream-result;
 
   /// @nexus.doc
   ///   "In Workflow code, Brook buffers this call in the run, and the facade drops the answer."

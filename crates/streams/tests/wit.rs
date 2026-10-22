@@ -29,3 +29,26 @@ fn the_wit_names_each_operation_of_the_service() {
     }
     assert!(!WIT.contains("idle"), "the WIT still has the idle timeout");
 }
+
+#[test]
+fn the_wit_declares_the_stream_handle_with_its_methods() {
+    assert!(WIT.contains("  resource %stream {\n    constructor(%stream: stream-ref);\n"));
+    for (method, operation) in [
+        ("append-records", "append-records"),
+        ("close", "close-stream"),
+        ("read-records", "read-records"),
+        ("describe", "describe-stream"),
+    ] {
+        assert!(
+            WIT.contains(&format!(
+                "    /// @nexus.operation \"{operation}\"\n    {method}: func("
+            )),
+            "{method}"
+        );
+    }
+    assert!(
+        WIT.contains(
+            "create-stream: func(request: create-stream-request) -> create-stream-result;"
+        )
+    );
+}
