@@ -69,9 +69,9 @@ enum StreamRecordKind {
     // Lua flags the first batch of a new epoch. The read makes this Record from the flag.
     STREAM_RECORD_KIND_SUPERSEDED = 2;
     STREAM_RECORD_KIND_CLOSE = 3;
-    // The last Record of a read that saw no new Record for idle_timeout. Its offset is the
-    // newest offset read + 1, the place to resume from.
-    STREAM_RECORD_KIND_IDLE = 4;
+    // A Reader that stops after a quiet period sets its own timer and resumes from next_offset.
+    reserved 4;
+    reserved "STREAM_RECORD_KIND_IDLE";
 }
 
 message Supersession {
@@ -180,9 +180,8 @@ message ReadRecordsRequest {
     // How long to wait for a Stream that nobody created yet. Empty fails at once with
     // NOT_FOUND. At most 60 s.
     google.protobuf.Duration create_wait = 8;
-    // End the read with an IDLE Record when no new Record comes for this long. Empty never
-    // ends on idle. The facade counts it across reads, since one read waits at most 60 s.
-    google.protobuf.Duration idle_timeout = 9;
+    reserved 9;
+    reserved "idle_timeout";
     // Also read the Topics that start with one of these. A Record passes when its Topic is in
     // topics or starts with a prefix. Both empty reads every Topic.
     repeated string topic_prefixes = 10;

@@ -195,8 +195,7 @@ impl StreamService {
         })
     }
 
-    /// A long poll. It ends with the Records it found, a close Record, an Idle Record after
-    /// `idle_timeout`, or nothing after `wait`.
+    /// A long poll. It ends with the Records it found, a close Record, or nothing after `wait`.
     pub(crate) async fn read_records(
         &self,
         request: ReadRecordsRequest,
@@ -212,13 +211,9 @@ impl StreamService {
         };
         let started = Instant::now();
         let wait = duration(request.wait).unwrap_or_default().min(MAX_WAIT);
-        let idle = duration(request.idle_timeout);
         let create_wait = duration(request.create_wait)
             .unwrap_or_default()
             .min(MAX_WAIT);
-        // The read can't end on idle later than on its wait, so an idle timeout past the wait
-        // is the facade's to count across reads.
-        let idle_at = idle.filter(|idle| *idle <= wait).map(|idle| started + idle);
         let deadline = started + wait;
 
         let mut state = self.created(namespace, &id, started + create_wait).await?;
@@ -257,12 +252,7 @@ impl StreamService {
                 return Ok(page);
             }
             cursor = scanned;
-            let now = Instant::now();
-            if idle_at.is_some_and(|at| at <= now) {
-                return Ok(idle_response(cursor));
-            }
-            let until = idle_at.map_or(deadline, |idle_at| idle_at.min(deadline));
-            if until <= now {
+            if deadline <= Instant::now() {
                 return Ok(ReadRecordsResponse {
                     records: vec![],
                     next_offset: cursor,
@@ -271,7 +261,7 @@ impl StreamService {
             }
             let after = (cursor - 1).max(state.newest);
             self.metrics.read_waits(true);
-            let woke = self.store.wait_after(namespace, &id, after, until).await;
+            let woke = self.store.wait_after(namespace, &id, after, deadline).await;
             self.metrics.read_waits(false);
             woke?;
             state = self.store.read(namespace, &id, 0, 0).await?.0;
@@ -413,18 +403,6 @@ fn decode(bytes: &[u8], offset: i64) -> StreamResult<StreamRecord> {
         .map_err(|error| StreamError::storage(format!("A stored Record is bad: {error}")))?;
     record.offset = offset;
     Ok(record)
-}
-
-fn idle_response(next_offset: i64) -> ReadRecordsResponse {
-    ReadRecordsResponse {
-        records: vec![StreamRecord {
-            kind: StreamRecordKind::Idle as i32,
-            offset: next_offset,
-            ..Default::default()
-        }],
-        next_offset,
-        done: false,
-    }
 }
 
 /// Fails a read whose Records the Retention or the expiry removed, so a gap never passes in
