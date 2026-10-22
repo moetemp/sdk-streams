@@ -50,6 +50,14 @@
   the withdrawal facts to each Stream the early write reached. A failed early write fails the
   task's completion, and a task that never completes has its early Records withdrawn and
   written again by the next task.
+- Added `WriteRecords`, the awaited publish of an Activity or a client. It appends Records at
+  once for an open writer, after the Records that `Publish` buffered, keeps the writer's
+  Producer epoch and `sequence` order, resends the same batch after a Store failure, and answers
+  the first and the last offset. The interval writer stays, but an SDK needs no interval flush
+  for an awaited publish.
+- A Workflow batch with withdrawal facts and no Records goes in also after a close, and a read
+  that reaches the close Record gives the `Superseded` items written after it just before the
+  close Record. So a task that completes after a close still withdraws a failed task's Records.
 - A Workflow batch with withdrawal facts and no Records goes in also after a close, and a read
   that reaches the close Record gives the `Superseded` items written after it just before the
   close Record. So a task that completes after a close still withdraws a failed task's Records.

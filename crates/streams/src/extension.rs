@@ -10,7 +10,7 @@ use crate::{
         CloseWritersResponse, DescribeStreamRequest, DrainClosesRequest, DrainClosesResponse,
         FlushRunBufferRequest, FlushRunBufferResponse, FlushWriterRequest, FlushWriterResponse,
         OpenWriterRequest, OpenWriterResponse, PublishRequest, PublishResponse, ReadRecordsRequest,
-        RedisStreamConfig,
+        RedisStreamConfig, WriteRecordsRequest, WriteRecordsResponse,
     },
     redis::{RedisStore, RedisStoreOptions},
     service::StreamService,
@@ -263,6 +263,19 @@ impl StreamExtension {
                 let request = decode::<OpenWriterRequest>(input)?;
                 let writer_id = self.shared.writers.open(service, request).await?;
                 OpenWriterResponse { writer_id }.encode_to_vec()
+            }
+            "WriteRecords" => {
+                let request = decode::<WriteRecordsRequest>(input)?;
+                let (first_offset, last_offset) = self
+                    .shared
+                    .writers
+                    .write(request.writer_id, request.records)
+                    .await?;
+                WriteRecordsResponse {
+                    first_offset,
+                    last_offset,
+                }
+                .encode_to_vec()
             }
             "FlushWriter" => {
                 let request = decode::<FlushWriterRequest>(input)?;

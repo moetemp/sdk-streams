@@ -4,6 +4,7 @@ mod support;
 
 use prost::Message;
 use prost_types::Timestamp;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::{
     sync::Arc,
     time::{Duration, Instant, SystemTime, UNIX_EPOCH},
@@ -11,16 +12,18 @@ use std::{
 use temporalio_common::protos::temporal::api::common::v1::Payload;
 use temporalio_sdk_core::{ExtensionError, WorkerExtension};
 use temporalio_streams::{
-    RedisStreamExtension,
+    MemoryStreamExtension, RedisStreamExtension, StreamError, StreamResult,
     epoch::withdraws,
     ids::{activity_producer_id, client_producer_id},
+    memory::MemoryStore,
     proto::{
         AppendRecord, CloseStreamRequest, CloseWriterRequest, CloseWriterResponse,
         CreateStreamRequest, CreateStreamResponse, FlushWriterRequest, FlushWriterResponse,
         OpenWriterRequest, OpenWriterResponse, Producer, ProducerEpoch, ProducerKind,
         PublishRequest, ReadRecordsRequest, ReadRecordsResponse, StreamErrorDetails, StreamRecord,
-        StreamRecordKind, StreamRef,
+        StreamRecordKind, StreamRef, WriteRecordsRequest, WriteRecordsResponse,
     },
+    store::{Appended, Batch, Capabilities, Created, Entry, Owner, Store, StreamState, Withdrawal},
 };
 use tonic::Code;
 
@@ -158,6 +161,20 @@ impl Case {
         self.ext
             .call("Publish", &request.encode_to_vec())
             .map(|_| ())
+    }
+
+    /// An awaited publish: the Records are in the Store when it returns.
+    async fn write(&self, writer_id: u64, texts: &[&str]) -> Result<(i64, i64), ExtensionError> {
+        let written: WriteRecordsResponse = self
+            .call(
+                "WriteRecords",
+                WriteRecordsRequest {
+                    writer_id,
+                    records: records(texts),
+                },
+            )
+            .await?;
+        Ok((written.first_offset, written.last_offset))
     }
 
     async fn flush(&self, writer_id: u64) -> Result<i64, ExtensionError> {
@@ -401,5 +418,211 @@ async fn closing_every_writer_flushes_them_all() {
         texts.sort();
         assert_eq!(texts, ["a", "b"]);
         assert!(case.publish(a, &["x"], false).is_err());
+    }
+}
+
+#[tokio::test]
+async fn a_write_is_in_the_store_when_it_answers_its_offsets() {
+    for case in cases().await {
+        let writer = case
+            .open(client(), |r| r.batch_interval = millis(60_000))
+            .await;
+        let (first, last) = case.write(writer, &["a", "b"]).await.unwrap();
+        assert!(0 < first && first < last);
+        let read = case.read(0).await;
+        let offsets: Vec<i64> = read.records.iter().map(|r| r.offset).collect();
+        assert_eq!(offsets, [first, last]);
+        let (one, same) = case.write(writer, &["c"]).await.unwrap();
+        assert_eq!(one, same);
+        assert!(one > last);
+        assert_eq!(case.write(writer, &[]).await.unwrap(), (0, 0));
+        assert_eq!(case.visible().await, ["a", "b", "c"]);
+        assert_eq!(case.flush(writer).await.unwrap(), one);
+    }
+}
+
+#[tokio::test]
+async fn a_write_goes_after_the_buffered_records_in_one_sequence() {
+    for case in cases().await {
+        let writer = case
+            .open(client(), |r| {
+                r.batch_interval = millis(60_000);
+                r.max_batch_size = 2;
+            })
+            .await;
+        case.publish(writer, &["1", "2", "3"], false).unwrap();
+        let (first, last) = case.write(writer, &["4", "5", "6"]).await.unwrap();
+        case.publish(writer, &["7"], false).unwrap();
+        case.flush(writer).await.unwrap();
+        let read = case.read(0).await;
+        assert_eq!(case.visible().await, ["1", "2", "3", "4", "5", "6", "7"]);
+        // The write split at the batch size, and its offsets span its own Records.
+        assert_eq!(read.records[3].offset, first);
+        assert_eq!(read.records[5].offset, last);
+    }
+}
+
+#[tokio::test]
+async fn a_write_of_a_retry_attempt_withdraws_the_earlier_attempt() {
+    for case in cases().await {
+        let first = case.open(activity(1), |_| {}).await;
+        case.write(first, &["x"]).await.unwrap();
+        let second = case.open(activity(2), |_| {}).await;
+        case.write(second, &["y"]).await.unwrap();
+        assert_eq!(case.visible().await, ["y"]);
+        // The earlier attempt is fenced now.
+        let error = case.write(first, &["late"]).await.unwrap_err();
+        assert_eq!(reason(&error), "stream_fenced");
+        let error = case.write(first, &["after"]).await.unwrap_err();
+        assert_eq!(reason(&error), "stream_fenced");
+    }
+}
+
+#[tokio::test]
+async fn a_write_refuses_an_oversize_record_and_a_closed_writer() {
+    for case in cases().await {
+        let writer = case.open(client(), |_| {}).await;
+        let big = "x".repeat(2 * 1024 * 1024);
+        let error = case.write(writer, &[big.as_str()]).await.unwrap_err();
+        assert_eq!(reason(&error), "stream_too_large");
+        // A refusal before the Store leaves the writer usable.
+        case.write(writer, &["ok"]).await.unwrap();
+        let _: CloseWriterResponse = case
+            .call("CloseWriter", CloseWriterRequest { writer_id: writer })
+            .await
+            .unwrap();
+        let error = case.write(writer, &["late"]).await.unwrap_err();
+        assert_eq!(reason(&error), "stream_unknown_writer");
+        assert_eq!(case.visible().await, ["ok"]);
+    }
+}
+
+/// A memory Store whose first append goes in but whose answer is lost, as on a dropped
+/// connection.
+struct LosesFirstAnswer {
+    inner: Arc<MemoryStore>,
+    lost: AtomicBool,
+}
+
+#[async_trait::async_trait]
+impl Store for LosesFirstAnswer {
+    fn capabilities(&self) -> Capabilities {
+        self.inner.capabilities()
+    }
+
+    fn default_retention(&self) -> Duration {
+        self.inner.default_retention()
+    }
+
+    async fn create(
+        &self,
+        namespace: &str,
+        stream_id: &str,
+        retention: Option<Duration>,
+        auto_close: Option<Duration>,
+        owner: Owner,
+        withdrawal: &Withdrawal<'_>,
+    ) -> StreamResult<Created> {
+        self.inner
+            .create(
+                namespace, stream_id, retention, auto_close, owner, withdrawal,
+            )
+            .await
+    }
+
+    async fn append(
+        &self,
+        namespace: &str,
+        stream_id: &str,
+        batch: &Batch<'_>,
+    ) -> StreamResult<Appended> {
+        let appended = self.inner.append(namespace, stream_id, batch).await?;
+        if !self.lost.swap(true, Ordering::SeqCst) {
+            return Err(StreamError::storage("the answer was lost"));
+        }
+        Ok(appended)
+    }
+
+    async fn read(
+        &self,
+        namespace: &str,
+        stream_id: &str,
+        from: i64,
+        count: usize,
+    ) -> StreamResult<(StreamState, Vec<Entry>)> {
+        self.inner.read(namespace, stream_id, from, count).await
+    }
+
+    async fn wait_after(
+        &self,
+        namespace: &str,
+        stream_id: &str,
+        after: i64,
+        deadline: tokio::time::Instant,
+    ) -> StreamResult<bool> {
+        self.inner
+            .wait_after(namespace, stream_id, after, deadline)
+            .await
+    }
+}
+
+#[tokio::test]
+async fn a_write_whose_answer_is_lost_goes_in_once() {
+    let memory = Arc::new(MemoryStore::new(
+        Duration::from_secs(3600),
+        Duration::from_secs(7200),
+    ));
+    let store = Arc::new(LosesFirstAnswer {
+        inner: memory,
+        lost: AtomicBool::new(false),
+    });
+    let n = NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    let case = Case {
+        ext: MemoryStreamExtension::with_store(store, 0, None),
+        namespace: format!("ns-lost-{n}"),
+        stream: format!("s-lost-{n}"),
+    };
+    let _: CreateStreamResponse = case
+        .call(
+            "CreateStream",
+            CreateStreamRequest {
+                namespace: case.namespace.clone(),
+                stream_id: case.stream.clone(),
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+    let writer = case.open(client(), |_| {}).await;
+    let (first, last) = case.write(writer, &["a", "b"]).await.unwrap();
+    let read = case.read(0).await;
+    assert_eq!(case.visible().await, ["a", "b"]);
+    assert_eq!(
+        (read.records[0].offset, read.records[1].offset),
+        (first, last)
+    );
+    case.write(writer, &["c"]).await.unwrap();
+    assert_eq!(case.visible().await, ["a", "b", "c"]);
+}
+
+#[tokio::test]
+async fn a_write_that_waits_behind_a_close_is_refused() {
+    for case in cases().await {
+        let writer = case
+            .open(client(), |r| r.batch_interval = millis(60_000))
+            .await;
+        case.publish(writer, &["a"], false).unwrap();
+        let close = case.call::<_, CloseWriterResponse>(
+            "CloseWriter",
+            CloseWriterRequest { writer_id: writer },
+        );
+        let write = async {
+            tokio::task::yield_now().await;
+            case.write(writer, &["late"]).await
+        };
+        let (closed, written) = tokio::join!(close, write);
+        closed.unwrap();
+        assert_eq!(reason(&written.unwrap_err()), "stream_unknown_writer");
+        assert_eq!(case.visible().await, ["a"]);
     }
 }
