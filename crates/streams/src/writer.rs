@@ -117,6 +117,13 @@ impl Writer {
     /// the last one. Records past the Store's batch limit go as more batches, in order.
     async fn write(&self, mut records: Vec<AppendRecord>) -> StreamResult<(i64, i64)> {
         let _flushing = self.flushing.lock().await;
+        // A close that started while this write waited has sent the writer's last batch.
+        if self.state.lock().closed {
+            return Err(StreamError::new(
+                Reason::UnknownWriter,
+                "The writer closed while the write waited",
+            ));
+        }
         self.flush_held().await?;
         let (mut first, mut last) = (0, 0);
         while !records.is_empty() {

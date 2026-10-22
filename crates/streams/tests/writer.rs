@@ -604,3 +604,25 @@ async fn a_write_whose_answer_is_lost_goes_in_once() {
     case.write(writer, &["c"]).await.unwrap();
     assert_eq!(case.visible().await, ["a", "b", "c"]);
 }
+
+#[tokio::test]
+async fn a_write_that_waits_behind_a_close_is_refused() {
+    for case in cases().await {
+        let writer = case
+            .open(client(), |r| r.batch_interval = millis(60_000))
+            .await;
+        case.publish(writer, &["a"], false).unwrap();
+        let close = case.call::<_, CloseWriterResponse>(
+            "CloseWriter",
+            CloseWriterRequest { writer_id: writer },
+        );
+        let write = async {
+            tokio::task::yield_now().await;
+            case.write(writer, &["late"]).await
+        };
+        let (closed, written) = tokio::join!(close, write);
+        closed.unwrap();
+        assert_eq!(reason(&written.unwrap_err()), "stream_unknown_writer");
+        assert_eq!(case.visible().await, ["a"]);
+    }
+}
