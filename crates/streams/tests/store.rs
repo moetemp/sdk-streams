@@ -920,5 +920,40 @@ async fn a_deferred_workflow_batch_withdraws_nothing_until_its_task_sends_the_fa
         assert!(settled.flagged);
         assert_eq!(target.visible().await, ["B"]);
         assert_ne!(target.meta("lf|run-d").await, facts);
+
+async fn an_auto_close_period_at_the_edges_neither_overflows_nor_rounds_to_zero() {
+    for target in stores().await {
+        let none = Withdrawal::default();
+        let created = target
+            .store
+            .create(
+                &target.namespace,
+                &target.stream,
+                None,
+                Some(Duration::from_micros(500)),
+                Owner::Client,
+                &none,
+            )
+            .await
+            .unwrap();
+        assert_eq!(created.auto_close, Some(Duration::from_millis(1)));
+    }
+    for target in stores().await {
+        let none = Withdrawal::default();
+        target
+            .store
+            .create(
+                &target.namespace,
+                &target.stream,
+                None,
+                Some(Duration::from_secs(u64::MAX / 4)),
+                Owner::Client,
+                &none,
+            )
+            .await
+            .unwrap();
+        append(&target, &client(1), 1, &["a"]).await.unwrap();
+        append(&target, &client(1), 2, &["b"]).await.unwrap();
+        assert_eq!(target.texts().await, ["a", "b"]);
     }
 }
