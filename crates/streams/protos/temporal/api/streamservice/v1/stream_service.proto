@@ -160,7 +160,8 @@ message AppendRecordsRequest {
     // The batch number in this epoch. With the Producer and epoch it is the dedupe key.
     int64 sequence = 4;
     repeated AppendRecord records = 5;
-    // Workflow only. The failed tasks are those since this run's last flush to this Stream.
+    // Local Activity only. The run's last completed Workflow Task and its failed or timed out
+    // Workflow Tasks, so the batch withdraws the run's orphaned Local Activity Records.
     WorkflowTaskEpoch previous_completed_task = 6;
     repeated int64 failed_tasks = 7;
     // Workflow only. A retry run's first batch: the previous run, whose Records it withdraws.
