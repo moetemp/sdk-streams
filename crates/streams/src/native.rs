@@ -252,6 +252,16 @@ impl Store for ServiceStore {
             sequence: batch.sequence,
             records,
             withdraw_run: withdrawal.withdraw_run.to_string(),
+            // A started event id of 0 tells the server that no task has completed yet.
+            previous_completed_task: withdrawal
+                .tasks
+                .as_ref()
+                .map(|tasks| tasks.completed.copied().unwrap_or_default()),
+            failed_tasks: withdrawal
+                .tasks
+                .as_ref()
+                .map(|tasks| tasks.failed_tasks.to_vec())
+                .unwrap_or_default(),
             ..Default::default()
         };
         let answer: AppendRecordsResponse = self.call(APPEND, namespace, request, None).await?;

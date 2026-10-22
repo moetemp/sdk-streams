@@ -4,10 +4,10 @@
 
 use crate::{
     Reason, StreamError, StreamResult,
-    epoch::epoch_key,
+    epoch::{epoch_key, task_key, task_of},
     ids::{StreamKeys, encode_part},
     offset::{entry_id_of_offset, offset_of_entry_id},
-    proto::{Producer, StreamRef},
+    proto::{Producer, ProducerKind, StreamRef},
     store::{
         Appended, Batch, Capabilities, Closed, CreateOutcome, Created, Entry, FORMAT_VERSION,
         Owner, Store, StreamState, TOMBSTONE, Withdrawal,
@@ -83,6 +83,44 @@ fn id_text((ms, seq): (u64, u64)) -> String {
 fn parse_id(text: &str) -> Option<(u64, u64)> {
     let (ms, seq) = text.split_once('-')?;
     Some((ms.parse().ok()?, seq.parse().ok()?))
+}
+
+fn words(text: Option<&String>) -> Vec<String> {
+    text.map(|text| text.split_whitespace().map(str::to_string).collect())
+        .unwrap_or_default()
+}
+
+fn started(task_key: &str) -> i64 {
+    i64::from_str_radix(&task_key[..16], 16).unwrap_or(0)
+}
+
+/// Whether a task key at c's started id is a lower attempt than c, as `below_completed` in
+/// `lib.lua`.
+fn below_completed(key: &str, c: &str) -> bool {
+    if &c[17..25] == "00000000" {
+        return key[26..] < c[26..];
+    }
+    key < c
+}
+
+/// The orphan rule over a run's open Local Activity tasks, as `orphan_tasks` in `lib.lua`.
+fn orphan_tasks(open: &[String], t: &str, c: &str, failed: &[i64]) -> (Vec<String>, Vec<String>) {
+    let ts = started(t);
+    let cs = if c.is_empty() { 0 } else { started(c) };
+    let (mut withdrawn, mut kept) = (vec![], vec![]);
+    for key in open {
+        let s = started(key);
+        if failed.contains(&s)
+            || (cs < s && s < ts)
+            || (s == ts && key.as_str() < t)
+            || (!c.is_empty() && s == cs && below_completed(key, c))
+        {
+            withdrawn.push(key.clone());
+        } else if c.is_empty() || key.as_str() > c {
+            kept.push(key.clone());
+        }
+    }
+    (withdrawn, kept)
 }
 
 impl Keys {
@@ -447,6 +485,20 @@ impl Store for MemoryStore {
         let (safety, tombstone) = (millis(self.safety_ttl), millis(TOMBSTONE));
         let sequence = batch.sequence;
         let suffix = format!("|{}|{}", producer.kind, producer.id);
+        let local_activity = producer.kind == ProducerKind::LocalActivity as i32;
+        let task = if local_activity {
+            task_key(&task_of(&producer.epoch.unwrap_or_default()))
+        } else {
+            String::new()
+        };
+        let facts = withdrawal
+            .tasks
+            .filter(|_| local_activity && !run.is_empty());
+        let completed = facts
+            .and_then(|facts| facts.completed)
+            .map(task_key)
+            .unwrap_or_default();
+        let (open_field, gone_field) = (format!("oa|{run}"), format!("ow|{run}"));
         let appended = self.with(namespace, stream_id, |keys, now| {
             if sequence < 1 {
                 return Err(refuse(Reason::Invalid, "the sequence must be 1 or more"));
@@ -485,8 +537,14 @@ impl Store for MemoryStore {
                     "the epoch is lower than the newest one of the Producer",
                 ));
             }
+            if local_activity && !run.is_empty() && words(keys.get(&gone_field)).contains(&task) {
+                return Err(refuse(
+                    Reason::Fenced,
+                    "a Superseded item withdrew the Workflow Task of the call",
+                ));
+            }
             let records = batch.records.len() as u64;
-            keys.check_ids_fit(now, records + 1)?;
+            keys.check_ids_fit(now, records + 2)?;
 
             let mut flagged = keys
                 .get(&format!("h{suffix}"))
@@ -494,18 +552,39 @@ impl Store for MemoryStore {
             if keys.withdraw_run(&withdrawn_run) {
                 flagged = true;
             }
+            let (withdrawn, mut open) = match facts {
+                Some(facts) => orphan_tasks(
+                    &words(keys.get(&open_field)),
+                    &task,
+                    &completed,
+                    facts.failed_tasks,
+                ),
+                None => (vec![], vec![]),
+            };
 
             keys.trim(now);
             let (mut first, mut last) = (String::new(), String::new());
+            // The orphans go in an entry of their own, as in `append.lua`.
+            let mut orphan = String::new();
+            if let (false, Some(facts)) = (withdrawn.is_empty(), facts) {
+                orphan = keys.add(
+                    now,
+                    Fields {
+                        record: None,
+                        supersession: Some(facts.supersession.to_vec()),
+                    },
+                );
+                last = orphan.clone();
+            }
             if records == 0 && flagged {
-                first = keys.add(
+                last = keys.add(
                     now,
                     Fields {
                         record: None,
                         supersession: Some(withdrawal.supersession.to_vec()),
                     },
                 );
-                last = first.clone();
+                first = last.clone();
             }
             for (i, record) in batch.records.iter().enumerate() {
                 let supersession = (i == 0 && flagged).then(|| withdrawal.supersession.to_vec());
@@ -521,6 +600,9 @@ impl Store for MemoryStore {
                 }
             }
 
+            if first.is_empty() {
+                first = orphan;
+            }
             keys.set(&format!("e{suffix}"), epoch.clone());
             keys.set(
                 &format!("d{suffix}"),
@@ -534,6 +616,21 @@ impl Store for MemoryStore {
             if !run.is_empty() && records > 0 {
                 keys.set(&format!("run|{run}"), "1");
             }
+            if facts.is_some() {
+                if records > 0 && !open.contains(&task) {
+                    open.push(task.clone());
+                }
+                if open.is_empty() {
+                    keys.meta.remove(&open_field);
+                } else {
+                    keys.set(&open_field, open.join(" "));
+                }
+                if !withdrawn.is_empty() {
+                    let mut all = words(keys.get(&gone_field));
+                    all.extend(withdrawn.iter().cloned());
+                    keys.set(&gone_field, all.join(" "));
+                }
+            }
             if records > 0 && keys.get("ac").is_some() {
                 keys.set("la", now.to_string());
             }
@@ -541,7 +638,7 @@ impl Store for MemoryStore {
                 keys.set("newest", last.clone());
             }
             keys.refresh(now, safety, tombstone);
-            Ok((false, first, last, flagged))
+            Ok((false, first, last, flagged || !withdrawn.is_empty()))
         });
         // A refusal may come from an auto close that this step wrote, so waiters look again.
         if appended

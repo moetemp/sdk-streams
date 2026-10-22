@@ -957,3 +957,118 @@ async fn a_rerun_local_activity_supersedes_its_first_attempt() {
         assert!(!withdraws(superseded, &read.records[2]));
     }
 }
+
+/// A write of the Local Activity `call` of `run`, dispatched by task `[started]`, with the run's
+/// last completed task `[completed]` (0 before the first) as S110 has lang send it.
+fn local_activity_write(
+    case: &Case,
+    run: &str,
+    call: &str,
+    started: i64,
+    completed: i64,
+    text: &str,
+) -> AppendRecordsRequest {
+    let mut producer = user_local_activity(run, started, 100 + started);
+    producer.id = temporalio_streams::ids::local_activity_producer_id(run, call);
+    AppendRecordsRequest {
+        namespace: case.namespace.clone(),
+        stream: case.stream(),
+        producer: Some(producer),
+        sequence: 1,
+        records: vec![record("", text)],
+        previous_completed_task: Some(temporalio_streams::proto::WorkflowTaskEpoch {
+            started_event_id: completed,
+            ..Default::default()
+        }),
+        ..Default::default()
+    }
+}
+
+#[tokio::test]
+async fn a_local_activity_of_a_task_that_never_completed_is_withdrawn_by_the_next_write() {
+    for case in cases().await {
+        let run = format!("{}-run", case.stream);
+        case.create(None).await.unwrap();
+        // Task [2] completed. Task [3] runs a Local Activity that writes, then task [3] fails.
+        let _: AppendRecordsResponse = call(
+            &case.ext,
+            "AppendRecords",
+            local_activity_write(&case, &run, "call-1", 2, 0, "done"),
+        )
+        .await
+        .unwrap();
+        let _: AppendRecordsResponse = call(
+            &case.ext,
+            "AppendRecords",
+            local_activity_write(&case, &run, "call-2", 3, 2, "orphan"),
+        )
+        .await
+        .unwrap();
+        // Task [4] takes another path and writes once.
+        let _: AppendRecordsResponse = call(
+            &case.ext,
+            "AppendRecords",
+            local_activity_write(&case, &run, "call-3", 4, 2, "other"),
+        )
+        .await
+        .unwrap();
+        let read = case.read(ReadRecordsRequest::default()).await.unwrap();
+        assert_eq!(texts(&read), ["done", "orphan", "<superseded>", "other"]);
+        let superseded = read.records[2].supersession.as_ref().unwrap();
+        let kept: Vec<_> = [0, 1, 3]
+            .iter()
+            .filter(|&&i| !withdraws(superseded, &read.records[i]))
+            .map(|&i| texts(&read)[i].clone())
+            .collect();
+        assert_eq!(kept, ["done", "other"]);
+        // A late write of the orphaned call is fenced.
+        let late = call::<_, AppendRecordsResponse>(
+            &case.ext,
+            "AppendRecords",
+            AppendRecordsRequest {
+                sequence: 2,
+                ..local_activity_write(&case, &run, "call-2", 3, 2, "late")
+            },
+        )
+        .await
+        .unwrap_err();
+        assert_eq!(reason(&late), "stream_fenced");
+        // A later write that knows task [4] completed withdraws nothing more.
+        let _: AppendRecordsResponse = call(
+            &case.ext,
+            "AppendRecords",
+            local_activity_write(&case, &run, "call-4", 7, 4, "later"),
+        )
+        .await
+        .unwrap();
+        let read = case.read(ReadRecordsRequest::default()).await.unwrap();
+        assert_eq!(
+            texts(&read),
+            ["done", "orphan", "<superseded>", "other", "later"]
+        );
+    }
+}
+
+#[tokio::test]
+async fn a_failed_task_before_the_last_completed_one_is_withdrawn_by_its_id() {
+    for case in cases().await {
+        let run = format!("{}-run", case.stream);
+        case.create(None).await.unwrap();
+        let _: AppendRecordsResponse = call(
+            &case.ext,
+            "AppendRecords",
+            local_activity_write(&case, &run, "call-1", 3, 2, "orphan"),
+        )
+        .await
+        .unwrap();
+        // Task [3] failed and task [4] completed with no write here. Task [5] knows both.
+        let mut next = local_activity_write(&case, &run, "call-2", 5, 4, "next");
+        next.failed_tasks = vec![3];
+        let _: AppendRecordsResponse = call(&case.ext, "AppendRecords", next).await.unwrap();
+        let read = case.read(ReadRecordsRequest::default()).await.unwrap();
+        assert_eq!(texts(&read), ["orphan", "<superseded>", "next"]);
+        let superseded = read.records[1].supersession.as_ref().unwrap();
+        assert!(withdraws(superseded, &read.records[0]));
+        assert!(!withdraws(superseded, &read.records[2]));
+    }
+}
