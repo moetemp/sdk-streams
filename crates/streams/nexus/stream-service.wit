@@ -281,13 +281,15 @@ interface stream-service {
     auto-close: option<duration>,
   }
 
-  // A handle on one Stream. Its stream-ref is its serialized form, so a handle passes through
-  // Workflow input, Activity input and Signals as the ref. Each method fills in the ref of its
-  // request and takes the rest. The wire operations stay the same. nexgen has no doc directive
-  // on a resource yet, so the docs stay on the operations.
+  // Its stream-ref is its serialized form, so a handle passes through Workflow input, Activity
+  // input and Signals as the ref. Each method fills in the ref of its request and takes the rest.
+  // The wire operations stay the same. A handle never changes: offsets are values that the
+  // methods return.
+  /// @nexus.doc "A handle on one Stream. Build it from a stream-ref, or get it from a create."
   resource %stream {
     constructor(%stream: stream-ref);
 
+    /// @nexus.doc "Append Records. The answer has the first and the last offset."
     /// @nexus.operation "append-records"
     append-records: func(
       producer: option<producer>,
@@ -298,6 +300,7 @@ interface stream-service {
       withdraw-run: option<string>,
     ) -> append-records-response;
 
+    /// @nexus.doc "Close the Stream. Readers drain what is left, then end."
     /// @nexus.operation "close-stream"
     close: func(
       producer: option<producer>,
@@ -307,6 +310,7 @@ interface stream-service {
       failed-tasks: list<s64>,
     );
 
+    /// @nexus.doc "Read one page of Records. The iterator of the same name reads them all."
     /// @nexus.operation "read-records"
     read-records: func(
       from-offset: option<s64>,
@@ -318,6 +322,7 @@ interface stream-service {
       create-wait: option<duration>,
     ) -> read-records-response;
 
+    /// @nexus.doc "Describe the Stream: its status, newest offset, Retention and auto-close."
     /// @nexus.operation "describe-stream"
     describe: func() -> describe-stream-response;
   }
