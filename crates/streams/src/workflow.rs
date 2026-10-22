@@ -543,15 +543,6 @@ impl StreamService {
             ));
         };
         let key = task_key(&epoch);
-        // Without the deferred withdrawal the early batch would withdraw every earlier task, so
-        // the completion writes the calls, after the Local Activity's Records.
-        if !self
-            .store
-            .capabilities()
-            .contains(Capabilities::DEFERRED_WITHDRAWAL)
-        {
-            return Ok(0);
-        }
         let Some(taken) = runs.take(&request.run_id, &key, false)? else {
             return Ok(0);
         };

@@ -7,13 +7,17 @@ mod support;
 use prost::Message;
 use prost_types::Timestamp;
 use std::{
-    sync::Arc,
+    sync::{
+        Arc,
+        atomic::{AtomicU64, Ordering},
+    },
     time::{Duration, SystemTime, UNIX_EPOCH},
 };
 use temporalio_client::{Connection, ConnectionOptions, Url};
 use temporalio_common::protos::temporal::api::common::v1::Payload;
 use temporalio_sdk_core::{
-    ExtensionError, WorkerExtension, WorkflowTaskCompletionInfo, WorkflowTaskInterceptor,
+    ExtensionError, WorkerExtension, WorkflowTaskCompletionInfo, WorkflowTaskEpoch,
+    WorkflowTaskFailedInfo, WorkflowTaskInterceptor,
 };
 use temporalio_streams::{
     NativeStreamExtension, StreamExtension,
@@ -22,12 +26,15 @@ use temporalio_streams::{
     proto::{
         AppendRecord, AppendRecordsRequest, AppendRecordsResponse, BufferWorkflowCallsRequest,
         CloseStreamRequest, CloseStreamResponse, CreateStreamRequest, CreateStreamResponse,
-        DescribeStreamRequest, DescribeStreamResponse, OpenWriterRequest, OpenWriterResponse,
-        Producer, ProducerEpoch, ProducerKind, ReadRecordsRequest, ReadRecordsResponse,
-        StreamErrorDetails, StreamRecord, StreamRecordKind, StreamRef, StreamStatus, WorkflowCall,
-        WriteRecordsRequest, WriteRecordsResponse, workflow_call::Call,
+        DescribeStreamRequest, DescribeStreamResponse, FlushRunBufferRequest,
+        FlushRunBufferResponse, OpenWriterRequest, OpenWriterResponse, Producer, ProducerEpoch,
+        ProducerKind, ReadRecordsRequest, ReadRecordsResponse, StreamErrorDetails, StreamRecord,
+        StreamRecordKind, StreamRef, StreamStatus, WorkflowCall, WriteRecordsRequest,
+        WriteRecordsResponse, workflow_call::Call,
     },
 };
+
+static NEXT: AtomicU64 = AtomicU64::new(0);
 
 struct Case {
     ext: Arc<StreamExtension>,
@@ -50,7 +57,8 @@ async fn case() -> Option<Case> {
     Some(Case {
         ext,
         namespace: std::env::var("STREAMS_NATIVE_NAMESPACE").unwrap_or("default".to_string()),
-        stream: format!("native-test-{now}"),
+        // Clocks with microsecond steps give two tests one time, so a counter tells them apart.
+        stream: format!("native-test-{now}-{}", NEXT.fetch_add(1, Ordering::Relaxed)),
     })
 }
 
@@ -294,4 +302,133 @@ async fn a_workflow_flush_writes_to_the_server_with_its_owner() {
     let hooks: Arc<dyn WorkflowTaskInterceptor> = case.ext.workflow_task_interceptor().unwrap();
     hooks.before_complete(&info).await.unwrap();
     assert_eq!(case.visible().await, (vec!["w".into()], false));
+}
+
+impl Case {
+    fn buffer(&self, run_id: &str, calls: Vec<WorkflowCall>) {
+        let request = BufferWorkflowCallsRequest {
+            run_id: run_id.to_string(),
+            calls,
+            ..Default::default()
+        };
+        self.ext
+            .call("BufferWorkflowCalls", &request.encode_to_vec())
+            .unwrap();
+    }
+
+    fn publish(&self, text: &str) -> WorkflowCall {
+        WorkflowCall {
+            call: Some(Call::Append(AppendRecordsRequest {
+                stream: self.stream_ref(),
+                records: vec![record(text)],
+                ..Default::default()
+            })),
+            when_run_closes: false,
+        }
+    }
+
+    fn create(&self) -> WorkflowCall {
+        WorkflowCall {
+            call: Some(Call::Create(CreateStreamRequest {
+                stream_id: self.stream.clone(),
+                ..Default::default()
+            })),
+            when_run_closes: false,
+        }
+    }
+
+    async fn complete(&self, run_id: &str, started: i64, attempt: u32, completed: Option<i64>) {
+        let info = WorkflowTaskCompletionInfo::builder()
+            .namespace(self.namespace.clone())
+            .workflow_id("wf")
+            .run_id(run_id.to_string())
+            .first_execution_run_id(run_id.to_string())
+            .workflow_type("t")
+            .started_event_id(started)
+            .attempt(attempt)
+            .started_time(UNIX_EPOCH + Duration::from_secs(100))
+            .maybe_previous_completed(completed.map(|started| {
+                WorkflowTaskEpoch::builder()
+                    .started_event_id(started)
+                    .attempt(1)
+                    .started_time(UNIX_EPOCH + Duration::from_secs(100))
+                    .build()
+            }))
+            .deadline(std::time::Instant::now() + Duration::from_secs(10))
+            .build();
+        let hooks = self.ext.workflow_task_interceptor().unwrap();
+        hooks.before_complete(&info).await.unwrap();
+        hooks.after_complete(&info, true).await;
+    }
+}
+
+#[tokio::test]
+async fn a_deferred_batch_on_the_server_is_withdrawn_when_its_task_fails() {
+    let Some(case) = case().await else {
+        return;
+    };
+    let run_id = format!("run-{}", case.stream);
+    case.buffer(&run_id, vec![case.create(), case.publish("before")]);
+    case.complete(&run_id, 2, 1, None).await;
+    // Task [5] writes early for a Local Activity. The batch withdraws nothing yet.
+    case.buffer(&run_id, vec![case.publish("early")]);
+    let request = FlushRunBufferRequest {
+        namespace: case.namespace.clone(),
+        run_id: run_id.clone(),
+        workflow_task: Some(temporalio_streams::proto::WorkflowTaskEpoch {
+            started_event_id: 5,
+            attempt: 1,
+            started_time: Some(Timestamp {
+                seconds: 100,
+                nanos: 0,
+            }),
+        }),
+        timeout: None,
+    };
+    let flushed: FlushRunBufferResponse = case.call("FlushRunBuffer", request).await.unwrap();
+    assert_eq!(flushed.records, 1);
+    let local = AppendRecordsRequest {
+        namespace: case.namespace.clone(),
+        stream: case.stream_ref(),
+        producer: Some(Producer {
+            kind: ProducerKind::LocalActivity as i32,
+            id: temporalio_streams::ids::local_activity_producer_id(&run_id, "la"),
+            epoch: Some(ProducerEpoch {
+                task_started_event_id: 5,
+                task_attempt: 1,
+                task_started_time: Some(Timestamp {
+                    seconds: 100,
+                    nanos: 0,
+                }),
+                attempt: 1,
+                ..Default::default()
+            }),
+            run_id: run_id.clone(),
+        }),
+        sequence: 1,
+        records: vec![record("la")],
+        ..Default::default()
+    };
+    let _: AppendRecordsResponse = case.call("AppendRecords", local).await.unwrap();
+    assert_eq!(
+        case.visible().await.0,
+        ["before".to_string(), "early".into(), "la".into()]
+    );
+    // Task [5] fails. Its retry runs the Activation again, and its facts withdraw the early
+    // batch and the Local Activity's Record.
+    let failed = WorkflowTaskFailedInfo::builder()
+        .run_id(run_id.clone())
+        .attempt(1)
+        .reported(true)
+        .build();
+    case.ext
+        .workflow_task_interceptor()
+        .unwrap()
+        .on_task_failed(&failed);
+    case.buffer(&run_id, vec![case.publish("retry")]);
+    case.complete(&run_id, 5, 2, Some(2)).await;
+    assert_eq!(
+        case.visible().await.0,
+        ["before".to_string(), "retry".into()]
+    );
 }

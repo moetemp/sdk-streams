@@ -202,13 +202,10 @@ impl Capabilities {
     /// A Stream with an auto close period closes with no result when no append came for that
     /// long. Each write step applies it before it acts, so no call sees the Stream open late.
     pub const AUTO_CLOSE: Self = Self(1 << 6);
-    /// A Workflow batch whose task facts come later withdraws nothing and keeps no facts, so a
-    /// run's Records can go in before a Local Activity of the run starts.
-    pub const DEFERRED_WITHDRAWAL: Self = Self(1 << 7);
     /// Every capability.
-    pub const ALL: Self = Self(u8::MAX);
+    pub const ALL: Self = Self((1 << 7) - 1);
 
-    const NAMES: [(Self, &'static str); 8] = [
+    const NAMES: [(Self, &'static str); 7] = [
         (Self::PRODUCER_FENCE, "producer_fence"),
         (Self::WITHDRAWAL, "withdrawal"),
         (Self::RUN_FENCE, "run_fence"),
@@ -216,7 +213,6 @@ impl Capabilities {
         (Self::REPLICA_WAIT, "replica_wait"),
         (Self::SAFETY_TTL, "safety_ttl"),
         (Self::AUTO_CLOSE, "auto_close"),
-        (Self::DEFERRED_WITHDRAWAL, "deferred_withdrawal"),
     ];
 
     /// Both sets.
@@ -417,13 +413,13 @@ mod tests {
             .unwrap_err();
         assert_eq!(error.reason, Reason::Unsupported);
         assert!(error.message.ends_with("replica_wait"), "{}", error.message);
-        assert_eq!(Capabilities::ALL.names().len(), 8);
+        assert_eq!(Capabilities::ALL.names().len(), 7);
         assert_eq!(
             Capabilities::ALL
                 .without(Capabilities::REPLICA_WAIT)
                 .names()
                 .len(),
-            7
+            6
         );
     }
 }

@@ -198,6 +198,8 @@ interface stream-service {
     failed-tasks: list<s64>,
     /// @nexus.doc "Retry run only. The previous run, whose Records this withdraws."
     withdraw-run: option<string>,
+    /// @nexus.doc "Workflow only. The batch before a Local Activity. It withdraws no task."
+    defer-withdrawal: option<bool>,
     /// @nexus.omit
     namespace: placeholder,
   }

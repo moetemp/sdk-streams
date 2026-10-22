@@ -180,12 +180,9 @@ impl ServiceStore {
 #[async_trait::async_trait]
 impl Store for ServiceStore {
     // The server keeps every rule. A write is durable when the server acknowledges it, so
-    // there is no replica wait. It has no deferred withdrawal yet, so the Local Activity flush
-    // leaves the calls to the completion.
+    // there is no replica wait.
     fn capabilities(&self) -> Capabilities {
-        Capabilities::ALL
-            .without(Capabilities::REPLICA_WAIT)
-            .without(Capabilities::DEFERRED_WITHDRAWAL)
+        Capabilities::ALL.without(Capabilities::REPLICA_WAIT)
     }
 
     fn default_retention(&self) -> Duration {
@@ -240,12 +237,6 @@ impl Store for ServiceStore {
         stream_id: &str,
         batch: &Batch<'_>,
     ) -> StreamResult<Appended> {
-        if batch.withdrawal.defer {
-            return Err(StreamError::new(
-                Reason::Unsupported,
-                "The server has no deferred withdrawal",
-            ));
-        }
         let records = batch
             .records
             .iter()
@@ -267,6 +258,7 @@ impl Store for ServiceStore {
             previous_completed_task: withdrawal.previous_completed.copied(),
             failed_tasks: withdrawal.failed_tasks.to_vec(),
             withdraw_run: withdrawal.withdraw_run.to_string(),
+            defer_withdrawal: withdrawal.defer,
         };
         let answer: AppendRecordsResponse = self.call(APPEND, namespace, request).await?;
         let offsets = (answer.last_offset > 0).then_some((answer.first_offset, answer.last_offset));

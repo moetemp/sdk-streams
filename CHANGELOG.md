@@ -86,5 +86,5 @@
 - Synced `stream_service.proto` with the server's: `CreateStreamRequest.owner` (6),
   `close_with_run` (7), `ref` (8), `CloseStreamRequest.withdraw_run` (8) and
   `StreamErrorDetails`. The WIT has the same fields.
-- Added the capability `deferred_withdrawal`. Redis and memory have it. The server doesn't yet,
-  so on native the Local Activity flush leaves the calls to the Workflow Task completion.
+- `AppendRecordsRequest.defer_withdrawal` (9) marks the Workflow batch before a Local Activity
+  on the server too, so the native Local Activity flush writes early as on Redis.

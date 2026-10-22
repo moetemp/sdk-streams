@@ -1,6 +1,3 @@
-// Draft for the Brook API proposal. It backs crates/streams/nexus/stream-service.wit.
-// For the draft, every message and enum is in one package. A real change would split them
-// into temporal/api/stream/v1, temporal/api/enums/v1 and temporal/api/streamservice/v1.
 syntax = "proto3";
 
 package temporal.api.streamservice.v1;
@@ -169,6 +166,9 @@ message AppendRecordsRequest {
     repeated int64 failed_tasks = 7;
     // Workflow only. A retry run's first batch: the previous run, whose Records it withdraws.
     string withdraw_run = 8;
+    // Workflow only. The batch before a Local Activity, whose task facts come later with the
+    // task's completion. It withdraws no task and keeps no facts. withdraw_run still applies.
+    bool defer_withdrawal = 9;
 }
 
 message AppendRecordsResponse {
