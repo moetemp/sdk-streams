@@ -857,6 +857,23 @@ async fn a_retry_run_s_local_activity_calls_withdraw_the_previous_run() {
         assert_eq!(texts(&read), ["old", "<superseded>", "new"]);
         let superseded = read.records[1].supersession.as_ref().unwrap();
         assert_eq!(superseded.withdraw_run, previous);
+        // The item names its Producer, which the WIT requires.
+        assert_eq!(
+            superseded.producer_id,
+            temporalio_streams::ids::workflow_producer_id(&retry)
+        );
+        assert_eq!(superseded.run_id, retry);
+        let error = call::<_, CreateStreamResponse>(
+            &case.ext,
+            "CreateStream",
+            CreateStreamRequest {
+                owner: None,
+                ..create(&retry, &previous)
+            },
+        )
+        .await
+        .unwrap_err();
+        assert_eq!(reason(&error), "stream_invalid");
         assert!(withdraws(superseded, &read.records[0]));
         assert!(!withdraws(superseded, &read.records[2]));
     }
