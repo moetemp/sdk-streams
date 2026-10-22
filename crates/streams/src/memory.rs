@@ -556,8 +556,7 @@ impl Store for MemoryStore {
                     }
                 }
             }
-            let settles = workflow && batch.records.is_empty() && !withdrawal.defer;
-            if keys.auto_close(now, tombstone) && !settles {
+            if keys.auto_close(now, tombstone) {
                 return Err(refuse(Reason::Closed, "the Stream is closed"));
             }
             if !run.is_empty() && keys.get(&format!("wr|{run}")).is_some() {

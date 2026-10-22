@@ -350,20 +350,19 @@ impl StreamService {
     ) -> StreamResult<(Option<ReadRecordsResponse>, i64)> {
         // A read past the close gives the close Record again, so every read ends with it.
         if let Some(closed_at) = state.closed_at.filter(|at| from > *at) {
-            let (mut records, after) = self.after_close(namespace, id, from).await?;
             let (_, entries) = self.store.read(namespace, id, closed_at, 1).await?;
+            let mut records = vec![];
             for entry in entries {
                 if let Some(bytes) = entry.record {
                     records.push(decode(&bytes, entry.offset)?);
                 }
             }
-            let next = after.max(from);
             let page = ReadRecordsResponse {
                 records,
-                next_offset: next,
+                next_offset: from,
                 done: true,
             };
-            return Ok((Some(page), next));
+            return Ok((Some(page), from));
         }
         // A read from the start skips what the Retention hides. A read from an offset fails on
         // it, since the Reader asked for those Records.
@@ -406,10 +405,7 @@ impl StreamService {
                 };
                 let record = decode(&bytes, entry.offset)?;
                 if record.kind == StreamRecordKind::Close as i32 {
-                    let (items, after) = self.after_close(namespace, id, entry.offset + 1).await?;
-                    records.extend(items);
                     records.push(record);
-                    next = next.max(after);
                     done = true;
                     break;
                 }
@@ -430,37 +426,6 @@ impl StreamService {
             done,
         };
         Ok((Some(page), next))
-    }
-}
-
-impl StreamService {
-    /// The `Superseded` items written after the close, from `from`. A Workflow Task that
-    /// completes after the close still withdraws, and a Reader stops at the close Record, so
-    /// the page puts these items just before it. Their offsets are above the close Record's.
-    /// Answers them and the offset after the last one, zero if none.
-    async fn after_close(
-        &self,
-        namespace: &str,
-        id: &str,
-        from: i64,
-    ) -> StreamResult<(Vec<StreamRecord>, i64)> {
-        let (_, entries) = self.store.read(namespace, id, from, MAX_SCAN).await?;
-        let mut items = vec![];
-        let mut after = 0;
-        for entry in entries {
-            after = entry.offset + 1;
-            if let Some(bytes) = entry.supersession {
-                let supersession = Supersession::decode(bytes.as_slice())
-                    .map_err(|error| StreamError::storage(error.to_string()))?;
-                items.push(StreamRecord {
-                    kind: StreamRecordKind::Superseded as i32,
-                    offset: entry.offset,
-                    supersession: Some(supersession),
-                    ..Default::default()
-                });
-            }
-        }
-        Ok((items, after))
     }
 }
 
