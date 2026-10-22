@@ -192,9 +192,9 @@ interface stream-service {
     /// @nexus.doc "The batch number in this epoch, 1 or more. It is part of the dedupe key."
     sequence: option<s64>,
     records: list<append-record>,
-    /// @nexus.doc "Workflow only. The previous completed Workflow Task of the run."
+    /// @nexus.doc "Local Activity only. The run's last completed Workflow Task."
     previous-completed-task: option<workflow-task-epoch>,
-    /// @nexus.doc "Workflow only. Failed or timed out tasks since this run's last flush here."
+    /// @nexus.doc "Local Activity only. The run's failed or timed out Workflow Tasks."
     failed-tasks: list<s64>,
     /// @nexus.doc "Retry run only. The previous run, whose Records this withdraws."
     withdraw-run: option<string>,

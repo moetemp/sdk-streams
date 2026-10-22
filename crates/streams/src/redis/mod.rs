@@ -11,10 +11,10 @@ pub use crate::store::{
 };
 use crate::{
     StreamError, StreamResult,
-    epoch::epoch_key,
+    epoch::{epoch_key, task_key, task_of},
     ids::{StreamKeys, encode_part},
     offset::{entry_id_of_offset, offset_of_entry_id},
-    proto::Producer,
+    proto::{Producer, ProducerKind},
     store::{Capabilities, Store},
 };
 use conn::{BlockingPool, Shared};
@@ -228,7 +228,11 @@ impl RedisStore {
             .arg(encode_run(withdrawal.withdraw_run))
             .arg(withdrawal.supersession)
             .arg(millis(self.safety_ttl))
-            .arg(millis(TOMBSTONE));
+            .arg(millis(TOMBSTONE))
+            .arg(local_activity_task(producer))
+            .arg(completed_arg(withdrawal))
+            .arg(failed_list(withdrawal))
+            .arg(withdrawal.tasks.map_or(&[][..], |tasks| tasks.supersession));
         for record in batch.records {
             invocation.arg(record.as_slice());
         }
@@ -420,6 +424,31 @@ fn encode_run(run_id: &str) -> String {
     } else {
         encode_part(run_id)
     }
+}
+
+/// The task key of a Local Activity's dispatching Workflow Task, empty for any other kind.
+fn local_activity_task(producer: &Producer) -> String {
+    if producer.kind != ProducerKind::LocalActivity as i32 {
+        return String::new();
+    }
+    task_key(&task_of(&producer.epoch.unwrap_or_default()))
+}
+
+/// The run's last completed task key, `-` when the batch gives no task facts.
+fn completed_arg(withdrawal: &Withdrawal<'_>) -> String {
+    match &withdrawal.tasks {
+        None => "-".to_string(),
+        Some(tasks) => tasks.completed.map(task_key).unwrap_or_default(),
+    }
+}
+
+fn failed_list(withdrawal: &Withdrawal<'_>) -> String {
+    let failed = withdrawal.tasks.map_or(&[][..], |tasks| tasks.failed_tasks);
+    failed
+        .iter()
+        .map(i64::to_string)
+        .collect::<Vec<_>>()
+        .join(" ")
 }
 
 fn bad_reply(call: &str, reply: impl std::fmt::Debug) -> StreamError {

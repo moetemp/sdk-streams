@@ -69,6 +69,66 @@ local function trim(meta, log, now)
   end
 end
 
+local function words(text)
+  local list = {}
+  if text then
+    for word in string.gmatch(text, '%S+') do
+      table.insert(list, word)
+    end
+  end
+  return list
+end
+
+local function contains(list, value)
+  for _, item in ipairs(list) do
+    if item == value then
+      return true
+    end
+  end
+  return false
+end
+
+local function started(task_key)
+  return tonumber(string.sub(task_key, 1, 16), 16)
+end
+
+-- Whether a task key at c's started id is a lower attempt than c. Lang gives c with attempt 0
+-- when it knows only c's started id. The attempts of one task start in time order, so the
+-- started time decides then.
+local function below_completed(key, c)
+  if string.sub(c, 18, 25) == '00000000' then
+    return string.sub(key, 27) < string.sub(c, 27)
+  end
+  return key < c
+end
+
+-- The orphan rule over the open Local Activity tasks of a run, for a write in task t with the
+-- run's last completed task c and its failed tasks. A task strictly between c and t, a failed
+-- one, or a lower attempt of t or c never completed, so its Records go. A task at or before c
+-- that stays completed, so the list drops it. Answers the withdrawn tasks and the open ones.
+local function orphan_tasks(open, t, c, failed)
+  local failed_set = {}
+  for _, id in ipairs(words(failed)) do
+    failed_set[tonumber(id)] = true
+  end
+  local ts = started(t)
+  local cs = 0
+  if c ~= '' then
+    cs = started(c)
+  end
+  local withdrawn, kept = {}, {}
+  for _, key in ipairs(open) do
+    local s = started(key)
+    if failed_set[s] or (cs < s and s < ts) or (s == ts and key < t)
+        or (c ~= '' and s == cs and below_completed(key, c)) then
+      table.insert(withdrawn, key)
+    elseif c == '' or key > c then
+      table.insert(kept, key)
+    end
+  end
+  return withdrawn, kept
+end
+
 -- Takes a retry run's previous run out of the Stream. Answers true when that run wrote here.
 local function withdraw_run(meta, run)
   if run == '' or redis.call('HGET', meta, 'wr|' .. run) then

@@ -10,11 +10,12 @@ use crate::{
         AppendRecordsRequest, AppendRecordsResponse, CloseStreamRequest, CloseStreamResponse,
         CreateStreamRequest, CreateStreamResponse, DescribeStreamRequest, DescribeStreamResponse,
         Producer, ProducerKind, ReadRecordsRequest, ReadRecordsResponse, ReadStart, StreamRecord,
-        StreamRecordKind, StreamRef, StreamStatus, Supersession,
+        StreamRecordKind, StreamRef, StreamStatus, Supersession, WorkflowTaskEpoch,
     },
     record::{close_record, data_records, supersession},
     store::{
-        Batch, Capabilities, CreateOutcome, FORMAT_VERSION, Owner, Store, StreamState, Withdrawal,
+        Batch, Capabilities, CreateOutcome, FORMAT_VERSION, Owner, Store, StreamState, TaskFacts,
+        Withdrawal,
     },
 };
 use prost::Message;
@@ -67,6 +68,33 @@ fn run_supersession(owner: Option<&Producer>, withdraw_run: &str) -> Vec<u8> {
     supersession(&producer, withdraw_run)
 }
 
+/// The `Superseded` facts that withdraw a run's orphaned Local Activity Records. They name the
+/// run's Workflow Producer in the batch's task, so a Reader's Workflow rule withdraws the run's
+/// Local Activity Records of the tasks after `completed` and before that task, and of the
+/// failed ones.
+fn orphan_supersession(
+    producer: &Producer,
+    completed: Option<&WorkflowTaskEpoch>,
+    failed_tasks: &[i64],
+) -> Vec<u8> {
+    let epoch = producer.epoch.unwrap_or_default();
+    Supersession {
+        producer_kind: ProducerKind::Workflow as i32,
+        producer_id: crate::ids::workflow_producer_id(&producer.run_id),
+        epoch: Some(crate::proto::ProducerEpoch {
+            task_started_event_id: epoch.task_started_event_id,
+            task_attempt: epoch.task_attempt,
+            task_started_time: epoch.task_started_time,
+            ..Default::default()
+        }),
+        previous_completed_task: completed.copied(),
+        failed_tasks: failed_tasks.to_vec(),
+        run_id: producer.run_id.clone(),
+        ..Default::default()
+    }
+    .encode_to_vec()
+}
+
 /// Checks a Producer that writes outside Workflow code.
 fn outside_producer(producer: Option<&Producer>) -> StreamResult<&Producer> {
     let producer = producer.ok_or_else(|| StreamError::invalid("The request has no Producer"))?;
@@ -115,6 +143,7 @@ impl StreamService {
         let withdrawal = Withdrawal {
             withdraw_run: &request.withdraw_run,
             supersession: &bytes,
+            tasks: None,
         };
         let created = self
             .store
@@ -173,6 +202,14 @@ impl StreamService {
         }
         let records = data_records(producer, request.records)?;
         let bytes = supersession(producer, &request.withdraw_run);
+        // A Local Activity gives its run's task facts, so the batch withdraws the run's
+        // orphaned Local Activity Records: those of tasks that never completed (S110).
+        let completed = request
+            .previous_completed_task
+            .filter(|c| c.started_event_id > 0);
+        let orphans = (producer.kind == ProducerKind::LocalActivity as i32
+            && request.previous_completed_task.is_some())
+        .then(|| orphan_supersession(producer, completed.as_ref(), &request.failed_tasks));
         let batch = Batch {
             producer,
             sequence: request.sequence,
@@ -180,6 +217,11 @@ impl StreamService {
             withdrawal: Withdrawal {
                 withdraw_run: &request.withdraw_run,
                 supersession: &bytes,
+                tasks: orphans.as_ref().map(|orphans| TaskFacts {
+                    completed: completed.as_ref(),
+                    failed_tasks: &request.failed_tasks,
+                    supersession: orphans,
+                }),
             },
         };
         let appended = self.store.append(&request.namespace, id, &batch).await;

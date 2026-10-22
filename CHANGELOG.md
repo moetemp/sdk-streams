@@ -95,3 +95,8 @@
   fence that used them, the facts-only batch after a close and the `Superseded` items that it
   left after the close Record, and the previous completed task and failed tasks on
   `Withdrawal`. A close takes no withdrawal. The `withdraws()` reader rule stays.
+- A Local Activity batch that gives its run's last completed Workflow Task and failed tasks
+  withdraws the run's orphaned Local Activity Records, those of tasks that never completed, with a
+  Workflow-kind `Superseded` item that the reader rule already applies (S110). A late write of a
+  withdrawn task is fenced. A rerun in a later task still supersedes by epoch. `OpenWriter` takes
+  the same task facts, and each batch of the writer sends them.

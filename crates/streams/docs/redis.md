@@ -29,6 +29,8 @@ slot. `CreateStream` writes `:meta`, and the first entry makes `:log`.
 | `e\|<kind>\|<producer id>` | The newest epoch key of the Producer, the fence |
 | `d\|<kind>\|<producer id>` | `<epoch key>\|<sequence>\|<first id>\|<last id>` of the last batch |
 | `h\|<kind>\|<producer id>` | The newest epoch key that still has Records here |
+| `oa\|<run>` | The run's Local Activity task keys here that may not have completed |
+| `ow\|<run>` | The task keys of the run whose Local Activity Records an orphan item withdrew |
 | `run\|<run>` | Set when a Producer of the run wrote a Record here |
 | `wr\|<run>` | Set when a Workflow retry withdrew the run |
 
@@ -42,6 +44,18 @@ Each entry has `r`, the encoded `temporal.api.streamservice.v1.StreamRecord` wit
 `s`, the encoded `Supersession`, on the first entry of a batch that withdraws. An entry with
 only `s` withdraws and has no Record. A reader gives a `SUPERSEDED` item for `s` just before the
 Record of the same entry. An offset is the entry id `<ms>-<seq>` packed as `ms << 20 | seq`.
+
+## Orphaned Local Activity Records
+
+A Local Activity batch that gives its run's last completed Workflow Task (`previous_completed_task`,
+0 before the first) and failed tasks names its dispatching task in its epoch. Before it writes,
+the append script withdraws the Records of the run's Local Activity tasks in `oa` that never
+completed: those after the completed task and before the batch's own task, the failed ones and the
+lower attempts. It writes one entry with only `s`, a Workflow-kind `Supersession` (the run's
+Workflow Producer, the batch's task, the completed and failed tasks), so a Reader's Workflow rule
+withdraws them. It drops the tasks at or before the completed one, adds its own task, and keeps the
+withdrawn ones in `ow`, which fences a late write of such a task. A batch with no completed task
+skips the rule. A Stream that the run never writes again keeps its orphans.
 
 ## Auto close
 
@@ -66,6 +80,12 @@ See the known limits for a Reader of a Stream with an auto close.
 
 ## Known limits
 
+- A Local Activity call of a failed Workflow Task is withdrawn only when the retry task runs that
+  call again, or when a later Local Activity write names the failed task. A call that no later
+  write covers, for example because a Signal changed the path and no Local Activity writes
+  again, keeps its Records. The memory Store has the same limit.
+- Core names only the last 100 failed Workflow Tasks of a run. An older failed task before the
+  last completed one keeps its Local Activity Records.
 - A Reader of a Stream with an auto close needs `+evalsha` with write access to the Stream's
   keys, since its read or describe may apply a due close. A Reader with read-only access gets
   an error from that step.

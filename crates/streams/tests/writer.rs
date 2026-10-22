@@ -14,13 +14,14 @@ use temporalio_sdk_core::{ExtensionError, WorkerExtension};
 use temporalio_streams::{
     MemoryStreamExtension, RedisStreamExtension, StreamError, StreamResult,
     epoch::withdraws,
-    ids::{activity_producer_id, client_producer_id},
+    ids::{activity_producer_id, client_producer_id, local_activity_producer_id},
     memory::MemoryStore,
     proto::{
         AppendRecord, CloseStreamRequest, CloseWriterRequest, CloseWriterResponse,
         CreateStreamRequest, CreateStreamResponse, OpenWriterRequest, OpenWriterResponse, Producer,
         ProducerEpoch, ProducerKind, ReadRecordsRequest, ReadRecordsResponse, StreamErrorDetails,
-        StreamRecord, StreamRecordKind, StreamRef, WriteRecordsRequest, WriteRecordsResponse,
+        StreamRecord, StreamRecordKind, StreamRef, WorkflowTaskEpoch, WriteRecordsRequest,
+        WriteRecordsResponse,
     },
     store::{Appended, Batch, Capabilities, Created, Entry, Owner, Store, StreamState, Withdrawal},
 };
@@ -503,5 +504,41 @@ async fn a_write_that_waits_behind_a_close_is_refused() {
         closed.unwrap();
         assert_eq!(reason(&written.unwrap_err()), "stream_unknown_writer");
         assert_eq!(case.visible().await, ["a"]);
+    }
+}
+
+#[tokio::test]
+async fn a_local_activity_writer_withdraws_the_records_of_a_failed_task() {
+    for case in cases().await {
+        let local_activity = |call: &str, started: i64| Producer {
+            kind: ProducerKind::LocalActivity as i32,
+            id: local_activity_producer_id("r1", call),
+            epoch: Some(ProducerEpoch {
+                task_started_event_id: started,
+                task_attempt: 1,
+                task_started_time: Some(Timestamp {
+                    seconds: started,
+                    nanos: 0,
+                }),
+                attempt: 1,
+                ..Default::default()
+            }),
+            run_id: "r1".to_string(),
+        };
+        let facts = |completed: i64, failed: Vec<i64>| {
+            move |request: &mut OpenWriterRequest| {
+                request.previous_completed_task = Some(WorkflowTaskEpoch {
+                    started_event_id: completed,
+                    ..Default::default()
+                });
+                request.failed_tasks = failed.clone();
+            }
+        };
+        // Task [3] fails after its Local Activity writes, and task [4] completes with no write.
+        let orphan = case.open(local_activity("1", 3), facts(2, vec![])).await;
+        case.write(orphan, &["orphan"]).await.unwrap();
+        let next = case.open(local_activity("2", 5), facts(4, vec![3])).await;
+        case.write(next, &["next"]).await.unwrap();
+        assert_eq!(case.visible().await, ["next"]);
     }
 }

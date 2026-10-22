@@ -358,6 +358,7 @@ impl Target {
         let mut withdrawal = Withdrawal {
             withdraw_run,
             supersession: &[],
+            tasks: None,
         };
         let bytes = supersession(producer, &withdrawal);
         withdrawal.supersession = &bytes;
