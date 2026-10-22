@@ -19,10 +19,7 @@ use crate::{
 };
 use conn::{BlockingPool, Shared};
 use errors::Mapped;
-use redis::{
-    Value,
-    cluster_routing::{Route, RoutingInfo, SingleNodeRoutingInfo, SlotAddr},
-};
+use redis::Value;
 use std::{sync::Arc, time::Duration};
 use tokio::time::Instant;
 
@@ -44,9 +41,6 @@ pub struct RedisStoreOptions {
     pub blocking_reads_per_node: usize,
     /// How long a short call waits for its answer.
     pub response_timeout: Duration,
-    /// Opens a second connection for flushes that wait for replicas. See
-    /// [RedisStore::durable].
-    pub durable_connection: bool,
 }
 
 impl RedisStoreOptions {
@@ -60,7 +54,6 @@ impl RedisStoreOptions {
             safety_ttl: Duration::from_secs(90 * 24 * 60 * 60),
             blocking_reads_per_node: 256,
             response_timeout: Duration::from_secs(5),
-            durable_connection: false,
         }
     }
 }
@@ -73,7 +66,6 @@ pub struct RedisStore {
     prefix: String,
     retention: Duration,
     safety_ttl: Duration,
-    durable: Option<Shared>,
 }
 
 impl std::fmt::Debug for RedisStore {
@@ -115,33 +107,12 @@ impl RedisStore {
             options.response_timeout,
         )
         .mapped()?;
-        let durable = if options.durable_connection {
-            let shared = Shared::connect(&options.urls, options.cluster, options.response_timeout)
-                .await
-                .mapped()?;
-            Some(shared)
-        } else {
-            None
-        };
         Ok(Self {
             shared,
             blocking: Arc::new(blocking),
             prefix: options.key_prefix,
             retention: options.retention,
             safety_ttl: options.safety_ttl,
-            durable,
-        })
-    }
-
-    /// The Store on the connection for flushes that wait for replicas, or `None` without one.
-    /// `WAIT` holds the connection it runs on, and only that connection's own writes count, so
-    /// those flushes write and wait on a connection of their own.
-    pub fn durable(&self) -> Option<RedisStore> {
-        let shared = self.durable.clone()?;
-        Some(Self {
-            shared,
-            durable: None,
-            ..self.clone()
         })
     }
 
@@ -394,34 +365,6 @@ impl RedisStore {
                 || matches!(reply, Some(Value::Map(ref keys)) if !keys.is_empty()),
         )
     }
-
-    /// Waits until `replicas` replicas have the writes this process made to the Stream's node.
-    /// Answers how many have them.
-    pub async fn wait_replicas(
-        &self,
-        namespace: &str,
-        stream_id: &str,
-        replicas: u32,
-        timeout: Duration,
-    ) -> StreamResult<i64> {
-        let keys = self.keys(namespace, stream_id);
-        let mut wait = redis::cmd("WAIT");
-        wait.arg(replicas).arg(millis(timeout));
-        let reply = match self.shared.clone() {
-            // The one multiplexed connection made the writes, so its WAIT covers them.
-            Shared::Single(mut conn) => wait.query_async(&mut conn).await.mapped()?,
-            // The cluster connection has one connection per node, so the WAIT goes to the
-            // node of the Stream's slot.
-            Shared::Cluster(mut conn) => {
-                let routing = RoutingInfo::SingleNode(SingleNodeRoutingInfo::SpecificNode(
-                    Route::new(conn::slot(&keys.meta()), SlotAddr::Master),
-                ));
-                let reply = conn.route_command(wait, routing).await.mapped()?;
-                redis::from_redis_value(reply).map_err(|error| bad_reply("WAIT", error))?
-            }
-        };
-        Ok(reply)
-    }
 }
 
 #[async_trait::async_trait]
@@ -492,21 +435,6 @@ impl Store for RedisStore {
 
     async fn auto_close(&self, namespace: &str, stream_id: &str) -> StreamResult<Option<i64>> {
         RedisStore::auto_close(self, namespace, stream_id).await
-    }
-
-    async fn wait_replicas(
-        &self,
-        namespace: &str,
-        stream_id: &str,
-        replicas: u32,
-        timeout: Duration,
-    ) -> StreamResult<i64> {
-        RedisStore::wait_replicas(self, namespace, stream_id, replicas, timeout).await
-    }
-
-    fn durable_store(&self) -> Option<Arc<dyn Store>> {
-        self.durable()
-            .map(|store| Arc::new(store) as Arc<dyn Store>)
     }
 }
 

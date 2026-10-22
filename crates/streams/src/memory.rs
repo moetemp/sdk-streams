@@ -414,9 +414,8 @@ fn offsets(first: &str, last: &str) -> StreamResult<Option<(i64, i64)>> {
 
 #[async_trait::async_trait]
 impl Store for MemoryStore {
-    // A process has no replicas to wait for.
     fn capabilities(&self) -> Capabilities {
-        Capabilities::ALL.without(Capabilities::REPLICA_WAIT)
+        Capabilities::ALL
     }
 
     fn default_retention(&self) -> Duration {

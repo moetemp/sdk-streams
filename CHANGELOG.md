@@ -86,3 +86,6 @@
   interceptor, the deferred withdrawal of the batch before a Local Activity, and the metrics
   only they kept (`stream_hook_latency`, `stream_flush_failures`, `stream_close_retries`,
   `stream_records_dropped`).
+- Removed `durable_writes` and `durable_timeout` (`RedisStreamConfig` 6 and 7, now reserved), the
+  `replica_wait` capability, `Store::wait_replicas` and `Store::durable_store`. Only the Workflow
+  flush used them, and a Workflow write is now an Activity-path write with the same guarantee.

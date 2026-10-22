@@ -547,25 +547,6 @@ async fn a_blocked_read_wakes_on_an_append_and_a_wait_for_replicas_ends() {
         tokio::time::sleep(Duration::from_millis(100)).await;
         append(&target, &client(1), 2, &["b"]).await.unwrap();
         assert!(waiter.await.unwrap().unwrap());
-        let replicas = target
-            .store
-            .wait_replicas(
-                &target.namespace,
-                &target.stream,
-                0,
-                Duration::from_millis(100),
-            )
-            .await;
-        // A Store with no replica wait refuses it by name.
-        if target
-            .store
-            .capabilities()
-            .contains(Capabilities::REPLICA_WAIT)
-        {
-            assert_eq!(replicas.unwrap(), 0);
-        } else {
-            assert_eq!(replicas.unwrap_err().reason, Reason::Unsupported);
-        }
     }
 }
 
@@ -632,39 +613,6 @@ async fn a_stale_producer_cant_close_the_stream() {
             Reason::Fenced
         );
         target.close(&client(2)).await.unwrap();
-    }
-}
-
-#[tokio::test]
-async fn a_wait_for_replicas_holds_only_the_durable_connection() {
-    let targets = support::stores_with(|mut options| {
-        options.durable_connection = true;
-        options
-    })
-    .await;
-    for target in targets {
-        // The memory Store has no replicas and no second connection.
-        let support::Backend::Redis { store, .. } = &target.backend else {
-            continue;
-        };
-        target.create(Owner::Client).await;
-        let durable = store.durable().expect("a durable connection");
-        let (namespace, stream) = (target.namespace.clone(), target.stream.clone());
-        let waiter = tokio::spawn(async move {
-            durable
-                .wait_replicas(&namespace, &stream, 1, Duration::from_millis(800))
-                .await
-        });
-        tokio::time::sleep(Duration::from_millis(50)).await;
-        let started = std::time::Instant::now();
-        append(&target, &client(1), 1, &["a"]).await.unwrap();
-        assert!(
-            started.elapsed() < Duration::from_millis(400),
-            "{:?}",
-            started.elapsed()
-        );
-        assert_eq!(waiter.await.unwrap().unwrap(), 0);
-        assert!(store.durable().unwrap().durable().is_none());
     }
 }
 

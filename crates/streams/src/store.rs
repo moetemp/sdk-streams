@@ -5,7 +5,7 @@ use crate::{
     Reason, StreamError, StreamResult,
     proto::{Producer, WorkflowTaskEpoch},
 };
-use std::{sync::Arc, time::Duration};
+use std::time::Duration;
 use tokio::time::Instant;
 
 /// The format version this crate writes. A Stream with a higher one refuses writes.
@@ -188,22 +188,19 @@ impl Capabilities {
     pub const RUN_FENCE: Self = Self(1 << 2);
     /// A close writes the close Record and every later append is refused.
     pub const CLOSE: Self = Self(1 << 3);
-    /// A write can wait until replicas have it, for `durable_writes`.
-    pub const REPLICA_WAIT: Self = Self(1 << 4);
     /// An open Workflow-owned Stream keeps the safety TTL, not the Retention.
-    pub const SAFETY_TTL: Self = Self(1 << 5);
+    pub const SAFETY_TTL: Self = Self(1 << 4);
     /// A Stream with an auto close period closes with no result when no append came for that
     /// long. Each write step applies it before it acts, so no call sees the Stream open late.
-    pub const AUTO_CLOSE: Self = Self(1 << 6);
+    pub const AUTO_CLOSE: Self = Self(1 << 5);
     /// Every capability.
-    pub const ALL: Self = Self((1 << 7) - 1);
+    pub const ALL: Self = Self((1 << 6) - 1);
 
-    const NAMES: [(Self, &'static str); 7] = [
+    const NAMES: [(Self, &'static str); 6] = [
         (Self::PRODUCER_FENCE, "producer_fence"),
         (Self::WITHDRAWAL, "withdrawal"),
         (Self::RUN_FENCE, "run_fence"),
         (Self::CLOSE, "close"),
-        (Self::REPLICA_WAIT, "replica_wait"),
         (Self::SAFETY_TTL, "safety_ttl"),
         (Self::AUTO_CLOSE, "auto_close"),
     ];
@@ -321,23 +318,6 @@ pub trait Store: Send + Sync + 'static {
     async fn auto_close(&self, _namespace: &str, _stream_id: &str) -> StreamResult<Option<i64>> {
         Err(unsupported("auto_close"))
     }
-
-    /// Waits until `replicas` replicas have this process's writes to the Stream. Answers how
-    /// many have them. Needs [Capabilities::REPLICA_WAIT].
-    async fn wait_replicas(
-        &self,
-        _namespace: &str,
-        _stream_id: &str,
-        _replicas: u32,
-        _timeout: Duration,
-    ) -> StreamResult<i64> {
-        Err(unsupported("replica_wait"))
-    }
-
-    /// The Store for flushes that wait for replicas, if it has one of its own.
-    fn durable_store(&self) -> Option<Arc<dyn Store>> {
-        None
-    }
 }
 
 #[cfg(test)]
@@ -349,17 +329,17 @@ mod tests {
         let some = Capabilities::PRODUCER_FENCE.union(Capabilities::CLOSE);
         some.require(Capabilities::CLOSE).unwrap();
         let error = some
-            .require(Capabilities::CLOSE.union(Capabilities::REPLICA_WAIT))
+            .require(Capabilities::CLOSE.union(Capabilities::AUTO_CLOSE))
             .unwrap_err();
         assert_eq!(error.reason, Reason::Unsupported);
-        assert!(error.message.ends_with("replica_wait"), "{}", error.message);
-        assert_eq!(Capabilities::ALL.names().len(), 7);
+        assert!(error.message.ends_with("auto_close"), "{}", error.message);
+        assert_eq!(Capabilities::ALL.names().len(), 6);
         assert_eq!(
             Capabilities::ALL
-                .without(Capabilities::REPLICA_WAIT)
+                .without(Capabilities::AUTO_CLOSE)
                 .names()
                 .len(),
-            6
+            5
         );
     }
 }

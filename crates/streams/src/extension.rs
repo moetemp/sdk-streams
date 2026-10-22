@@ -29,10 +29,6 @@ pub const EXTENSION_NAME: &str = "temporalio-streams-redis";
 pub struct ExtensionOptions {
     /// How to reach Redis.
     pub store: RedisStoreOptions,
-    /// When above zero, each Workflow flush waits until this many replicas have it.
-    pub durable_writes: u32,
-    /// How long that wait may take before the flush fails.
-    pub durable_timeout: Duration,
     /// The backend name that lang registered the extension under, for the refs it builds.
     pub backend: String,
 }
@@ -61,11 +57,8 @@ impl ExtensionOptions {
         if let Some(timeout) = duration(config.response_timeout) {
             store.response_timeout = timeout;
         }
-        store.durable_connection = config.durable_writes > 0;
         Ok(Self {
             store,
-            durable_writes: config.durable_writes.max(0) as u32,
-            durable_timeout: duration(config.durable_timeout).unwrap_or(Duration::from_secs(1)),
             backend: config.backend,
         })
     }
@@ -248,12 +241,11 @@ impl MemoryStreamExtension {
         meter: Option<TemporalMeter>,
     ) -> Arc<StreamExtension> {
         let memory = Arc::new(MemoryStore::new(retention, safety_ttl));
-        Self::with_store(memory, 0, meter)
+        Self::with_store(memory, meter)
     }
 
     /// Builds an extension from an encoded [RedisStreamConfig]. The URLs don't count, so a
-    /// plugin can pass the config it builds for Redis. `durable_writes` counts, and the memory
-    /// Store then refuses every Workflow flush, since it has no replicas.
+    /// plugin can pass the config it builds for Redis.
     pub fn from_config_bytes(
         config: &[u8],
         meter: Option<TemporalMeter>,
@@ -265,27 +257,17 @@ impl MemoryStreamExtension {
             duration(config.retention).unwrap_or(defaults.retention),
             duration(config.safety_ttl).unwrap_or(defaults.safety_ttl),
         ));
-        Ok(Self::with_options(
-            memory,
-            config.durable_writes.max(0) as u32,
-            config.backend,
-            meter,
-        ))
+        Ok(Self::with_options(memory, config.backend, meter))
     }
 
     /// Builds an extension on any Store, for tests of a Store that lacks some capabilities.
     #[doc(hidden)]
-    pub fn with_store(
-        store: Arc<dyn Store>,
-        durable_writes: u32,
-        meter: Option<TemporalMeter>,
-    ) -> Arc<StreamExtension> {
-        Self::with_options(store, durable_writes, String::new(), meter)
+    pub fn with_store(store: Arc<dyn Store>, meter: Option<TemporalMeter>) -> Arc<StreamExtension> {
+        Self::with_options(store, String::new(), meter)
     }
 
     fn with_options(
         store: Arc<dyn Store>,
-        durable_writes: u32,
         backend: String,
         meter: Option<TemporalMeter>,
     ) -> Arc<StreamExtension> {
@@ -293,8 +275,6 @@ impl MemoryStreamExtension {
         options.retention = store.default_retention();
         let options = ExtensionOptions {
             store: options,
-            durable_writes,
-            durable_timeout: Duration::from_secs(1),
             backend,
         };
         StreamExtension::build(MEMORY_EXTENSION_NAME, options, meter, Some(store))
@@ -324,7 +304,6 @@ mod tests {
     fn the_config_fills_the_defaults() {
         let options = ExtensionOptions::from_config(RedisStreamConfig {
             urls: vec!["redis://x:1".to_string()],
-            durable_writes: 2,
             backend: "redis-a".to_string(),
             ..Default::default()
         })
@@ -334,9 +313,6 @@ mod tests {
         assert_eq!(options.store.retention, Duration::from_secs(7 * 86_400));
         assert_eq!(options.store.safety_ttl, Duration::from_secs(90 * 86_400));
         assert_eq!(options.store.blocking_reads_per_node, 256);
-        assert_eq!(options.durable_writes, 2);
-        assert!(options.store.durable_connection);
-        assert_eq!(options.durable_timeout, Duration::from_secs(1));
         assert!(ExtensionOptions::from_config(RedisStreamConfig::default()).is_err());
     }
 }
