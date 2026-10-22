@@ -526,6 +526,9 @@ async fn a_stale_task_fails_on_the_fence() {
         run.activation(vec![run.publish(&["stale"])]).unwrap();
         let error = run.complete(&run.task(5, 1), true).await.unwrap_err();
         assert!(error.contains("stream_fenced"), "{error}");
+        // The task failure names the Stream and the Topic, which lang can't add.
+        let named = format!("(Stream {}, Topic \"turns\")", run.stream);
+        assert!(error.contains(&named), "{error}");
         assert_eq!(run.visible().await.0, ["new"]);
     }
 }
@@ -816,5 +819,27 @@ async fn two_local_activities_that_start_together_both_wait_for_the_run_s_record
         assert_eq!(one + two, 2);
         assert_eq!(seen_one, texts(&["a", "b"]));
         assert_eq!(seen_two, texts(&["a", "b"]));
+    }
+}
+
+#[tokio::test]
+async fn a_deferred_batch_that_withdraws_the_previous_run_keeps_this_run_s_records() {
+    for run in runs().await {
+        let previous = format!("{}-previous", run.run_id);
+        run.activation_of(&previous, "", vec![run.create(), run.publish(&["old"])])
+            .unwrap();
+        let mut task = run.task(3, 1);
+        task.run_id = previous.clone();
+        run.complete(&task, true).await.unwrap();
+        // The retry run's task [3] has only a Local Activity write on the Stream.
+        run.local_activity_publish("la", 3, 1, "la0").await;
+        // In task [7] the run's first Workflow batch on the Stream comes from an early flush,
+        // so it withdraws the previous run with no facts of its own.
+        run.activation_of(&run.run_id, &previous, vec![run.publish(&["w"])])
+            .unwrap();
+        assert_eq!(run.flush_for_local_activity(7, 1).await.unwrap(), 1);
+        assert_eq!(run.visible().await.0, texts(&["la0", "w"]));
+        run.complete(&run.task(7, 1).after(3), true).await.unwrap();
+        assert_eq!(run.visible().await.0, texts(&["la0", "w"]));
     }
 }
