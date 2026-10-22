@@ -87,42 +87,31 @@ message FlushRunBufferResponse {
     int32 records = 1;
 }
 
-// Method `OpenWriter`, asynchronous. A buffered writer for an Activity or a client Producer.
+// Method `OpenWriter`, asynchronous. A writer for an Activity or a client Producer, which keeps
+// its epoch and `sequence` order. A writer of an Activity attempt above 1 first sends an empty
+// batch, so the new epoch withdraws the earlier attempt's Records.
 message OpenWriterRequest {
     string namespace = 1;
     temporal.api.streamservice.v1.StreamRef stream = 2;
     temporal.api.streamservice.v1.Producer producer = 3;
-    // How often the writer flushes. Empty is 100 ms.
-    google.protobuf.Duration batch_interval = 4;
-    // A flush sends at most this many Records in one batch. Zero is 1000.
+    // The interval flush and its buffer limit are gone. Lang buffers on its own.
+    reserved 4, 7;
+    reserved "batch_interval", "max_buffered_records";
+    // A write sends at most this many Records in one batch. Zero is 1000.
     int32 max_batch_size = 5;
-    // How long a flush retries a Store failure. Empty is 10 s.
+    // How long a write retries a Store failure. Empty is 10 s.
     google.protobuf.Duration max_retry_duration = 6;
-    // A publish past this many buffered Records fails with `stream_buffer_full`. Zero is 10000.
-    int32 max_buffered_records = 7;
 }
 
 message OpenWriterResponse {
     uint64 writer_id = 1;
 }
 
-// Method `Publish`, synchronous. Adds encoded Records to a writer's buffer.
-message PublishRequest {
-    uint64 writer_id = 1;
-    repeated temporal.api.streamservice.v1.AppendRecord records = 2;
-    // Start a flush at once.
-    bool force_flush = 3;
-}
-
-message PublishResponse {
-}
-
-// Method `WriteRecords`, asynchronous. Appends Records at once for an open writer, after the
-// Records that `Publish` buffered, and answers when they are in the Store. It keeps the writer's
-// Producer epoch and `sequence` order, and a Store failure resends the same batch, so it goes in
-// once. Records past the Store's batch limit go as more batches, in order. An awaited publish of
-// an Activity or a client uses this call, so it needs no interval flush. A failure after the
-// Store retries fails the writer, as a failed flush does.
+// Method `WriteRecords`, asynchronous. Appends Records at once for an open writer and answers
+// when they are in the Store. It keeps the writer's Producer epoch and `sequence` order, and a
+// Store failure resends the same batch, so it goes in once. Records past the Store's batch limit
+// go as more batches, in order. An awaited publish of an Activity or a client uses this call. A
+// failure after the Store retries fails the writer, since the batch may be in the Store.
 message WriteRecordsRequest {
     uint64 writer_id = 1;
     repeated temporal.api.streamservice.v1.AppendRecord records = 2;
@@ -134,33 +123,24 @@ message WriteRecordsResponse {
     int64 last_offset = 2;
 }
 
-// Method `FlushWriter`, asynchronous. Waits until the Records published so far are in the Store.
-message FlushWriterRequest {
-    uint64 writer_id = 1;
-}
-
-message FlushWriterResponse {
-    // The offset of the newest Record the writer wrote. Zero if it wrote none.
-    int64 last_offset = 1;
-}
-
-// Method `CloseWriter`, asynchronous. Flushes, then drops the writer. It doesn't close the
-// Stream.
+// Method `CloseWriter`, asynchronous. Waits for a write in flight, then drops the writer. It
+// doesn't close the Stream. It fails with the writer's error if a write failed.
 message CloseWriterRequest {
     uint64 writer_id = 1;
 }
 
 message CloseWriterResponse {
+    // The offset of the newest Record the writer wrote. Zero if it wrote none.
     int64 last_offset = 1;
 }
 
-// Method `CloseWriters`, asynchronous. Flushes and drops every open writer, for example when the
-// plugin's client or Worker shuts down, so no flusher task stays behind.
+// Method `CloseWriters`, asynchronous. Drops every open writer, for example when the plugin's
+// client or Worker shuts down.
 message CloseWritersRequest {
 }
 
 message CloseWritersResponse {
-    // The writers whose last flush failed.
+    // The writers that had failed.
     int32 failed = 1;
 }
 

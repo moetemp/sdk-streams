@@ -1,4 +1,4 @@
-// Draft for the Brook v2 API proposal. It backs stream-service.wit in the same directory.
+// Draft for the Brook API proposal. It backs crates/streams/nexus/stream-service.wit.
 // For the draft, every message and enum is in one package. A real change would split them
 // into temporal/api/stream/v1, temporal/api/enums/v1 and temporal/api/streamservice/v1.
 syntax = "proto3";

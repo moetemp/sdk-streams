@@ -7,7 +7,7 @@ use prost_types::Timestamp;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::{
     sync::Arc,
-    time::{Duration, Instant, SystemTime, UNIX_EPOCH},
+    time::{Duration, SystemTime, UNIX_EPOCH},
 };
 use temporalio_common::protos::temporal::api::common::v1::Payload;
 use temporalio_sdk_core::{ExtensionError, WorkerExtension};
@@ -18,10 +18,9 @@ use temporalio_streams::{
     memory::MemoryStore,
     proto::{
         AppendRecord, CloseStreamRequest, CloseWriterRequest, CloseWriterResponse,
-        CreateStreamRequest, CreateStreamResponse, FlushWriterRequest, FlushWriterResponse,
-        OpenWriterRequest, OpenWriterResponse, Producer, ProducerEpoch, ProducerKind,
-        PublishRequest, ReadRecordsRequest, ReadRecordsResponse, StreamErrorDetails, StreamRecord,
-        StreamRecordKind, StreamRef, WriteRecordsRequest, WriteRecordsResponse,
+        CreateStreamRequest, CreateStreamResponse, OpenWriterRequest, OpenWriterResponse, Producer,
+        ProducerEpoch, ProducerKind, ReadRecordsRequest, ReadRecordsResponse, StreamErrorDetails,
+        StreamRecord, StreamRecordKind, StreamRef, WriteRecordsRequest, WriteRecordsResponse,
     },
     store::{Appended, Batch, Capabilities, Created, Entry, Owner, Store, StreamState, Withdrawal},
 };
@@ -147,22 +146,6 @@ impl Case {
         opened.writer_id
     }
 
-    fn publish(
-        &self,
-        writer_id: u64,
-        texts: &[&str],
-        force_flush: bool,
-    ) -> Result<(), ExtensionError> {
-        let request = PublishRequest {
-            writer_id,
-            records: records(texts),
-            force_flush,
-        };
-        self.ext
-            .call("Publish", &request.encode_to_vec())
-            .map(|_| ())
-    }
-
     /// An awaited publish: the Records are in the Store when it returns.
     async fn write(&self, writer_id: u64, texts: &[&str]) -> Result<(i64, i64), ExtensionError> {
         let written: WriteRecordsResponse = self
@@ -175,13 +158,6 @@ impl Case {
             )
             .await?;
         Ok((written.first_offset, written.last_offset))
-    }
-
-    async fn flush(&self, writer_id: u64) -> Result<i64, ExtensionError> {
-        let flushed: FlushWriterResponse = self
-            .call("FlushWriter", FlushWriterRequest { writer_id })
-            .await?;
-        Ok(flushed.last_offset)
     }
 
     async fn read(&self, wait_ms: u64) -> ReadRecordsResponse {
@@ -220,77 +196,46 @@ impl Case {
 }
 
 #[tokio::test]
-async fn a_publish_goes_out_with_the_next_batch_interval() {
+async fn a_write_is_in_the_store_when_it_answers_its_offsets() {
     for case in cases().await {
-        let writer = case
-            .open(client(), |r| r.batch_interval = millis(100))
-            .await;
-        case.publish(writer, &["a", "b"], false).unwrap();
-        assert!(case.read(0).await.records.is_empty());
-        let read = case.read(3000).await;
-        assert_eq!(read.records.len(), 2);
-    }
-}
-
-#[tokio::test]
-async fn a_forced_flush_goes_out_at_once() {
-    for case in cases().await {
-        let writer = case
-            .open(client(), |r| r.batch_interval = millis(60_000))
-            .await;
-        let started = Instant::now();
-        case.publish(writer, &["a"], true).unwrap();
-        assert_eq!(case.read(3000).await.records.len(), 1);
-        assert!(started.elapsed() < Duration::from_secs(2));
-    }
-}
-
-#[tokio::test]
-async fn a_flush_waits_for_the_store_and_batches_keep_their_order() {
-    for case in cases().await {
-        let writer = case
-            .open(client(), |r| {
-                r.batch_interval = millis(60_000);
-                r.max_batch_size = 2;
-            })
-            .await;
-        case.publish(writer, &["1", "2", "3"], false).unwrap();
-        case.publish(writer, &["4", "5"], false).unwrap();
-        let last = case.flush(writer).await.unwrap();
+        let writer = case.open(client(), |_| {}).await;
+        let (first, last) = case.write(writer, &["a", "b"]).await.unwrap();
+        assert!(0 < first && first < last);
         let read = case.read(0).await;
-        assert_eq!(read.records.last().unwrap().offset, last);
+        let offsets: Vec<i64> = read.records.iter().map(|r| r.offset).collect();
+        assert_eq!(offsets, [first, last]);
+        let (one, same) = case.write(writer, &["c"]).await.unwrap();
+        assert_eq!(one, same);
+        assert!(one > last);
+        assert_eq!(case.write(writer, &[]).await.unwrap(), (0, 0));
+        assert_eq!(case.visible().await, ["a", "b", "c"]);
+        let closed: CloseWriterResponse = case
+            .call("CloseWriter", CloseWriterRequest { writer_id: writer })
+            .await
+            .unwrap();
+        assert_eq!(closed.last_offset, one);
+    }
+}
+
+#[tokio::test]
+async fn writes_split_at_the_batch_size_and_keep_one_sequence() {
+    for case in cases().await {
+        let writer = case.open(client(), |r| r.max_batch_size = 2).await;
+        let (first, last) = case.write(writer, &["1", "2", "3"]).await.unwrap();
+        case.write(writer, &["4", "5"]).await.unwrap();
+        let read = case.read(0).await;
         assert_eq!(case.visible().await, ["1", "2", "3", "4", "5"]);
+        assert_eq!(read.records[0].offset, first);
+        assert_eq!(read.records[2].offset, last);
         // Opening the same Producer epoch again gives the same writer, so it keeps the sequence.
         assert_eq!(case.open(client(), |_| {}).await, writer);
     }
 }
 
 #[tokio::test]
-async fn a_full_buffer_refuses_a_publish() {
+async fn a_failed_write_fails_every_later_write_and_the_close() {
     for case in cases().await {
-        let writer = case
-            .open(client(), |r| {
-                r.batch_interval = millis(60_000);
-                r.max_buffered_records = 2;
-            })
-            .await;
-        case.publish(writer, &["1", "2"], false).unwrap();
-        let error = case.publish(writer, &["3"], false).unwrap_err();
-        assert_eq!(
-            (error.code, reason(&error).as_str()),
-            (Code::ResourceExhausted, "stream_buffer_full")
-        );
-        case.flush(writer).await.unwrap();
-        case.publish(writer, &["3"], false).unwrap();
-    }
-}
-
-#[tokio::test]
-async fn a_failed_flush_fails_the_flush_and_every_later_publish() {
-    for case in cases().await {
-        let writer = case
-            .open(client(), |r| r.batch_interval = millis(60_000))
-            .await;
+        let writer = case.open(client(), |_| {}).await;
         let close = CloseStreamRequest {
             namespace: case.namespace.clone(),
             stream: Some(StreamRef {
@@ -302,51 +247,44 @@ async fn a_failed_flush_fails_the_flush_and_every_later_publish() {
         };
         let _: temporalio_streams::proto::CloseStreamResponse =
             case.call("CloseStream", close).await.unwrap();
-        case.publish(writer, &["late"], false).unwrap();
-        let error = case.flush(writer).await.unwrap_err();
+        let error = case.write(writer, &["late"]).await.unwrap_err();
         assert_eq!(
             (error.code, reason(&error).as_str()),
             (Code::FailedPrecondition, "stream_closed")
         );
         assert_eq!(
-            reason(&case.publish(writer, &["x"], false).unwrap_err()),
+            reason(&case.write(writer, &["x"]).await.unwrap_err()),
             "stream_closed"
         );
+        let error = case
+            .call::<_, CloseWriterResponse>("CloseWriter", CloseWriterRequest { writer_id: writer })
+            .await
+            .unwrap_err();
+        assert_eq!(reason(&error), "stream_closed");
     }
 }
 
 #[tokio::test]
-async fn an_activity_retry_withdraws_the_earlier_attempt_even_with_nothing_to_publish() {
+async fn an_activity_retry_withdraws_the_earlier_attempt_even_with_nothing_to_write() {
     for case in cases().await {
         let first = case.open(activity(1), |_| {}).await;
-        case.publish(first, &["a1"], false).unwrap();
-        case.flush(first).await.unwrap();
-        let second = case.open(activity(2), |_| {}).await;
+        case.write(first, &["a1"]).await.unwrap();
+        case.open(activity(2), |_| {}).await;
         assert!(case.visible().await.is_empty());
-        case.publish(second, &["a2"], false).unwrap();
-        case.flush(second).await.unwrap();
-        assert_eq!(case.visible().await, ["a2"]);
-        // A late flush of the earlier attempt is fenced.
-        case.publish(first, &["late"], false).unwrap();
-        let error = case.flush(first).await.unwrap_err();
-        assert_eq!(reason(&error), "stream_fenced");
     }
 }
 
 #[tokio::test]
-async fn a_closed_writer_is_gone_after_its_last_flush() {
+async fn a_closed_writer_is_gone() {
     for case in cases().await {
-        let writer = case
-            .open(client(), |r| r.batch_interval = millis(60_000))
-            .await;
-        case.publish(writer, &["last"], false).unwrap();
+        let writer = case.open(client(), |_| {}).await;
+        case.write(writer, &["last"]).await.unwrap();
         let closed: CloseWriterResponse = case
             .call("CloseWriter", CloseWriterRequest { writer_id: writer })
             .await
             .unwrap();
         assert!(closed.last_offset > 0);
-        assert_eq!(case.visible().await, ["last"]);
-        let error = case.publish(writer, &["x"], false).unwrap_err();
+        let error = case.write(writer, &["x"]).await.unwrap_err();
         assert_eq!(
             (error.code, reason(&error).as_str()),
             (Code::NotFound, "stream_unknown_writer")
@@ -355,57 +293,48 @@ async fn a_closed_writer_is_gone_after_its_last_flush() {
 }
 
 #[tokio::test]
-async fn a_flush_splits_big_records_by_bytes_and_refuses_an_oversize_one() {
+async fn a_write_splits_big_records_by_bytes_and_refuses_an_oversize_one() {
     for case in cases().await {
-        let writer = case
-            .open(client(), |r| r.batch_interval = millis(60_000))
-            .await;
+        let writer = case.open(client(), |_| {}).await;
         let big = "x".repeat(1_400_000);
-        case.publish(writer, &[&big, &big, &big, "end"], false)
+        case.write(writer, &[&big, &big, &big, "end"])
+            .await
             .unwrap();
-        case.flush(writer).await.unwrap();
         assert_eq!(case.visible().await.len(), 4);
         let huge = "y".repeat(1_700_000);
-        let error = case.publish(writer, &[&huge], false).unwrap_err();
+        let error = case.write(writer, &[&huge]).await.unwrap_err();
         assert_eq!(
             (error.code, reason(&error).as_str()),
             (Code::InvalidArgument, "stream_too_large")
         );
+        // A refusal before the Store leaves the writer usable.
+        case.write(writer, &["ok"]).await.unwrap();
     }
 }
 
 #[tokio::test]
 async fn a_reopen_of_a_closed_writer_goes_on_with_its_sequence() {
     for case in cases().await {
-        let writer = case
-            .open(client(), |r| r.batch_interval = millis(60_000))
-            .await;
-        case.publish(writer, &["1"], false).unwrap();
+        let writer = case.open(client(), |_| {}).await;
+        case.write(writer, &["1"]).await.unwrap();
         let _: CloseWriterResponse = case
             .call("CloseWriter", CloseWriterRequest { writer_id: writer })
             .await
             .unwrap();
-        let again = case
-            .open(client(), |r| r.batch_interval = millis(60_000))
-            .await;
+        let again = case.open(client(), |_| {}).await;
         assert_ne!(again, writer);
-        case.publish(again, &["2"], false).unwrap();
-        case.flush(again).await.unwrap();
+        case.write(again, &["2"]).await.unwrap();
         assert_eq!(case.visible().await, ["1", "2"]);
     }
 }
 
 #[tokio::test]
-async fn closing_every_writer_flushes_them_all() {
+async fn closing_every_writer_drops_them_all() {
     for case in cases().await {
-        let a = case
-            .open(client(), |r| r.batch_interval = millis(60_000))
-            .await;
-        let b = case
-            .open(activity(1), |r| r.batch_interval = millis(60_000))
-            .await;
-        case.publish(a, &["a"], false).unwrap();
-        case.publish(b, &["b"], false).unwrap();
+        let a = case.open(client(), |_| {}).await;
+        let b = case.open(activity(1), |_| {}).await;
+        case.write(a, &["a"]).await.unwrap();
+        case.write(b, &["b"]).await.unwrap();
         let closed: temporalio_streams::proto::CloseWritersResponse = case
             .call(
                 "CloseWriters",
@@ -414,51 +343,22 @@ async fn closing_every_writer_flushes_them_all() {
             .await
             .unwrap();
         assert_eq!(closed.failed, 0);
-        let mut texts = case.visible().await;
-        texts.sort();
-        assert_eq!(texts, ["a", "b"]);
-        assert!(case.publish(a, &["x"], false).is_err());
+        assert!(case.write(a, &["x"]).await.is_err());
+        assert!(case.write(b, &["x"]).await.is_err());
     }
 }
 
 #[tokio::test]
-async fn a_write_is_in_the_store_when_it_answers_its_offsets() {
+async fn the_removed_buffered_calls_are_unknown() {
     for case in cases().await {
-        let writer = case
-            .open(client(), |r| r.batch_interval = millis(60_000))
-            .await;
-        let (first, last) = case.write(writer, &["a", "b"]).await.unwrap();
-        assert!(0 < first && first < last);
-        let read = case.read(0).await;
-        let offsets: Vec<i64> = read.records.iter().map(|r| r.offset).collect();
-        assert_eq!(offsets, [first, last]);
-        let (one, same) = case.write(writer, &["c"]).await.unwrap();
-        assert_eq!(one, same);
-        assert!(one > last);
-        assert_eq!(case.write(writer, &[]).await.unwrap(), (0, 0));
-        assert_eq!(case.visible().await, ["a", "b", "c"]);
-        assert_eq!(case.flush(writer).await.unwrap(), one);
-    }
-}
-
-#[tokio::test]
-async fn a_write_goes_after_the_buffered_records_in_one_sequence() {
-    for case in cases().await {
-        let writer = case
-            .open(client(), |r| {
-                r.batch_interval = millis(60_000);
-                r.max_batch_size = 2;
-            })
-            .await;
-        case.publish(writer, &["1", "2", "3"], false).unwrap();
-        let (first, last) = case.write(writer, &["4", "5", "6"]).await.unwrap();
-        case.publish(writer, &["7"], false).unwrap();
-        case.flush(writer).await.unwrap();
-        let read = case.read(0).await;
-        assert_eq!(case.visible().await, ["1", "2", "3", "4", "5", "6", "7"]);
-        // The write split at the batch size, and its offsets span its own Records.
-        assert_eq!(read.records[3].offset, first);
-        assert_eq!(read.records[5].offset, last);
+        let error = case.ext.call("Publish", &[]).unwrap_err();
+        assert!(error.message.contains("Publish"), "{error:?}");
+        let error = case
+            .ext
+            .call_async("FlushWriter".to_string(), vec![])
+            .await
+            .unwrap_err();
+        assert!(error.message.contains("FlushWriter"), "{error:?}");
     }
 }
 
@@ -475,25 +375,6 @@ async fn a_write_of_a_retry_attempt_withdraws_the_earlier_attempt() {
         assert_eq!(reason(&error), "stream_fenced");
         let error = case.write(first, &["after"]).await.unwrap_err();
         assert_eq!(reason(&error), "stream_fenced");
-    }
-}
-
-#[tokio::test]
-async fn a_write_refuses_an_oversize_record_and_a_closed_writer() {
-    for case in cases().await {
-        let writer = case.open(client(), |_| {}).await;
-        let big = "x".repeat(2 * 1024 * 1024);
-        let error = case.write(writer, &[big.as_str()]).await.unwrap_err();
-        assert_eq!(reason(&error), "stream_too_large");
-        // A refusal before the Store leaves the writer usable.
-        case.write(writer, &["ok"]).await.unwrap();
-        let _: CloseWriterResponse = case
-            .call("CloseWriter", CloseWriterRequest { writer_id: writer })
-            .await
-            .unwrap();
-        let error = case.write(writer, &["late"]).await.unwrap_err();
-        assert_eq!(reason(&error), "stream_unknown_writer");
-        assert_eq!(case.visible().await, ["ok"]);
     }
 }
 
@@ -608,10 +489,8 @@ async fn a_write_whose_answer_is_lost_goes_in_once() {
 #[tokio::test]
 async fn a_write_that_waits_behind_a_close_is_refused() {
     for case in cases().await {
-        let writer = case
-            .open(client(), |r| r.batch_interval = millis(60_000))
-            .await;
-        case.publish(writer, &["a"], false).unwrap();
+        let writer = case.open(client(), |_| {}).await;
+        case.write(writer, &["a"]).await.unwrap();
         let close = case.call::<_, CloseWriterResponse>(
             "CloseWriter",
             CloseWriterRequest { writer_id: writer },

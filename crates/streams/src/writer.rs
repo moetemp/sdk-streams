@@ -1,7 +1,7 @@
 //! Writers for Activities and clients. `write` appends its Records at once and answers their
-//! offsets, which is what an awaited publish needs. `publish` only buffers, and a background
-//! flusher appends every `batch_interval`, so a Producer pays one Store call per batch, not per
-//! Record. Both keep one Producer epoch and one `sequence` order per writer.
+//! offsets, which is what an awaited publish needs. A writer keeps one Producer epoch and one
+//! `sequence` order, so a retry of a batch goes in once. Lang buffers on its own, if it wants
+//! to, and writes each batch with one call.
 
 use crate::{
     Reason, StreamError, StreamResult,
@@ -14,28 +14,26 @@ use crate::{
 use parking_lot::Mutex;
 use prost::Message;
 use std::{
-    collections::{HashMap, VecDeque},
+    collections::HashMap,
     sync::{
         Arc,
         atomic::{AtomicU64, Ordering},
     },
     time::Duration,
 };
-use tokio::{sync::Notify, time::Instant};
+use tokio::time::Instant;
 
-const DEFAULT_INTERVAL: Duration = Duration::from_millis(100);
 const DEFAULT_BATCH: usize = 1000;
 const DEFAULT_RETRY: Duration = Duration::from_secs(10);
-const DEFAULT_BUFFERED: usize = 10_000;
 const FIRST_BACKOFF: Duration = Duration::from_millis(50);
 
 #[derive(Default)]
 struct State {
-    buffer: VecDeque<AppendRecord>,
     /// The last `sequence` the writer sent in its epoch.
     sequence: i64,
     last_offset: i64,
-    /// A flush that failed for good. Every later call fails with it, since its Records are lost.
+    /// A write that failed for good. Every later call fails with it, since the batch may be in
+    /// the Store under a `sequence` the writer can't reuse.
     failed: Option<StreamError>,
     closed: bool,
 }
@@ -44,15 +42,12 @@ struct Writer {
     namespace: String,
     stream: StreamRef,
     producer: Producer,
-    interval: Duration,
     max_batch: usize,
     max_retry: Duration,
-    max_buffered: usize,
     service: Arc<StreamService>,
     state: Mutex<State>,
-    wake: Notify,
-    /// One flush at a time, so the batches of one epoch go out in `sequence` order.
-    flushing: tokio::sync::Mutex<()>,
+    /// One write at a time, so the batches of one epoch go out in `sequence` order.
+    writing: tokio::sync::Mutex<()>,
 }
 
 fn duration(value: Option<prost_types::Duration>) -> Option<Duration> {
@@ -62,41 +57,6 @@ fn duration(value: Option<prost_types::Duration>) -> Option<Duration> {
 }
 
 impl Writer {
-    /// Sends the buffer, one batch after another, until it is empty or a batch fails for good.
-    async fn flush(&self) -> StreamResult<i64> {
-        let _flushing = self.flushing.lock().await;
-        self.flush_held().await
-    }
-
-    /// [Writer::flush], for a caller that holds `flushing`.
-    async fn flush_held(&self) -> StreamResult<i64> {
-        loop {
-            let (records, sequence) = {
-                let mut state = self.state.lock();
-                if let Some(error) = &state.failed {
-                    return Err(error.clone());
-                }
-                if state.buffer.is_empty() {
-                    return Ok(state.last_offset);
-                }
-                let count = self.batch_len(state.buffer.iter());
-                let records: Vec<_> = state.buffer.drain(..count).collect();
-                state.sequence += 1;
-                (records, state.sequence)
-            };
-            match self.send(records, sequence).await {
-                Ok((_, last)) => {
-                    let mut state = self.state.lock();
-                    state.last_offset = state.last_offset.max(last);
-                }
-                Err(error) => {
-                    self.state.lock().failed = Some(error.clone());
-                    return Err(error);
-                }
-            }
-        }
-    }
-
     /// How many of `records` go in the next batch. The Store refuses a batch over its limit, so
     /// a batch ends at the count or the bytes, whichever comes first.
     fn batch_len<'a>(&self, records: impl Iterator<Item = &'a AppendRecord>) -> usize {
@@ -113,18 +73,17 @@ impl Writer {
         count
     }
 
-    /// Appends `records` now, after the buffered ones, and answers the offsets of the first and
-    /// the last one. Records past the Store's batch limit go as more batches, in order.
+    /// Appends `records` now and answers the offsets of the first and the last one. Records
+    /// past the Store's batch limit go as more batches, in order.
     async fn write(&self, mut records: Vec<AppendRecord>) -> StreamResult<(i64, i64)> {
-        let _flushing = self.flushing.lock().await;
-        // A close that started while this write waited has sent the writer's last batch.
+        let _writing = self.writing.lock().await;
+        // A close that started while this write waited has ended the writer.
         if self.state.lock().closed {
             return Err(StreamError::new(
                 Reason::UnknownWriter,
                 "The writer closed while the write waited",
             ));
         }
-        self.flush_held().await?;
         let (mut first, mut last) = (0, 0);
         while !records.is_empty() {
             let count = self.batch_len(records.iter());
@@ -182,21 +141,6 @@ impl Writer {
             }
         }
     }
-
-    async fn run(self: Arc<Self>) {
-        loop {
-            let _ = tokio::time::timeout(self.interval, self.wake.notified()).await;
-            {
-                let state = self.state.lock();
-                // A writer that failed for good writes nothing more, so its task ends too.
-                if state.closed || state.failed.is_some() {
-                    return;
-                }
-            }
-            // A failure stays in the state, and the next publish or flush gives it to lang.
-            let _ = self.flush().await;
-        }
-    }
 }
 
 /// The size of a Record once stored, with a margin for the envelope's own fields.
@@ -204,7 +148,7 @@ fn stored_size(producer: &Producer, record: &AppendRecord) -> usize {
     record.encoded_len() + producer.encoded_len() + 32
 }
 
-/// Refuses a Record over the Store's Record limit, before it reaches the buffer or the Store.
+/// Refuses a Record over the Store's Record limit, before it reaches the Store.
 fn check_sizes(producer: &Producer, records: &[AppendRecord]) -> StreamResult<()> {
     if let Some(big) = records
         .iter()
@@ -268,20 +212,14 @@ impl Writers {
             namespace: request.namespace,
             stream,
             producer,
-            interval: duration(request.batch_interval).unwrap_or(DEFAULT_INTERVAL),
             max_batch: match request.max_batch_size {
                 n if n > 0 => n as usize,
                 _ => DEFAULT_BATCH,
             },
             max_retry: duration(request.max_retry_duration).unwrap_or(DEFAULT_RETRY),
-            max_buffered: match request.max_buffered_records {
-                n if n > 0 => n as usize,
-                _ => DEFAULT_BUFFERED,
-            },
             service: service.clone(),
             state: Mutex::default(),
-            wake: Notify::new(),
-            flushing: tokio::sync::Mutex::new(()),
+            writing: tokio::sync::Mutex::new(()),
         });
         let reopened = self.closed_sequences.lock().get(&key).copied();
         if let Some(sequence) = reopened {
@@ -311,8 +249,7 @@ impl Writers {
         }
         by_producer.insert(key.clone(), id);
         self.keys.lock().insert(id, key);
-        self.open.lock().insert(id, writer.clone());
-        tokio::spawn(writer.run());
+        self.open.lock().insert(id, writer);
         Ok(id)
     }
 
@@ -324,8 +261,7 @@ impl Writers {
             .ok_or_else(|| StreamError::new(Reason::UnknownWriter, format!("No writer {id}")))
     }
 
-    /// Appends Records at once, after what the writer buffered, and answers the first and the
-    /// last offset. A retry after a Store failure resends the same batch, so it goes in once.
+    /// Appends Records at once and answers the first and the last offset. A retry after a Store failure resends the same batch, so it goes in once.
     pub(crate) async fn write(
         &self,
         id: u64,
@@ -348,52 +284,7 @@ impl Writers {
         writer.write(records).await
     }
 
-    /// Buffers Records. It never waits, so lang may call it from any thread.
-    pub(crate) fn publish(
-        &self,
-        id: u64,
-        records: Vec<AppendRecord>,
-        force_flush: bool,
-    ) -> StreamResult<()> {
-        let writer = self.get(id)?;
-        {
-            let mut state = writer.state.lock();
-            if let Some(error) = &state.failed {
-                return Err(error.clone());
-            }
-            if state.closed {
-                return Err(StreamError::new(
-                    Reason::UnknownWriter,
-                    format!("Writer {id} is closed"),
-                ));
-            }
-            check_sizes(&writer.producer, &records)?;
-            if state.buffer.len() + records.len() > writer.max_buffered {
-                writer.service.metrics.buffer_full();
-                return Err(StreamError::new(
-                    Reason::BufferFull,
-                    format!(
-                        "The writer has {} Records waiting, and takes at most {}",
-                        state.buffer.len(),
-                        writer.max_buffered
-                    ),
-                ));
-            }
-            state.buffer.extend(records);
-            if !force_flush && state.buffer.len() < writer.max_batch {
-                return Ok(());
-            }
-        }
-        writer.wake.notify_one();
-        Ok(())
-    }
-
-    /// Waits until every Record published so far is in the Store.
-    pub(crate) async fn flush(&self, id: u64) -> StreamResult<i64> {
-        self.get(id)?.flush().await
-    }
-
-    /// Closes every open writer. Answers how many failed their last flush.
+    /// Closes every open writer. Answers how many had failed.
     pub(crate) async fn close_all(&self) -> usize {
         let ids: Vec<u64> = self.open.lock().keys().copied().collect();
         let mut failed = 0;
@@ -405,14 +296,19 @@ impl Writers {
         failed
     }
 
-    /// Flushes, then drops the writer.
+    /// Waits for a write in flight, then drops the writer. Answers its last offset, or the
+    /// error it failed with.
     pub(crate) async fn close(&self, id: u64) -> StreamResult<i64> {
         let writer = self.get(id)?;
-        // A publish checks the closed state under the same lock, so every Record it took is
-        // in the buffer that this flush sends.
         writer.state.lock().closed = true;
-        let result = writer.flush().await;
-        writer.wake.notify_one();
+        let result = {
+            let _writing = writer.writing.lock().await;
+            let state = writer.state.lock();
+            match &state.failed {
+                Some(error) => Err(error.clone()),
+                None => Ok(state.last_offset),
+            }
+        };
         self.open.lock().remove(&id);
         if let Some(key) = self.keys.lock().remove(&id) {
             self.by_producer.lock().remove(&key);

@@ -62,3 +62,10 @@
   that reaches the close Record gives the `Superseded` items written after it just before the
   close Record. So a task that completes after a close still withdraws a failed task's Records.
   A Workflow batch with Records that a close refuses is followed by one with only the facts.
+- Added `nexus/stream-service.wit`, the source of the Stream service WIT that each SDK copies,
+  with each line at most 100 columns.
+- Removed the buffered writer path: the `Publish` and `FlushWriter` calls and their messages,
+  the interval flush, the buffer limit, the `stream_buffer_full` reason and its metric.
+  `OpenWriterRequest` reserves `batch_interval` (4) and `max_buffered_records` (7). An SDK
+  writes with `WriteRecords` and buffers on its own. `CloseWriter` and `CloseWriters` now only
+  drop the writers.
