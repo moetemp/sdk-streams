@@ -124,4 +124,5 @@
 - A Local Activity batch that gives its run's last completed Workflow Task and failed tasks
   withdraws the run's orphaned Local Activity Records, those of tasks that never completed, with a
   Workflow-kind `Superseded` item that the reader rule already applies (S110). A late write of a
-  withdrawn task is fenced. A rerun in a later task still supersedes by epoch.
+  withdrawn task is fenced. A rerun in a later task still supersedes by epoch. `OpenWriter` takes
+  the same task facts, and each batch of the writer sends them.
