@@ -29,10 +29,9 @@ message RedisStreamConfig {
     google.protobuf.Duration retention = 4;
     // How long an open Workflow-owned Stream stays after its last write. Empty is 90 days.
     google.protobuf.Duration safety_ttl = 5;
-    // When above zero, each Workflow flush runs `WAIT durable_writes <durable_timeout>`.
-    int32 durable_writes = 6;
-    // Empty is 1 s.
-    google.protobuf.Duration durable_timeout = 7;
+    // A write is durable as an Activity write is, so a Workflow write has no replica wait.
+    reserved 6, 7;
+    reserved "durable_writes", "durable_timeout";
     // Zero is 256.
     int32 blocking_reads_per_node = 8;
     // Empty is 5 s.

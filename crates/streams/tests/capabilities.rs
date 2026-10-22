@@ -96,11 +96,8 @@ impl Store for Masked {
         stream: &StreamRef,
         producer: &Producer,
         record: &[u8],
-        withdrawal: &Withdrawal<'_>,
     ) -> StreamResult<Closed> {
-        self.inner
-            .close(namespace, stream, producer, record, withdrawal)
-            .await
+        self.inner.close(namespace, stream, producer, record).await
     }
 
     async fn auto_close(&self, namespace: &str, stream_id: &str) -> StreamResult<Option<i64>> {
@@ -132,7 +129,7 @@ fn case(without: Capabilities) -> Case {
         .as_nanos();
     let run_id = format!("run-{unique}");
     Case {
-        ext: MemoryStreamExtension::with_store(store, 0, None),
+        ext: MemoryStreamExtension::with_store(store, None),
         memory,
         stream: default_stream_id("wf", &run_id),
         run_id,
@@ -309,10 +306,7 @@ async fn every_store_and_wrapper_says_what_it_can_do() {
         Duration::from_secs(3600),
         Duration::from_secs(7200),
     ));
-    assert_eq!(
-        memory.capabilities(),
-        Capabilities::ALL.without(Capabilities::REPLICA_WAIT)
-    );
+    assert_eq!(memory.capabilities(), Capabilities::ALL);
     // A wrapper forwards what its Store can do. Only the mask comes off.
     let wrapper = Masked {
         inner: memory.clone(),
@@ -322,10 +316,8 @@ async fn every_store_and_wrapper_says_what_it_can_do() {
     let Some(url) = support::server_url("STREAMS_REDIS_URL") else {
         return;
     };
-    let mut options = RedisStoreOptions::new(url);
-    options.durable_connection = true;
-    let redis = RedisStore::connect(options).await.unwrap();
+    let redis = RedisStore::connect(RedisStoreOptions::new(url))
+        .await
+        .unwrap();
     assert_eq!(Store::capabilities(&redis), Capabilities::ALL);
-    let durable = redis.durable_store().expect("a durable connection");
-    assert_eq!(durable.capabilities(), Capabilities::ALL);
 }

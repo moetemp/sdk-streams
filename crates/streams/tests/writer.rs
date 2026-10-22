@@ -457,7 +457,7 @@ async fn a_write_whose_answer_is_lost_goes_in_once() {
     });
     let n = NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
     let case = Case {
-        ext: MemoryStreamExtension::with_store(store, 0, None),
+        ext: MemoryStreamExtension::with_store(store, None),
         namespace: format!("ns-lost-{n}"),
         stream: format!("s-lost-{n}"),
     };

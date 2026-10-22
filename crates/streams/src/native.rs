@@ -191,10 +191,9 @@ impl ServiceStore {
 
 #[async_trait::async_trait]
 impl Store for ServiceStore {
-    // The server keeps every rule. A write is durable when the server acknowledges it, so
-    // there is no replica wait.
+    // The server keeps every rule.
     fn capabilities(&self) -> Capabilities {
-        Capabilities::ALL.without(Capabilities::REPLICA_WAIT)
+        Capabilities::ALL
     }
 
     fn default_retention(&self) -> Duration {
@@ -252,8 +251,6 @@ impl Store for ServiceStore {
             producer: Some(batch.producer.clone()),
             sequence: batch.sequence,
             records,
-            previous_completed_task: withdrawal.previous_completed.copied(),
-            failed_tasks: withdrawal.failed_tasks.to_vec(),
             withdraw_run: withdrawal.withdraw_run.to_string(),
             ..Default::default()
         };
@@ -274,7 +271,6 @@ impl Store for ServiceStore {
         stream: &StreamRef,
         producer: &Producer,
         record: &[u8],
-        withdrawal: &Withdrawal<'_>,
     ) -> StreamResult<Closed> {
         let record = decode_record(record)?;
         let request = CloseStreamRequest {
@@ -283,15 +279,12 @@ impl Store for ServiceStore {
             producer: Some(producer.clone()),
             result: record.close_result,
             failure: record.close_failure,
-            previous_completed_task: withdrawal.previous_completed.copied(),
-            failed_tasks: withdrawal.failed_tasks.to_vec(),
-            withdraw_run: withdrawal.withdraw_run.to_string(),
+            ..Default::default()
         };
         let _: CloseStreamResponse = self.call(CLOSE, namespace, request, None).await?;
         Ok(Closed {
             offset: 0,
             already: false,
-            flagged: false,
         })
     }
 

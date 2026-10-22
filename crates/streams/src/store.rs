@@ -5,10 +5,10 @@ use crate::{
     Reason, StreamError, StreamResult,
     proto::{
         DescribeStreamRequest, DescribeStreamResponse, Producer, ReadRecordsRequest,
-        ReadRecordsResponse, StreamRef, WorkflowTaskEpoch,
+        ReadRecordsResponse, StreamRef,
     },
 };
-use std::{sync::Arc, time::Duration};
+use std::time::Duration;
 use tokio::time::Instant;
 
 /// The format version this crate writes. A Stream with a higher one refuses writes.
@@ -62,10 +62,6 @@ pub struct Created {
 /// The withdrawal facts of a Workflow batch or close, and the `Superseded` item they make.
 #[derive(Debug, Clone, Default)]
 pub struct Withdrawal<'a> {
-    /// The previous completed Workflow Task of the run.
-    pub previous_completed: Option<&'a WorkflowTaskEpoch>,
-    /// The started event ids of the run's failed Workflow Tasks.
-    pub failed_tasks: &'a [i64],
     /// A retry run's previous run.
     pub withdraw_run: &'a str,
     /// The encoded Supersession, which the log keeps when the batch withdraws something.
@@ -104,8 +100,6 @@ pub struct Closed {
     pub offset: i64,
     /// Someone closed the Stream before.
     pub already: bool,
-    /// The close withdrew earlier Records.
-    pub flagged: bool,
 }
 
 /// The state of a Stream as one read saw it.
@@ -186,29 +180,26 @@ pub struct Capabilities(u8);
 impl Capabilities {
     /// Each append checks the Producer's epoch and its last `sequence` before it writes.
     pub const PRODUCER_FENCE: Self = Self(1);
-    /// Each append flags the first batch of a new epoch that withdraws, keeps the run's task
-    /// index and refuses a Local Activity of a withdrawn task.
+    /// Each append flags the first batch of a Producer's newer epoch, which withdraws the
+    /// Records of its earlier ones.
     pub const WITHDRAWAL: Self = Self(1 << 1);
     /// A retry run's first write withdraws the previous run and fences its Producers.
     pub const RUN_FENCE: Self = Self(1 << 2);
     /// A close writes the close Record and every later append is refused.
     pub const CLOSE: Self = Self(1 << 3);
-    /// A write can wait until replicas have it, for `durable_writes`.
-    pub const REPLICA_WAIT: Self = Self(1 << 4);
     /// An open Workflow-owned Stream keeps the safety TTL, not the Retention.
-    pub const SAFETY_TTL: Self = Self(1 << 5);
+    pub const SAFETY_TTL: Self = Self(1 << 4);
     /// A Stream with an auto close period closes with no result when no append came for that
     /// long. Each write step applies it before it acts, so no call sees the Stream open late.
-    pub const AUTO_CLOSE: Self = Self(1 << 6);
+    pub const AUTO_CLOSE: Self = Self(1 << 5);
     /// Every capability.
-    pub const ALL: Self = Self((1 << 7) - 1);
+    pub const ALL: Self = Self((1 << 6) - 1);
 
-    const NAMES: [(Self, &'static str); 7] = [
+    const NAMES: [(Self, &'static str); 6] = [
         (Self::PRODUCER_FENCE, "producer_fence"),
         (Self::WITHDRAWAL, "withdrawal"),
         (Self::RUN_FENCE, "run_fence"),
         (Self::CLOSE, "close"),
-        (Self::REPLICA_WAIT, "replica_wait"),
         (Self::SAFETY_TTL, "safety_ttl"),
         (Self::AUTO_CLOSE, "auto_close"),
     ];
@@ -317,7 +308,6 @@ pub trait Store: Send + Sync + 'static {
         _stream: &StreamRef,
         _producer: &Producer,
         _record: &[u8],
-        _withdrawal: &Withdrawal<'_>,
     ) -> StreamResult<Closed> {
         Err(unsupported("close"))
     }
@@ -326,23 +316,6 @@ pub trait Store: Send + Sync + 'static {
     /// offset of the close Record if the Stream is closed. Needs [Capabilities::AUTO_CLOSE].
     async fn auto_close(&self, _namespace: &str, _stream_id: &str) -> StreamResult<Option<i64>> {
         Err(unsupported("auto_close"))
-    }
-
-    /// Waits until `replicas` replicas have this process's writes to the Stream. Answers how
-    /// many have them. Needs [Capabilities::REPLICA_WAIT].
-    async fn wait_replicas(
-        &self,
-        _namespace: &str,
-        _stream_id: &str,
-        _replicas: u32,
-        _timeout: Duration,
-    ) -> StreamResult<i64> {
-        Err(unsupported("replica_wait"))
-    }
-
-    /// The Store for flushes that wait for replicas, if it has one of its own.
-    fn durable_store(&self) -> Option<Arc<dyn Store>> {
-        None
     }
 
     /// The reads of a Store that answers whole reads and describes itself, such as the
@@ -396,17 +369,17 @@ mod tests {
         let some = Capabilities::PRODUCER_FENCE.union(Capabilities::CLOSE);
         some.require(Capabilities::CLOSE).unwrap();
         let error = some
-            .require(Capabilities::CLOSE.union(Capabilities::REPLICA_WAIT))
+            .require(Capabilities::CLOSE.union(Capabilities::AUTO_CLOSE))
             .unwrap_err();
         assert_eq!(error.reason, Reason::Unsupported);
-        assert!(error.message.ends_with("replica_wait"), "{}", error.message);
-        assert_eq!(Capabilities::ALL.names().len(), 7);
+        assert!(error.message.ends_with("auto_close"), "{}", error.message);
+        assert_eq!(Capabilities::ALL.names().len(), 6);
         assert_eq!(
             Capabilities::ALL
-                .without(Capabilities::REPLICA_WAIT)
+                .without(Capabilities::AUTO_CLOSE)
                 .names()
                 .len(),
-            6
+            5
         );
     }
 }

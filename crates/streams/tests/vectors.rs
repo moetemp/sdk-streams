@@ -139,8 +139,6 @@ fn meta_fields_match() {
     assert_eq!(fields::fence(kind, producer), text(&case, "fence"));
     assert_eq!(fields::dedupe(kind, producer), text(&case, "dedupe"));
     assert_eq!(fields::holds(kind, producer), text(&case, "holds"));
-    assert_eq!(fields::task_index(run), text(&case, "task_index"));
-    assert_eq!(fields::withdrawn_tasks(run), text(&case, "withdrawn_tasks"));
     assert_eq!(fields::run_wrote(run), text(&case, "run_wrote"));
     assert_eq!(fields::withdrawn_run(run), text(&case, "withdrawn_run"));
 }
