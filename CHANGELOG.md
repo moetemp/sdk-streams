@@ -40,3 +40,6 @@
   that finds it due applies it with the new auto close script. A long-polling read wakes when it
   comes due. A create with another auto close is a conflict. A Store without the new
   `auto_close` capability refuses such a create with `stream_unsupported`.
+- Added `StreamRef.backend` (4) and `RedisStreamConfig.backend` (10). The crate puts the
+  configured backend name in each ref it builds, such as the one in a create answer, so every
+  process routes a ref it receives. The Store never reads it.

@@ -34,6 +34,8 @@ const CREATE_POLL: Duration = Duration::from_millis(100);
 pub(crate) struct StreamService {
     pub(crate) store: Arc<dyn Store>,
     pub(crate) metrics: Metrics,
+    /// The backend name for the refs the service builds.
+    pub(crate) backend: String,
 }
 
 fn duration(value: Option<prost_types::Duration>) -> Option<Duration> {
@@ -107,6 +109,7 @@ impl StreamService {
         Ok(CreateStreamResponse {
             stream: Some(StreamRef {
                 id: request.stream_id,
+                backend: self.backend.clone(),
                 ..Default::default()
             }),
             created: created.outcome == CreateOutcome::Created,

@@ -27,6 +27,9 @@ message RedisStreamConfig {
     int32 blocking_reads_per_node = 8;
     // Empty is 5 s.
     google.protobuf.Duration response_timeout = 9;
+    // The backend name that lang registered this extension under. The crate puts it in each
+    // StreamRef it builds, such as the one in a create answer.
+    string backend = 10;
 }
 
 // Method `BufferWorkflowCalls`, synchronous. Lang calls it at the end of each Activation of a

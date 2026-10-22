@@ -11,14 +11,14 @@ use std::{
 use temporalio_common::protos::temporal::api::common::v1::Payload;
 use temporalio_sdk_core::{ExtensionError, WorkerExtension};
 use temporalio_streams::{
-    RedisStreamExtension,
+    MemoryStreamExtension, RedisStreamExtension,
     ids::{activity_producer_id, client_producer_id},
     proto::{
         AppendRecord, AppendRecordsRequest, AppendRecordsResponse, CloseStreamRequest,
         CloseStreamResponse, CreateStreamRequest, CreateStreamResponse, DescribeStreamRequest,
         DescribeStreamResponse, Producer, ProducerEpoch, ProducerKind, ReadRecordsRequest,
-        ReadRecordsResponse, ReadStart, StreamErrorDetails, StreamRecordKind, StreamRef,
-        StreamStatus,
+        ReadRecordsResponse, ReadStart, RedisStreamConfig, StreamErrorDetails, StreamRecordKind,
+        StreamRef, StreamStatus,
     },
 };
 use tonic::Code;
@@ -622,12 +622,14 @@ async fn a_ref_with_the_owner_fields_and_one_without_reach_the_same_stream() {
             id: case.stream.clone(),
             workflow_id: "agent-1".to_string(),
             first_execution_run_id: "run-1".to_string(),
+            ..Default::default()
         });
         // Owner fields that don't match the id change nothing either.
         let other = Some(StreamRef {
             id: case.stream.clone(),
             workflow_id: "someone-else".to_string(),
             first_execution_run_id: String::new(),
+            ..Default::default()
         });
         for (sequence, stream) in [(1, owned.clone()), (2, case.stream()), (3, other)] {
             let request = AppendRecordsRequest {
@@ -719,5 +721,60 @@ async fn a_describe_or_a_read_applies_a_due_auto_close() {
         let read = case.read(ReadRecordsRequest::default()).await.unwrap();
         assert_eq!(texts(&read), ["<close>"]);
         assert!(read.done);
+    }
+}
+
+#[tokio::test]
+async fn a_create_answer_names_the_backend_and_the_store_never_reads_it() {
+    let mut configured =
+        support::extensions(|config| config.backend = "redis-a".to_string(), false);
+    let config = RedisStreamConfig {
+        backend: "redis-a".to_string(),
+        ..Default::default()
+    };
+    configured
+        .push(MemoryStreamExtension::from_config_bytes(&config.encode_to_vec(), None).unwrap());
+    for ext in configured {
+        let unique = unique();
+        let case = Case {
+            ext,
+            namespace: format!("ns-{unique}"),
+            stream: format!("s-{unique}"),
+        };
+        let created = case.create(None).await.unwrap();
+        let stream = created.stream.unwrap();
+        assert_eq!(stream.id, case.stream);
+        assert_eq!(stream.backend, "redis-a");
+        // A ref with any backend, or none, reaches the same Stream.
+        let named = |backend: &str| {
+            Some(StreamRef {
+                id: case.stream.clone(),
+                backend: backend.to_string(),
+                ..Default::default()
+            })
+        };
+        for (sequence, stream) in [(1, named("redis-a")), (2, named("")), (3, named("other"))] {
+            let request = AppendRecordsRequest {
+                namespace: case.namespace.clone(),
+                stream,
+                producer: Some(client(1)),
+                sequence,
+                records: vec![record("", &sequence.to_string())],
+                ..Default::default()
+            };
+            let _: AppendRecordsResponse = call(&case.ext, "AppendRecords", request).await.unwrap();
+        }
+        let read = ReadRecordsRequest {
+            namespace: case.namespace.clone(),
+            stream: named("other"),
+            ..Default::default()
+        };
+        let read: ReadRecordsResponse = call(&case.ext, "ReadRecords", read).await.unwrap();
+        assert_eq!(texts(&read), ["1", "2", "3"]);
+    }
+    // With no backend in the config, the ref has none, and lang reads it as the default.
+    for case in cases().await {
+        let created = case.create(None).await.unwrap();
+        assert_eq!(created.stream.unwrap().backend, "");
     }
 }

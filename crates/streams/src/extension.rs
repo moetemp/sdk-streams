@@ -35,6 +35,8 @@ pub struct ExtensionOptions {
     pub durable_writes: u32,
     /// How long that wait may take before the flush fails.
     pub durable_timeout: Duration,
+    /// The backend name that lang registered the extension under, for the refs it builds.
+    pub backend: String,
 }
 
 impl ExtensionOptions {
@@ -66,6 +68,7 @@ impl ExtensionOptions {
             store,
             durable_writes: config.durable_writes.max(0) as u32,
             durable_timeout: duration(config.durable_timeout).unwrap_or(Duration::from_secs(1)),
+            backend: config.backend,
         })
     }
 }
@@ -96,6 +99,7 @@ impl Shared {
                 Ok(Arc::new(StreamService {
                     store: Arc::new(store),
                     metrics: self.metrics.clone(),
+                    backend: self.options.backend.clone(),
                 }))
             })
             .await
@@ -144,6 +148,7 @@ impl StreamExtension {
             Arc::new(StreamService {
                 store,
                 metrics: metrics.clone(),
+                backend: options.backend.clone(),
             })
         });
         let shared = Arc::new(Shared {
@@ -299,9 +304,10 @@ impl MemoryStreamExtension {
             duration(config.retention).unwrap_or(defaults.retention),
             duration(config.safety_ttl).unwrap_or(defaults.safety_ttl),
         ));
-        Ok(Self::with_store(
+        Ok(Self::with_options(
             memory,
             config.durable_writes.max(0) as u32,
+            config.backend,
             meter,
         ))
     }
@@ -313,12 +319,22 @@ impl MemoryStreamExtension {
         durable_writes: u32,
         meter: Option<TemporalMeter>,
     ) -> Arc<StreamExtension> {
+        Self::with_options(store, durable_writes, String::new(), meter)
+    }
+
+    fn with_options(
+        store: Arc<dyn Store>,
+        durable_writes: u32,
+        backend: String,
+        meter: Option<TemporalMeter>,
+    ) -> Arc<StreamExtension> {
         let mut options = RedisStoreOptions::new(String::new());
         options.retention = store.default_retention();
         let options = ExtensionOptions {
             store: options,
             durable_writes,
             durable_timeout: Duration::from_secs(1),
+            backend,
         };
         StreamExtension::build(MEMORY_EXTENSION_NAME, options, meter, Some(store))
     }
@@ -356,9 +372,11 @@ mod tests {
         let options = ExtensionOptions::from_config(RedisStreamConfig {
             urls: vec!["redis://x:1".to_string()],
             durable_writes: 2,
+            backend: "redis-a".to_string(),
             ..Default::default()
         })
         .unwrap();
+        assert_eq!(options.backend, "redis-a");
         assert_eq!(options.store.key_prefix, "temporal-streams");
         assert_eq!(options.store.retention, Duration::from_secs(7 * 86_400));
         assert_eq!(options.store.safety_ttl, Duration::from_secs(90 * 86_400));
