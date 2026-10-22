@@ -40,6 +40,9 @@ pub enum Reason {
     UnknownWriter,
     /// The Store lacks a capability that the call needs.
     Unsupported,
+    /// The server refused the call for one of its limits, such as the most Workflow readers of a
+    /// Stream. A later retry can pass.
+    Exhausted,
 }
 
 impl Reason {
@@ -59,6 +62,7 @@ impl Reason {
             Reason::Storage => "stream_storage",
             Reason::UnknownWriter => "stream_unknown_writer",
             Reason::Unsupported => "stream_unsupported",
+            Reason::Exhausted => "stream_exhausted",
         }
     }
 
@@ -78,6 +82,7 @@ impl Reason {
             Reason::Storage,
             Reason::UnknownWriter,
             Reason::Unsupported,
+            Reason::Exhausted,
         ]
         .into_iter()
         .find(|reason| reason.token() == token)
@@ -94,6 +99,7 @@ impl Reason {
             Reason::Offset | Reason::TooLarge | Reason::Invalid => Code::InvalidArgument,
             Reason::Storage => Code::Unavailable,
             Reason::Unsupported => Code::Unimplemented,
+            Reason::Exhausted => Code::ResourceExhausted,
         }
     }
 }

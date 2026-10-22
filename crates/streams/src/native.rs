@@ -135,6 +135,8 @@ fn from_status(status: tonic::Status) -> StreamError {
         tonic::Code::FailedPrecondition => Reason::Closed,
         tonic::Code::InvalidArgument => Reason::Invalid,
         tonic::Code::Unimplemented => Reason::Unsupported,
+        // A limit such as the reader cap. Not a Store failure, so the message stays the reason.
+        tonic::Code::ResourceExhausted => Reason::Exhausted,
         _ => Reason::Storage,
     });
     let message = status.message();
@@ -580,6 +582,11 @@ mod tests {
         assert_eq!(error.reason, Reason::Sequence);
         let error = from_status(tonic::Status::unavailable("down"));
         assert_eq!(error.reason, Reason::Storage);
+        let error = from_status(tonic::Status::resource_exhausted(
+            "The Stream has the most Workflow readers",
+        ));
+        assert_eq!(error.reason, Reason::Exhausted);
+        assert_eq!(error.message, "The Stream has the most Workflow readers");
     }
 
     #[test]
