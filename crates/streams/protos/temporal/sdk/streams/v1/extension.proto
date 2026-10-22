@@ -117,6 +117,23 @@ message PublishRequest {
 message PublishResponse {
 }
 
+// Method `WriteRecords`, asynchronous. Appends Records at once for an open writer, after the
+// Records that `Publish` buffered, and answers when they are in the Store. It keeps the writer's
+// Producer epoch and `sequence` order, and a Store failure resends the same batch, so it goes in
+// once. Records past the Store's batch limit go as more batches, in order. An awaited publish of
+// an Activity or a client uses this call, so it needs no interval flush. A failure after the
+// Store retries fails the writer, as a failed flush does.
+message WriteRecordsRequest {
+    uint64 writer_id = 1;
+    repeated temporal.api.streamservice.v1.AppendRecord records = 2;
+}
+
+message WriteRecordsResponse {
+    // The offsets of the first and the last Record. Zero when the request has no Record.
+    int64 first_offset = 1;
+    int64 last_offset = 2;
+}
+
 // Method `FlushWriter`, asynchronous. Waits until the Records published so far are in the Store.
 message FlushWriterRequest {
     uint64 writer_id = 1;

@@ -50,3 +50,8 @@
   the withdrawal facts to each Stream the early write reached. A failed early write fails the
   task's completion, and a task that never completes has its early Records withdrawn and
   written again by the next task.
+- Added `WriteRecords`, the awaited publish of an Activity or a client. It appends Records at
+  once for an open writer, after the Records that `Publish` buffered, keeps the writer's
+  Producer epoch and `sequence` order, resends the same batch after a Store failure, and answers
+  the first and the last offset. The interval writer stays, but an SDK needs no interval flush
+  for an awaited publish.

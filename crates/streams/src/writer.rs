@@ -1,5 +1,7 @@
-//! Buffered writers for Activities and clients. `publish` only buffers, and a background flusher
-//! appends every `batch_interval`, so a Producer pays one Store call per batch, not per Record.
+//! Writers for Activities and clients. `write` appends its Records at once and answers their
+//! offsets, which is what an awaited publish needs. `publish` only buffers, and a background
+//! flusher appends every `batch_interval`, so a Producer pays one Store call per batch, not per
+//! Record. Both keep one Producer epoch and one `sequence` order per writer.
 
 use crate::{
     Reason, StreamError, StreamResult,
@@ -63,6 +65,11 @@ impl Writer {
     /// Sends the buffer, one batch after another, until it is empty or a batch fails for good.
     async fn flush(&self) -> StreamResult<i64> {
         let _flushing = self.flushing.lock().await;
+        self.flush_held().await
+    }
+
+    /// [Writer::flush], for a caller that holds `flushing`.
+    async fn flush_held(&self) -> StreamResult<i64> {
         loop {
             let (records, sequence) = {
                 let mut state = self.state.lock();
@@ -72,24 +79,13 @@ impl Writer {
                 if state.buffer.is_empty() {
                     return Ok(state.last_offset);
                 }
-                // The Store refuses a batch over its limit, so a batch ends at the count or the
-                // bytes, whichever comes first.
-                let mut count = 0;
-                let mut bytes = 0;
-                for record in state.buffer.iter().take(self.max_batch) {
-                    let size = stored_size(&self.producer, record);
-                    if count > 0 && bytes + size > MAX_BATCH_BYTES {
-                        break;
-                    }
-                    bytes += size;
-                    count += 1;
-                }
+                let count = self.batch_len(state.buffer.iter());
                 let records: Vec<_> = state.buffer.drain(..count).collect();
                 state.sequence += 1;
                 (records, state.sequence)
             };
             match self.send(records, sequence).await {
-                Ok(last) => {
+                Ok((_, last)) => {
                     let mut state = self.state.lock();
                     state.last_offset = state.last_offset.max(last);
                 }
@@ -101,9 +97,61 @@ impl Writer {
         }
     }
 
+    /// How many of `records` go in the next batch. The Store refuses a batch over its limit, so
+    /// a batch ends at the count or the bytes, whichever comes first.
+    fn batch_len<'a>(&self, records: impl Iterator<Item = &'a AppendRecord>) -> usize {
+        let mut count = 0;
+        let mut bytes = 0;
+        for record in records.take(self.max_batch) {
+            let size = stored_size(&self.producer, record);
+            if count > 0 && bytes + size > MAX_BATCH_BYTES {
+                break;
+            }
+            bytes += size;
+            count += 1;
+        }
+        count
+    }
+
+    /// Appends `records` now, after the buffered ones, and answers the offsets of the first and
+    /// the last one. Records past the Store's batch limit go as more batches, in order.
+    async fn write(&self, mut records: Vec<AppendRecord>) -> StreamResult<(i64, i64)> {
+        let _flushing = self.flushing.lock().await;
+        self.flush_held().await?;
+        let (mut first, mut last) = (0, 0);
+        while !records.is_empty() {
+            let count = self.batch_len(records.iter());
+            let rest = records.split_off(count);
+            let sequence = {
+                let mut state = self.state.lock();
+                if let Some(error) = &state.failed {
+                    return Err(error.clone());
+                }
+                state.sequence += 1;
+                state.sequence
+            };
+            let (batch_first, batch_last) = match self.send(records, sequence).await {
+                Ok(offsets) => offsets,
+                // The batch may be in the Store, so the writer can't go on in this epoch.
+                Err(error) => {
+                    self.state.lock().failed = Some(error.clone());
+                    return Err(error);
+                }
+            };
+            if first == 0 {
+                first = batch_first;
+            }
+            last = batch_last;
+            records = rest;
+        }
+        let mut state = self.state.lock();
+        state.last_offset = state.last_offset.max(last);
+        Ok((first, last))
+    }
+
     /// Appends one batch, and sends it again with the same `sequence` after a Store failure, so
-    /// the dedupe key keeps it from going in twice.
-    async fn send(&self, records: Vec<AppendRecord>, sequence: i64) -> StreamResult<i64> {
+    /// the dedupe key keeps it from going in twice. Answers the first and the last offset.
+    async fn send(&self, records: Vec<AppendRecord>, sequence: i64) -> StreamResult<(i64, i64)> {
         let request = AppendRecordsRequest {
             namespace: self.namespace.clone(),
             stream: Some(self.stream.clone()),
@@ -116,7 +164,7 @@ impl Writer {
         let mut backoff = FIRST_BACKOFF;
         loop {
             match self.service.append_records(request.clone()).await {
-                Ok(response) => return Ok(response.last_offset),
+                Ok(response) => return Ok((response.first_offset, response.last_offset)),
                 Err(error)
                     if error.reason == Reason::Storage && Instant::now() + backoff < until =>
                 {
@@ -147,6 +195,21 @@ impl Writer {
 /// The size of a Record once stored, with a margin for the envelope's own fields.
 fn stored_size(producer: &Producer, record: &AppendRecord) -> usize {
     record.encoded_len() + producer.encoded_len() + 32
+}
+
+/// Refuses a Record over the Store's Record limit, before it reaches the buffer or the Store.
+fn check_sizes(producer: &Producer, records: &[AppendRecord]) -> StreamResult<()> {
+    if let Some(big) = records
+        .iter()
+        .map(|record| stored_size(producer, record))
+        .find(|size| *size > MAX_RECORD_BYTES)
+    {
+        return Err(StreamError::new(
+            Reason::TooLarge,
+            format!("A Record has about {big} bytes, more than {MAX_RECORD_BYTES}"),
+        ));
+    }
+    Ok(())
 }
 
 /// The open writers of one extension.
@@ -254,6 +317,30 @@ impl Writers {
             .ok_or_else(|| StreamError::new(Reason::UnknownWriter, format!("No writer {id}")))
     }
 
+    /// Appends Records at once, after what the writer buffered, and answers the first and the
+    /// last offset. A retry after a Store failure resends the same batch, so it goes in once.
+    pub(crate) async fn write(
+        &self,
+        id: u64,
+        records: Vec<AppendRecord>,
+    ) -> StreamResult<(i64, i64)> {
+        let writer = self.get(id)?;
+        {
+            let state = writer.state.lock();
+            if let Some(error) = &state.failed {
+                return Err(error.clone());
+            }
+            if state.closed {
+                return Err(StreamError::new(
+                    Reason::UnknownWriter,
+                    format!("Writer {id} is closed"),
+                ));
+            }
+        }
+        check_sizes(&writer.producer, &records)?;
+        writer.write(records).await
+    }
+
     /// Buffers Records. It never waits, so lang may call it from any thread.
     pub(crate) fn publish(
         &self,
@@ -273,16 +360,7 @@ impl Writers {
                     format!("Writer {id} is closed"),
                 ));
             }
-            if let Some(big) = records
-                .iter()
-                .map(|record| stored_size(&writer.producer, record))
-                .find(|size| *size > MAX_RECORD_BYTES)
-            {
-                return Err(StreamError::new(
-                    Reason::TooLarge,
-                    format!("A Record has about {big} bytes, more than {MAX_RECORD_BYTES}"),
-                ));
-            }
+            check_sizes(&writer.producer, &records)?;
             if state.buffer.len() + records.len() > writer.max_buffered {
                 writer.service.metrics.buffer_full();
                 return Err(StreamError::new(
