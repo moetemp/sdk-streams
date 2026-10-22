@@ -1,7 +1,10 @@
 //! What every Store gives the Stream service: the Redis Store in production and the memory
 //! Store in tests. Both keep the same rules, which the Lua scripts state.
 
-use crate::{Reason, StreamError, StreamResult, proto::Producer};
+use crate::{
+    Reason, StreamError, StreamResult,
+    proto::{Producer, WorkflowTaskEpoch},
+};
 use std::time::Duration;
 use tokio::time::Instant;
 
@@ -57,6 +60,22 @@ pub struct Withdrawal<'a> {
     /// A retry run's previous run.
     pub withdraw_run: &'a str,
     /// The encoded Supersession, which the log keeps when the batch withdraws something.
+    pub supersession: &'a [u8],
+    /// The run's task facts of a Local Activity batch, which withdraw the run's orphaned Local
+    /// Activity Records.
+    pub tasks: Option<TaskFacts<'a>>,
+}
+
+/// The run's Workflow Task facts that a Local Activity batch gives. A task of the run after
+/// `completed` and before the batch's own task, or one in `failed_tasks`, never completed, so
+/// its Local Activity Records are orphans.
+#[derive(Debug, Clone, Copy, Default)]
+pub struct TaskFacts<'a> {
+    /// The run's last completed Workflow Task, `None` before the first one.
+    pub completed: Option<&'a WorkflowTaskEpoch>,
+    /// The started event ids of the run's failed Workflow Tasks.
+    pub failed_tasks: &'a [i64],
+    /// The encoded Workflow-kind Supersession that withdraws the orphans.
     pub supersession: &'a [u8],
 }
 
