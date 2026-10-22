@@ -31,7 +31,7 @@ slot. `CreateStream` writes `:meta`, and the first entry makes `:log`.
 | `h\|<kind>\|<producer id>` | The newest epoch key that still has Records here |
 | `ti\|<run>` | The task keys of the run and its Local Activities that have Records here |
 | `wt\|<run>` | The task keys of the run that a `Superseded` item withdrew |
-| `lf\|<run>` | `<task key>\|<completed task key>\|<failed ids>` of the run's newest Workflow write |
+| `lf\|<run>` | `<task key>\|<completed task key>\|<failed ids>` of the run's newest Workflow write with facts |
 | `run\|<run>` | Set when a Producer of the run wrote a Record here |
 | `wr\|<run>` | Set when a Workflow retry withdrew the run |
 
@@ -45,6 +45,15 @@ Each entry has `r`, the encoded `temporal.api.streamservice.v1.StreamRecord` wit
 `s`, the encoded `Supersession`, on the first entry of a batch that withdraws. An entry with
 only `s` withdraws and has no Record. A reader gives a `SUPERSEDED` item for `s` just before the
 Record of the same entry. An offset is the entry id `<ms>-<seq>` packed as `ms << 20 | seq`.
+
+## Workflow batches before a Local Activity
+
+A Workflow batch that a Local Activity flush writes has no withdrawal facts yet, since Core
+gives them only with the task's completion. The append script gets `*` as its completed task
+key. It then withdraws no task, flags nothing and keeps no `lf`, but it still fences, dedupes,
+adds the task to `ti` and applies a retry run's withdrawal. The task's completion sends the next
+batch of the same epoch with the facts, an empty one if it has no Records, so the withdrawal
+reaches the Stream then.
 
 ## Auto close
 

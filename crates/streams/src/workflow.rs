@@ -1,14 +1,16 @@
 //! The Workflow path. Lang hands the crate each Activation's Stream calls, the crate writes the
 //! creates and appends in `before_complete`, and it sends the closes in `after_complete` once
-//! the server accepted the completion.
+//! the server accepted the completion. Before a Local Activity of the run starts, lang asks the
+//! crate to write the buffer early, so the run's Records come before the Local Activity's.
 
 use crate::{
     Reason, StreamError, StreamResult,
-    epoch::timestamp,
+    epoch::{task_key, timestamp},
     ids::{check_stream_id, workflow_producer_id},
     proto::{
-        AppendRecord, BufferWorkflowCallsRequest, CloseStreamRequest, Producer, ProducerEpoch,
-        ProducerKind, WorkflowCall, WorkflowTaskEpoch, workflow_call::Call,
+        AppendRecord, BufferWorkflowCallsRequest, CloseStreamRequest, FlushRunBufferRequest,
+        Producer, ProducerEpoch, ProducerKind, WorkflowCall, WorkflowTaskEpoch,
+        workflow_call::Call,
     },
     record::{close_record, data_record, supersession},
     service::StreamService,
@@ -18,7 +20,11 @@ use crate::{
     },
 };
 use parking_lot::Mutex;
-use std::{collections::HashMap, sync::Arc, time::Duration};
+use std::{
+    collections::{HashMap, HashSet},
+    sync::Arc,
+    time::Duration,
+};
 use temporalio_sdk_core::{
     WorkflowTaskCompletionInfo, WorkflowTaskFailedInfo, WorkflowTaskInterceptError,
 };
@@ -33,6 +39,8 @@ const DEADLINE_MARGIN: Duration = Duration::from_millis(200);
 const FIRST_BACKOFF: Duration = Duration::from_millis(50);
 /// How many times a close goes out before the crate leaves the Stream to its safety TTL.
 const CLOSE_ATTEMPTS: u32 = 6;
+/// How long a Local Activity flush may take when lang gives no timeout.
+const LOCAL_FLUSH_TIMEOUT: Duration = Duration::from_secs(10);
 
 /// What one run handed over since its last `before_complete`, and the closes that wait for the
 /// server's answer.
@@ -42,6 +50,30 @@ struct RunBuffer {
     chain_continues: bool,
     calls: Vec<WorkflowCall>,
     closes: Vec<(CloseStreamRequest, bool)>,
+    /// What a Local Activity flush wrote in the task that has not completed yet.
+    early: Option<EarlyWrite>,
+    /// The task key of the run's last write, and the next `sequence` of each Stream in that
+    /// epoch. A failed task keeps it, so a late write in that epoch never reuses a number.
+    numbered: Option<(String, HashMap<String, i64>)>,
+    /// The key of the newest task whose `before_complete` ran. A Local Activity of that task or
+    /// an older one writes nothing more, since its task is done.
+    completed: Option<String>,
+    /// A Local Activity flush that failed. The run's Workflow Task fails with it, so the
+    /// retry withdraws what the flush wrote.
+    failed: Option<StreamError>,
+    /// One write of the run at a time, so a Local Activity that starts while another one's
+    /// flush runs waits for it, and the batch numbers of one task stay in order.
+    writing: Arc<tokio::sync::Mutex<()>>,
+}
+
+/// The calls that Local Activity flushes wrote in one task, with no withdrawal facts yet.
+struct EarlyWrite {
+    /// The task key of the write's epoch.
+    task: String,
+    /// The creates and appends it wrote. The task's own completion sends a batch with the
+    /// facts to each of these Streams. Any other task writes them again, since a task that
+    /// never completes has its Records withdrawn.
+    calls: Vec<WorkflowCall>,
 }
 
 /// The buffers of every run on the Workers of one extension.
@@ -56,6 +88,33 @@ pub(crate) struct WorkflowRuns {
 pub(crate) struct FlushOptions {
     pub(crate) durable_writes: u32,
     pub(crate) durable_timeout: Duration,
+}
+
+/// The Workflow Task a write runs for.
+struct WriteTask<'a> {
+    namespace: &'a str,
+    run_id: &'a str,
+    producer: Producer,
+    /// The task key of the Producer's epoch.
+    key: String,
+    /// The task's previous completed task and failed tasks. `None` for a Local Activity flush,
+    /// since Core gives them only with the completion.
+    facts: Option<(Option<WorkflowTaskEpoch>, &'a [i64])>,
+    deadline: Instant,
+}
+
+/// What one write takes from a run's buffer.
+struct Taken {
+    calls: Vec<WorkflowCall>,
+    withdraw_run: String,
+    chain_continues: bool,
+    /// The next `sequence` of each Stream, when an earlier write of this task used some.
+    next: HashMap<String, i64>,
+    /// The Streams that an earlier write of this task left without withdrawal facts.
+    unsettled: Vec<String>,
+    /// The calls of this write that a later task must write again if this task never
+    /// completes. Empty for a write with facts.
+    early: Vec<WorkflowCall>,
 }
 
 impl WorkflowRuns {
@@ -86,25 +145,116 @@ impl WorkflowRuns {
         Ok(())
     }
 
-    /// The run's calls, its withdrawn run and whether its Run Chain goes on.
-    fn take_calls(&self, run_id: &str) -> (Vec<WorkflowCall>, String, bool) {
+    /// The lock that orders the run's writes, or `None` for a run with no buffer.
+    fn writing(&self, run_id: &str) -> Option<Arc<tokio::sync::Mutex<()>>> {
+        self.runs.lock().get(run_id).map(|run| run.writing.clone())
+    }
+
+    /// Takes what a write of task `key` sends, or `None` when it sends nothing. A Local
+    /// Activity flush of a task that is done, or older than the task of an earlier flush,
+    /// writes nothing.
+    fn take(&self, run_id: &str, key: &str, facts: bool) -> StreamResult<Option<Taken>> {
         let mut runs = self.runs.lock();
-        match runs.get_mut(run_id) {
-            Some(run) => (
-                std::mem::take(&mut run.calls),
-                run.withdraw_run.clone(),
-                run.chain_continues,
-            ),
-            None => (vec![], String::new(), false),
+        let Some(run) = runs.get_mut(run_id) else {
+            return Ok(None);
+        };
+        if let Some(error) = &run.failed {
+            return Err(error.clone());
+        }
+        if facts {
+            let done = run.completed.take().unwrap_or_default();
+            run.completed = Some(done.max(key.to_string()));
+        } else if run.completed.as_deref().is_some_and(|done| done >= key)
+            || run
+                .early
+                .as_ref()
+                .is_some_and(|early| early.task.as_str() > key)
+        {
+            return Ok(None);
+        }
+        let mut calls = std::mem::take(&mut run.calls);
+        let next = match &run.numbered {
+            Some((task, next)) if task == key => next.clone(),
+            _ => HashMap::new(),
+        };
+        let (mut unsettled, mut written) = (vec![], vec![]);
+        match run.early.take() {
+            Some(early) if early.task == key => {
+                unsettled = streams_with_records(&early.calls);
+                written = early.calls;
+            }
+            // That task never completed, so its Records go again in this task's epoch.
+            Some(early) => drop(calls.splice(0..0, early.calls)),
+            None => {}
+        }
+        if facts {
+            if calls.is_empty() && unsettled.is_empty() {
+                return Ok(None);
+            }
+            return Ok(Some(Taken {
+                calls,
+                withdraw_run: run.withdraw_run.clone(),
+                chain_continues: run.chain_continues,
+                next,
+                unsettled,
+                early: vec![],
+            }));
+        }
+        if calls.is_empty() {
+            if !written.is_empty() {
+                run.early = Some(EarlyWrite {
+                    task: key.to_string(),
+                    calls: written,
+                });
+            }
+            return Ok(None);
+        }
+        written.extend(
+            calls
+                .iter()
+                .filter(|call| !matches!(call.call, Some(Call::Close(_))))
+                .cloned(),
+        );
+        Ok(Some(Taken {
+            calls,
+            withdraw_run: run.withdraw_run.clone(),
+            chain_continues: run.chain_continues,
+            next,
+            unsettled: vec![],
+            early: written,
+        }))
+    }
+
+    /// Keeps what a write left for later: the closes, and for a Local Activity flush the
+    /// calls it wrote and the next batch numbers.
+    fn keep(
+        &self,
+        run_id: &str,
+        key: &str,
+        early: Vec<WorkflowCall>,
+        next: HashMap<String, i64>,
+        closes: Vec<(CloseStreamRequest, bool)>,
+    ) {
+        let mut runs = self.runs.lock();
+        // An eviction while the write ran drops the run, and what it left goes too.
+        let Some(run) = runs.get_mut(run_id) else {
+            return;
+        };
+        run.closes.extend(closes);
+        run.numbered = Some((key.to_string(), next));
+        if !early.is_empty() {
+            run.early = Some(EarlyWrite {
+                task: key.to_string(),
+                calls: early,
+            });
         }
     }
 
-    fn keep_closes(&self, run_id: &str, closes: Vec<(CloseStreamRequest, bool)>) {
-        if closes.is_empty() {
-            return;
+    /// Fails the run's next completion, after a Local Activity flush failed.
+    fn fail(&self, run_id: &str, error: StreamError) {
+        if let Some(run) = self.runs.lock().get_mut(run_id) {
+            run.failed = Some(error);
         }
-        let mut runs = self.runs.lock();
-        runs.entry(run_id.to_string()).or_default().closes = closes;
     }
 
     fn take_closes(&self, run_id: &str) -> Vec<(CloseStreamRequest, bool)> {
@@ -114,11 +264,14 @@ impl WorkflowRuns {
             .unwrap_or_default()
     }
 
-    /// Drops what a failed task buffered. Its retry runs the Activations again.
+    /// Drops what a failed task buffered and wrote early. Its retry runs the Activations
+    /// again, and its writes withdraw what this task wrote.
     pub(crate) fn task_failed(&self, task: &WorkflowTaskFailedInfo) {
         if let Some(run) = self.runs.lock().get_mut(&task.run_id) {
             run.calls.clear();
             run.closes.clear();
+            run.early = None;
+            run.failed = None;
         }
     }
 
@@ -141,20 +294,51 @@ impl WorkflowRuns {
         let _ = tokio::time::timeout(timeout, self.closes.wait()).await;
         self.closes.len()
     }
+
+    /// Whether the run has something to write or to fail with.
+    pub(crate) fn has_work(&self, run_id: &str) -> bool {
+        self.runs
+            .lock()
+            .get(run_id)
+            .is_some_and(|run| !run.calls.is_empty() || run.early.is_some() || run.failed.is_some())
+    }
 }
 
-/// The run's Producer in this task.
-fn producer(task: &WorkflowTaskCompletionInfo) -> Producer {
+/// The Streams that have appends among `calls`, in order.
+fn streams_with_records(calls: &[WorkflowCall]) -> Vec<String> {
+    let mut seen = HashSet::new();
+    calls
+        .iter()
+        .filter_map(|call| match &call.call {
+            Some(Call::Append(append)) if !append.records.is_empty() => {
+                append.stream.as_ref().map(|s| s.id.clone())
+            }
+            _ => None,
+        })
+        .filter(|id| seen.insert(id.clone()))
+        .collect()
+}
+
+/// The run's Producer in a task.
+fn producer(run_id: &str, task: &WorkflowTaskEpoch) -> Producer {
     Producer {
         kind: ProducerKind::Workflow as i32,
-        id: workflow_producer_id(&task.run_id),
+        id: workflow_producer_id(run_id),
         epoch: Some(ProducerEpoch {
             task_started_event_id: task.started_event_id,
-            task_attempt: task.attempt as i32,
-            task_started_time: task.started_time.map(timestamp),
+            task_attempt: task.attempt,
+            task_started_time: task.started_time,
             ..Default::default()
         }),
-        run_id: task.run_id.clone(),
+        run_id: run_id.to_string(),
+    }
+}
+
+fn this_task(task: &WorkflowTaskCompletionInfo) -> WorkflowTaskEpoch {
+    WorkflowTaskEpoch {
+        started_event_id: task.started_event_id,
+        attempt: task.attempt as i32,
+        started_time: task.started_time.map(timestamp),
     }
 }
 
@@ -166,12 +350,14 @@ fn previous_completed(task: &WorkflowTaskCompletionInfo) -> Option<WorkflowTaskE
     })
 }
 
-/// The calls of one Stream in one flush, in the order Workflow code made them.
+/// The calls of one Stream in one write, in the order Workflow code made them.
 #[derive(Default)]
 struct StreamCalls {
     /// The Retention and the auto close of each create.
     creates: Vec<(Option<Duration>, Option<Duration>)>,
     records: Vec<AppendRecord>,
+    /// Send a batch also with no Records, so the task's withdrawal facts reach the Stream.
+    settle: bool,
 }
 
 fn duration(value: Option<prost_types::Duration>) -> Option<Duration> {
@@ -227,17 +413,17 @@ fn dropped_for(reason: Reason) -> bool {
 }
 
 impl StreamService {
-    /// Writes the run's buffer. One Lua call per batch, one Stream after another.
+    /// Writes the run's buffer at the end of a Workflow Task, with the task's withdrawal facts.
     pub(crate) async fn flush(
         &self,
         runs: &WorkflowRuns,
         task: &WorkflowTaskCompletionInfo,
         options: FlushOptions,
     ) -> StreamResult<()> {
-        let (calls, withdraw_run, chain_continues) = runs.take_calls(&task.run_id);
-        if calls.is_empty() {
+        let Some(writing) = runs.writing(&task.run_id) else {
             return Ok(());
-        }
+        };
+        let _writing = writing.lock().await;
         // Without the started time, a dropped speculative task and the task that reuses its
         // started event id would get one epoch, and the second batch would count as a resend.
         if task.started_time.is_none() {
@@ -246,11 +432,90 @@ impl StreamService {
                 "The Workflow Task has no started time, which the Stream epoch needs",
             ));
         }
-        let started = std::time::Instant::now();
+        let epoch = this_task(task);
+        let key = task_key(&epoch);
+        let Some(taken) = runs.take(&task.run_id, &key, true)? else {
+            return Ok(());
+        };
         // A Local Activity heartbeat completion comes late in the task, with little time left,
         // so the margin is at most a quarter of what is left.
         let left = Instant::from_std(task.deadline).saturating_duration_since(Instant::now());
         let deadline = Instant::now() + left - DEADLINE_MARGIN.min(left / 4);
+        let completed = previous_completed(task);
+        let write = WriteTask {
+            namespace: &task.namespace,
+            run_id: &task.run_id,
+            producer: producer(&task.run_id, &epoch),
+            key,
+            facts: Some((completed, &task.failed_tasks)),
+            deadline,
+        };
+        self.write(runs, write, taken, options).await.map(|_| ())
+    }
+
+    /// Writes the run's buffer before a Local Activity of the run starts, in the epoch of the
+    /// Workflow Task that dispatched it. Core gives the withdrawal facts only with the
+    /// completion, so the write withdraws nothing, and the task's completion sends the facts.
+    /// Answers how many Records it wrote.
+    pub(crate) async fn flush_for_local_activity(
+        &self,
+        runs: &WorkflowRuns,
+        request: FlushRunBufferRequest,
+        options: FlushOptions,
+    ) -> StreamResult<usize> {
+        if request.run_id.is_empty() {
+            return Err(StreamError::invalid("The flush has no run id"));
+        }
+        let epoch = request
+            .workflow_task
+            .ok_or_else(|| StreamError::invalid("The flush has no dispatching Workflow Task"))?;
+        if epoch.started_time.is_none() {
+            return Err(StreamError::invalid(
+                "The Workflow Task has no started time, which the Stream epoch needs",
+            ));
+        }
+        let Some(writing) = runs.writing(&request.run_id) else {
+            return Ok(0);
+        };
+        let _writing = writing.lock().await;
+        let key = task_key(&epoch);
+        let Some(taken) = runs.take(&request.run_id, &key, false)? else {
+            return Ok(0);
+        };
+        let timeout = duration(request.timeout).unwrap_or(LOCAL_FLUSH_TIMEOUT);
+        let write = WriteTask {
+            namespace: &request.namespace,
+            run_id: &request.run_id,
+            producer: producer(&request.run_id, &epoch),
+            key,
+            facts: None,
+            deadline: Instant::now() + timeout,
+        };
+        let result = self.write(runs, write, taken, options).await;
+        if let Err(error) = &result {
+            runs.fail(&request.run_id, error.clone());
+        }
+        result
+    }
+
+    /// Writes what one write took. One Lua call per batch, one Stream after another. Answers
+    /// how many Records it wrote.
+    async fn write(
+        &self,
+        runs: &WorkflowRuns,
+        task: WriteTask<'_>,
+        taken: Taken,
+        options: FlushOptions,
+    ) -> StreamResult<usize> {
+        let started = std::time::Instant::now();
+        let Taken {
+            calls,
+            withdraw_run,
+            chain_continues,
+            mut next,
+            unsettled,
+            early,
+        } = taken;
         let mut order: Vec<String> = vec![];
         let mut streams: HashMap<String, StreamCalls> = HashMap::new();
         let mut closes = vec![];
@@ -284,6 +549,12 @@ impl StreamService {
                 None => {}
             }
         }
+        for id in unsettled {
+            if !streams.contains_key(&id) {
+                order.push(id.clone());
+            }
+            streams.entry(id).or_default().settle = true;
+        }
         let durable = (options.durable_writes > 0)
             .then(|| self.store.durable_store())
             .flatten();
@@ -302,7 +573,7 @@ impl StreamService {
             {
                 needed = needed.union(Capabilities::AUTO_CLOSE);
             }
-            if !calls.records.is_empty() {
+            if !calls.records.is_empty() || calls.settle {
                 needed = needed.union(Capabilities::PRODUCER_FENCE.union(Capabilities::WITHDRAWAL));
             }
         }
@@ -319,61 +590,69 @@ impl StreamService {
             self.metrics.flush_failed();
             return Err(error);
         }
+        let deadline = task.deadline;
         let flush = async {
+            let mut written = 0;
             for id in &order {
                 let calls = streams.remove(id).unwrap_or_default();
-                self.flush_stream(store, task, id, calls, &withdraw_run, deadline)
+                let first = next.get(id).copied().unwrap_or(1);
+                let (count, after) = self
+                    .flush_stream(store, &task, id, calls, &withdraw_run, first)
                     .await?;
+                written += count;
+                next.insert(id.clone(), after);
             }
             if options.durable_writes > 0 {
                 for id in &order {
-                    Self::wait_durable(store, task, id, options).await?;
+                    Self::wait_durable(store, task.namespace, id, options).await?;
                 }
             }
-            Ok::<_, StreamError>(())
+            Ok::<_, StreamError>(written)
         };
         let result = match tokio::time::timeout_at(deadline, flush).await {
             Ok(result) => result,
             Err(_) => Err(StreamError::storage(
-                "The flush did not end before the Workflow Task deadline",
+                "The flush did not end before its deadline",
             )),
         };
         self.metrics.hook_latency(started.elapsed());
-        if let Err(error) = &result {
-            self.metrics.flush_failed();
-            warn!(run_id = %task.run_id, %error, "A Workflow flush failed the Workflow Task");
-            return result;
+        match &result {
+            Ok(_) => runs.keep(task.run_id, &task.key, early, next, closes),
+            Err(error) => {
+                self.metrics.flush_failed();
+                warn!(run_id = %task.run_id, %error, "A Workflow flush failed the Workflow Task");
+            }
         }
-        runs.keep_closes(&task.run_id, closes);
-        Ok(())
+        result
     }
 
+    /// Writes one Stream's creates and batches, numbered from `first`. Answers how many
+    /// Records went in and the next `sequence`.
     async fn flush_stream(
         &self,
         store: &dyn Store,
-        task: &WorkflowTaskCompletionInfo,
+        task: &WriteTask<'_>,
         id: &str,
         calls: StreamCalls,
         withdraw_run: &str,
-        deadline: Instant,
-    ) -> StreamResult<()> {
-        let namespace = task.namespace.as_str();
-        let producer = producer(task);
-        let completed = previous_completed(task);
-        let bytes = supersession(
-            &producer,
-            completed.as_ref(),
-            &task.failed_tasks,
-            withdraw_run,
-        );
+        first: i64,
+    ) -> StreamResult<(usize, i64)> {
+        let namespace = task.namespace;
+        let producer = &task.producer;
+        let (completed, failed) = match &task.facts {
+            Some((completed, failed)) => (completed.as_ref(), *failed),
+            None => (None, &[][..]),
+        };
+        let bytes = supersession(producer, completed, failed, withdraw_run);
         let withdrawal = Withdrawal {
-            previous_completed: completed.as_ref(),
-            failed_tasks: &task.failed_tasks,
+            previous_completed: completed,
+            failed_tasks: failed,
             withdraw_run,
             supersession: &bytes,
+            defer: task.facts.is_none(),
         };
         for (retention, auto_close) in calls.creates {
-            let created = retried(deadline, || {
+            let created = retried(task.deadline, || {
                 store.create(
                     namespace,
                     id,
@@ -404,15 +683,15 @@ impl StreamService {
                 CreateOutcome::Created | CreateOutcome::Exists => {}
             }
         }
-        if calls.records.is_empty() {
-            return Ok(());
+        if calls.records.is_empty() && !calls.settle {
+            return Ok((0, first));
         }
         let records = calls
             .records
             .into_iter()
-            .map(|record| data_record(&producer, record))
+            .map(|record| data_record(producer, record))
             .collect();
-        let (batches, oversize) = split(records);
+        let (mut batches, oversize) = split(records);
         if oversize > 0 {
             self.metrics.records_dropped(oversize);
             warn!(
@@ -421,16 +700,21 @@ impl StreamService {
                 "Dropped Records over the Store's Record limit after the payload codec"
             );
         }
+        if batches.is_empty() {
+            // An empty batch takes the task's facts to a Stream an earlier write left without.
+            batches.push(vec![]);
+        }
+        let mut written = 0;
         for (n, records) in batches.iter().enumerate() {
             let batch = Batch {
-                producer: &producer,
-                sequence: n as i64 + 1,
+                producer,
+                sequence: first + n as i64,
                 records,
                 withdrawal: withdrawal.clone(),
             };
-            let appended = retried(deadline, || store.append(namespace, id, &batch)).await;
+            let appended = retried(task.deadline, || store.append(namespace, id, &batch)).await;
             match self.count(appended) {
-                Ok(_) => {}
+                Ok(_) => written += records.len(),
                 Err(error) if dropped_for(error.reason) => {
                     let count = batches[n..].iter().map(Vec::len).sum();
                     self.metrics.records_dropped(count);
@@ -440,23 +724,23 @@ impl StreamService {
                         %error,
                         "Dropped a Workflow's Records for a Stream that is closed, expired or gone"
                     );
-                    return Ok(());
+                    break;
                 }
                 Err(error) => return Err(error),
             }
         }
-        Ok(())
+        Ok((written, first + batches.len() as i64))
     }
 
     async fn wait_durable(
         store: &dyn Store,
-        task: &WorkflowTaskCompletionInfo,
+        namespace: &str,
         id: &str,
         options: FlushOptions,
     ) -> StreamResult<()> {
         let replicas = store
             .wait_replicas(
-                &task.namespace,
+                namespace,
                 id,
                 options.durable_writes,
                 options.durable_timeout,
@@ -478,7 +762,7 @@ impl StreamService {
         task: WorkflowTaskCompletionInfo,
         closes: Vec<(CloseStreamRequest, bool)>,
     ) {
-        let producer = producer(&task);
+        let producer = producer(&task.run_id, &this_task(&task));
         let completed = previous_completed(&task);
         let bytes = supersession(&producer, completed.as_ref(), &task.failed_tasks, "");
         let withdrawal = Withdrawal {
@@ -486,6 +770,7 @@ impl StreamService {
             failed_tasks: &task.failed_tasks,
             withdraw_run: "",
             supersession: &bytes,
+            defer: false,
         };
         for (close, when_run_closes) in closes {
             if when_run_closes && task.closes_run.is_none() {
@@ -539,7 +824,7 @@ impl temporalio_sdk_core::WorkflowTaskInterceptor for WorkflowHooks {
         task: &WorkflowTaskCompletionInfo,
     ) -> Result<(), WorkflowTaskInterceptError> {
         let shared = &self.shared;
-        if !shared.runs.has_calls(&task.run_id) {
+        if !shared.runs.has_work(&task.run_id) {
             return Ok(());
         }
         let service = shared
@@ -576,15 +861,6 @@ impl temporalio_sdk_core::WorkflowTaskInterceptor for WorkflowHooks {
 
     fn on_evicted(&self, run_id: &str) {
         self.shared.runs.evicted(run_id);
-    }
-}
-
-impl WorkflowRuns {
-    fn has_calls(&self, run_id: &str) -> bool {
-        self.runs
-            .lock()
-            .get(run_id)
-            .is_some_and(|run| !run.calls.is_empty())
     }
 }
 

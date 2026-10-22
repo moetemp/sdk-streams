@@ -64,6 +64,29 @@ message WorkflowCall {
 message BufferWorkflowCallsResponse {
 }
 
+// Method `FlushRunBuffer`, asynchronous. Lang calls it before it runs a Local Activity, also
+// before each retry that Core runs in the same task. The crate writes the run's buffered
+// creates and appends in the epoch of the Workflow Task that dispatched the Local Activity, so
+// the run's Records come before the Local Activity's. Closes still wait for an accepted
+// completion. The task's completion writes only what came later, with the numbering going on,
+// and sends the task's withdrawal facts to each Stream this call wrote. A Local Activity of a
+// task that already completed, or of a task older than an earlier flush, writes nothing. When
+// the call fails, the run's next completion fails with the same error, so the retry withdraws
+// what was written. Lang then fails the Local Activity attempt.
+message FlushRunBufferRequest {
+    string namespace = 1;
+    string run_id = 2;
+    // `ActivityTask.Start.workflow_task` (field 20) of the Local Activity.
+    temporal.api.streamservice.v1.WorkflowTaskEpoch workflow_task = 3;
+    // How long the write may take. Empty is 10 s.
+    google.protobuf.Duration timeout = 4;
+}
+
+message FlushRunBufferResponse {
+    // The Records the call wrote. Zero when the run had nothing buffered.
+    int32 records = 1;
+}
+
 // Method `OpenWriter`, asynchronous. A buffered writer for an Activity or a client Producer.
 message OpenWriterRequest {
     string namespace = 1;

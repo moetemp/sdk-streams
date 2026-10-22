@@ -16,9 +16,9 @@ use temporalio_streams::{
     memory::MemoryStore,
     proto::{
         AppendRecord, AppendRecordsRequest, BufferWorkflowCallsRequest, CloseStreamRequest,
-        CreateStreamRequest, DescribeStreamRequest, DescribeStreamResponse, Producer,
-        ProducerEpoch, ProducerKind, RedisStreamConfig, StreamErrorDetails, StreamRef,
-        StreamStatus, WorkflowCall, workflow_call::Call,
+        CreateStreamRequest, DescribeStreamRequest, DescribeStreamResponse, FlushRunBufferRequest,
+        Producer, ProducerEpoch, ProducerKind, RedisStreamConfig, StreamErrorDetails, StreamRef,
+        StreamStatus, WorkflowCall, WorkflowTaskEpoch, workflow_call::Call,
     },
     redis::{RedisStore, RedisStoreOptions},
     store::{
@@ -294,6 +294,38 @@ async fn an_append_without_the_fence_or_the_flag_is_refused_with_nothing_written
         assert!(error.ends_with(name), "{error}");
         assert_eq!(case.log_len(), 0);
     }
+}
+
+#[tokio::test]
+async fn a_failed_local_activity_flush_fails_the_task_with_nothing_written() {
+    let case = case(Capabilities::WITHDRAWAL);
+    let request = BufferWorkflowCallsRequest {
+        run_id: case.run_id.clone(),
+        calls: vec![case.create_call(), case.publish_call()],
+        ..Default::default()
+    };
+    case.ext
+        .call("BufferWorkflowCalls", &request.encode_to_vec())
+        .unwrap();
+    let flush = FlushRunBufferRequest {
+        namespace: NAMESPACE.to_string(),
+        run_id: case.run_id.clone(),
+        workflow_task: Some(WorkflowTaskEpoch {
+            started_event_id: 3,
+            attempt: 1,
+            started_time: Some(prost_types::Timestamp {
+                seconds: 100,
+                nanos: 0,
+            }),
+        }),
+        timeout: None,
+    };
+    let error = case.call("FlushRunBuffer", flush).await.unwrap_err();
+    assert_eq!(refused_capability(&error), "withdrawal");
+    // The completion of the task fails with the same error, though its buffer is empty.
+    let error = case.flush("", vec![]).await.unwrap_err();
+    assert!(error.ends_with("withdrawal"), "{error}");
+    assert!(!case.created());
 }
 
 #[tokio::test]

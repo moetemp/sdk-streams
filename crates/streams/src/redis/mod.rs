@@ -259,12 +259,7 @@ impl RedisStore {
             .arg(epoch_key(&epoch))
             .arg(task)
             .arg(batch.sequence)
-            .arg(
-                withdrawal
-                    .previous_completed
-                    .map(task_key)
-                    .unwrap_or_default(),
-            )
+            .arg(completed_arg(withdrawal))
             .arg(failed_list(withdrawal.failed_tasks))
             .arg(encode_run(withdrawal.withdraw_run))
             .arg(withdrawal.supersession)
@@ -520,6 +515,17 @@ fn encode_run(run_id: &str) -> String {
     } else {
         encode_part(run_id)
     }
+}
+
+/// The previous completed task key of an append, or `*` for a batch whose facts come later.
+fn completed_arg(withdrawal: &Withdrawal<'_>) -> String {
+    if withdrawal.defer {
+        return "*".to_string();
+    }
+    withdrawal
+        .previous_completed
+        .map(task_key)
+        .unwrap_or_default()
 }
 
 fn failed_list(failed: &[i64]) -> String {
