@@ -8,6 +8,14 @@ package temporal.sdk.streams.v1;
 import "google/protobuf/duration.proto";
 import "temporal/api/streamservice/v1/stream_service.proto";
 
+// The settings of the native Stream extension, on the server's Stream service. The connection
+// comes from the Worker or the client, so it needs no address.
+message NativeStreamConfig {
+    // The backend name that lang registered this extension under. Empty is `native`. The crate
+    // puts it in each StreamRef it builds.
+    string backend = 1;
+}
+
 // The settings of the Redis Stream extension. Lang builds it from the plugin options.
 message RedisStreamConfig {
     // One URL, or the seed URLs of a cluster. Credentials and TLS come from the URL.

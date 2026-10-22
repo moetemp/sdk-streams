@@ -9,8 +9,9 @@ use crate::{
         AppendRecordsRequest, BufferWorkflowCallsRequest, BufferWorkflowCallsResponse,
         CloseStreamRequest, CloseWriterRequest, CloseWriterResponse, CloseWritersRequest,
         CloseWritersResponse, DescribeStreamRequest, DrainClosesRequest, DrainClosesResponse,
-        FlushRunBufferRequest, FlushRunBufferResponse, OpenWriterRequest, OpenWriterResponse,
-        ReadRecordsRequest, RedisStreamConfig, WriteRecordsRequest, WriteRecordsResponse,
+        FlushRunBufferRequest, FlushRunBufferResponse, NativeStreamConfig, OpenWriterRequest,
+        OpenWriterResponse, ReadRecordsRequest, RedisStreamConfig, WriteRecordsRequest,
+        WriteRecordsResponse,
     },
     redis::{RedisStore, RedisStoreOptions},
     service::StreamService,
@@ -179,9 +180,8 @@ impl StreamExtension {
         Self::build(EXTENSION_NAME, options, meter, None, None)
     }
 
-    /// Builds the extension of a backend kind: `redis`, `memory` or `native`, from an encoded
-    /// [RedisStreamConfig]. A native extension reads only `backend` from it, and the config may
-    /// be empty.
+    /// Builds the extension of a backend kind from its encoded config: a [RedisStreamConfig] for
+    /// `redis` and `memory`, a [NativeStreamConfig] for `native`, which may be empty.
     pub fn for_backend(
         kind: &str,
         config: &[u8],
@@ -190,15 +190,7 @@ impl StreamExtension {
         match kind {
             "redis" => Self::from_config_bytes(config, meter),
             "memory" => MemoryStreamExtension::from_config_bytes(config, meter),
-            NATIVE_BACKEND => {
-                let config = RedisStreamConfig::decode(config)
-                    .map_err(|error| StreamError::invalid(format!("The config is bad: {error}")))?;
-                let backend = match config.backend.as_str() {
-                    "" => NATIVE_BACKEND.to_string(),
-                    name => name.to_string(),
-                };
-                Ok(NativeStreamExtension::create(backend, meter))
-            }
+            NATIVE_BACKEND => NativeStreamExtension::from_config_bytes(config, meter),
             other => Err(StreamError::invalid(format!(
                 "No Stream backend kind {other}. The kinds are redis, memory and native"
             ))),
@@ -408,6 +400,20 @@ pub const NATIVE_EXTENSION_NAME: &str = "temporalio-streams-native";
 pub struct NativeStreamExtension;
 
 impl NativeStreamExtension {
+    /// Builds an extension from an encoded [NativeStreamConfig].
+    pub fn from_config_bytes(
+        config: &[u8],
+        meter: Option<TemporalMeter>,
+    ) -> StreamResult<Arc<StreamExtension>> {
+        let config = NativeStreamConfig::decode(config)
+            .map_err(|error| StreamError::invalid(format!("The config is bad: {error}")))?;
+        let backend = match config.backend.as_str() {
+            "" => NATIVE_BACKEND.to_string(),
+            name => name.to_string(),
+        };
+        Ok(Self::create(backend, meter))
+    }
+
     /// Builds an extension with no connection yet. `backend` is the name in the refs it builds.
     pub fn create(
         backend: impl Into<String>,
@@ -463,6 +469,19 @@ impl WorkerExtension for StreamExtension {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_native_extension_names_its_backend_from_its_own_config() {
+        let ext = StreamExtension::for_backend("native", &[], None).unwrap();
+        assert_eq!(ext.name(), NATIVE_EXTENSION_NAME);
+        assert_eq!(ext.options().backend, "native");
+        let config = NativeStreamConfig {
+            backend: "server".to_string(),
+        };
+        let ext = StreamExtension::for_backend("native", &config.encode_to_vec(), None).unwrap();
+        assert_eq!(ext.options().backend, "server");
+        assert!(StreamExtension::for_backend("nope", &[], None).is_err());
+    }
 
     #[test]
     fn the_config_fills_the_defaults() {
