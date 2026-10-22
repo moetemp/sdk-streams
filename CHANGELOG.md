@@ -89,3 +89,5 @@
   `StreamErrorDetails`. The WIT has the same fields.
 - `AppendRecordsRequest.defer_withdrawal` (9) marks the Workflow batch before a Local Activity
   on the server too, so the native Local Activity flush writes early as on Redis.
+- Synced `stream_service.proto` with the server's `ReadRecordsRequest.to_offset` (11) and
+  `wake_only` (12). The native Store forwards them. The Redis and memory reads don't use them.

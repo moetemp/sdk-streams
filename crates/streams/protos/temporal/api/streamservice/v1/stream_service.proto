@@ -216,6 +216,12 @@ message ReadRecordsRequest {
     // Also read the Topics that start with one of these. A Record passes when its Topic is in
     // topics or starts with a prefix. Both empty reads every Topic.
     repeated string topic_prefixes = 10;
+    // The exclusive end of the read. The read scans no entry at or after it, the close Record
+    // included, so a replay reads the same range. Zero means no end.
+    int64 to_offset = 11;
+    // Park as a normal read, then answer with no Records and next_offset = from_offset, when a
+    // Record that passes the filter exists, when the Stream closes (done), or when wait ends.
+    bool wake_only = 12;
 }
 
 message ReadRecordsResponse {
