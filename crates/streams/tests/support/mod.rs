@@ -19,7 +19,7 @@ use temporalio_streams::{
     memory::MemoryStore,
     proto::{
         Producer, ProducerEpoch, ProducerKind, RedisStreamConfig, StreamRecord, StreamRecordKind,
-        Supersession, WorkflowTaskEpoch,
+        StreamRef, Supersession, WorkflowTaskEpoch,
     },
     redis::{RedisStore, RedisStoreOptions},
     store::{Appended, Batch, Closed, Entry, Owner, Store, Withdrawal},
@@ -214,6 +214,13 @@ pub(crate) fn records_of(entries: &[Entry]) -> Vec<String> {
 }
 
 impl Target {
+    pub(crate) fn stream_ref(&self) -> StreamRef {
+        StreamRef {
+            id: self.stream.clone(),
+            ..Default::default()
+        }
+    }
+
     pub(crate) fn keys(&self) -> StreamKeys {
         StreamKeys::new("streams-test", &self.namespace, &self.stream)
     }
@@ -222,7 +229,7 @@ impl Target {
         self.store
             .create(
                 &self.namespace,
-                &self.stream,
+                &self.stream_ref(),
                 None,
                 None,
                 owner,
@@ -463,7 +470,7 @@ impl Target {
         self.store
             .append(
                 &self.namespace,
-                &self.stream,
+                &self.stream_ref(),
                 &Batch {
                     producer,
                     sequence,
@@ -499,7 +506,7 @@ impl Target {
         self.store
             .close(
                 &self.namespace,
-                &self.stream,
+                &self.stream_ref(),
                 producer,
                 &record,
                 &withdrawal,

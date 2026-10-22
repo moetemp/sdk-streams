@@ -7,7 +7,7 @@ use crate::{
     epoch::{epoch_key, task_key, task_of},
     ids::{StreamKeys, encode_part},
     offset::{entry_id_of_offset, offset_of_entry_id},
-    proto::{Producer, ProducerKind},
+    proto::{Producer, ProducerKind, StreamRef},
     store::{
         Appended, Batch, Capabilities, Closed, CreateOutcome, Created, Entry, FORMAT_VERSION,
         Owner, Store, StreamState, TOMBSTONE, Withdrawal,
@@ -426,12 +426,13 @@ impl Store for MemoryStore {
     async fn create(
         &self,
         namespace: &str,
-        stream_id: &str,
+        stream: &StreamRef,
         retention: Option<Duration>,
         auto_close: Option<Duration>,
         owner: Owner<'_>,
         withdrawal: &Withdrawal<'_>,
     ) -> StreamResult<Created> {
+        let stream_id = stream.id.as_str();
         let retention = millis(retention.filter(|r| !r.is_zero()).unwrap_or(self.retention));
         let period = auto_close
             .filter(|period| !period.is_zero())
@@ -509,9 +510,10 @@ impl Store for MemoryStore {
     async fn append(
         &self,
         namespace: &str,
-        stream_id: &str,
+        stream: &StreamRef,
         batch: &Batch<'_>,
     ) -> StreamResult<Appended> {
+        let stream_id = stream.id.as_str();
         let producer = batch.producer;
         let epoch = producer.epoch.unwrap_or_default();
         let kind = ProducerKind::try_from(producer.kind).unwrap_or_default();
@@ -693,11 +695,12 @@ impl Store for MemoryStore {
     async fn close(
         &self,
         namespace: &str,
-        stream_id: &str,
+        stream: &StreamRef,
         producer: &Producer,
         record: &[u8],
         withdrawal: &Withdrawal<'_>,
     ) -> StreamResult<Closed> {
+        let stream_id = stream.id.as_str();
         let epoch = producer.epoch.unwrap_or_default();
         let kind = ProducerKind::try_from(producer.kind).unwrap_or_default();
         let task = match kind {

@@ -50,26 +50,24 @@ impl Store for Masked {
     async fn create(
         &self,
         namespace: &str,
-        stream_id: &str,
+        stream: &StreamRef,
         retention: Option<Duration>,
         auto_close: Option<Duration>,
         owner: Owner<'_>,
         withdrawal: &Withdrawal<'_>,
     ) -> StreamResult<Created> {
         self.inner
-            .create(
-                namespace, stream_id, retention, auto_close, owner, withdrawal,
-            )
+            .create(namespace, stream, retention, auto_close, owner, withdrawal)
             .await
     }
 
     async fn append(
         &self,
         namespace: &str,
-        stream_id: &str,
+        stream: &StreamRef,
         batch: &Batch<'_>,
     ) -> StreamResult<Appended> {
-        self.inner.append(namespace, stream_id, batch).await
+        self.inner.append(namespace, stream, batch).await
     }
 
     async fn read(
@@ -99,13 +97,13 @@ impl Store for Masked {
     async fn close(
         &self,
         namespace: &str,
-        stream_id: &str,
+        stream: &StreamRef,
         producer: &Producer,
         record: &[u8],
         withdrawal: &Withdrawal<'_>,
     ) -> StreamResult<Closed> {
         self.inner
-            .close(namespace, stream_id, producer, record, withdrawal)
+            .close(namespace, stream, producer, record, withdrawal)
             .await
     }
 
@@ -491,27 +489,25 @@ impl Store for Slow {
     async fn create(
         &self,
         namespace: &str,
-        stream_id: &str,
+        stream: &StreamRef,
         retention: Option<Duration>,
         auto_close: Option<Duration>,
         owner: Owner<'_>,
         withdrawal: &Withdrawal<'_>,
     ) -> StreamResult<Created> {
         self.inner
-            .create(
-                namespace, stream_id, retention, auto_close, owner, withdrawal,
-            )
+            .create(namespace, stream, retention, auto_close, owner, withdrawal)
             .await
     }
 
     async fn append(
         &self,
         namespace: &str,
-        stream_id: &str,
+        stream: &StreamRef,
         batch: &Batch<'_>,
     ) -> StreamResult<Appended> {
         tokio::time::sleep(Duration::from_millis(300)).await;
-        self.inner.append(namespace, stream_id, batch).await
+        self.inner.append(namespace, stream, batch).await
     }
 
     async fn read(

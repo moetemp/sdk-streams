@@ -398,26 +398,24 @@ impl Store for LosesFirstAnswer {
     async fn create(
         &self,
         namespace: &str,
-        stream_id: &str,
+        stream: &StreamRef,
         retention: Option<Duration>,
         auto_close: Option<Duration>,
         owner: Owner<'_>,
         withdrawal: &Withdrawal<'_>,
     ) -> StreamResult<Created> {
         self.inner
-            .create(
-                namespace, stream_id, retention, auto_close, owner, withdrawal,
-            )
+            .create(namespace, stream, retention, auto_close, owner, withdrawal)
             .await
     }
 
     async fn append(
         &self,
         namespace: &str,
-        stream_id: &str,
+        stream: &StreamRef,
         batch: &Batch<'_>,
     ) -> StreamResult<Appended> {
-        let appended = self.inner.append(namespace, stream_id, batch).await?;
+        let appended = self.inner.append(namespace, stream, batch).await?;
         if !self.lost.swap(true, Ordering::SeqCst) {
             return Err(StreamError::storage("the answer was lost"));
         }

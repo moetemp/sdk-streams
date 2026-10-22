@@ -273,12 +273,13 @@ pub trait Store: Send + Sync + 'static {
     /// The Retention of a Stream that its create gives none.
     fn default_retention(&self) -> Duration;
 
-    /// Creates a Stream, or finds it. A retry run's create withdraws its previous run. An
+    /// Creates a Stream, or finds it. The calls that write take the Stream's whole ref, since
+    /// the server finds a Workflow's Stream by its owner fields. Redis and memory key on the id. A retry run's create withdraws its previous run. An
     /// `auto_close` needs [Capabilities::AUTO_CLOSE].
     async fn create(
         &self,
         namespace: &str,
-        stream_id: &str,
+        stream: &StreamRef,
         retention: Option<Duration>,
         auto_close: Option<Duration>,
         owner: Owner<'_>,
@@ -289,7 +290,7 @@ pub trait Store: Send + Sync + 'static {
     async fn append(
         &self,
         namespace: &str,
-        stream_id: &str,
+        stream: &StreamRef,
         batch: &Batch<'_>,
     ) -> StreamResult<Appended>;
 
@@ -317,7 +318,7 @@ pub trait Store: Send + Sync + 'static {
     async fn close(
         &self,
         _namespace: &str,
-        _stream_id: &str,
+        _stream: &StreamRef,
         _producer: &Producer,
         _record: &[u8],
         _withdrawal: &Withdrawal<'_>,
@@ -348,10 +349,6 @@ pub trait Store: Send + Sync + 'static {
         None
     }
 
-    /// Notes the full ref of a Stream that a call names, for a Store that sends more than the
-    /// id. The server finds a Workflow's Stream by its owner fields. The others ignore it.
-    fn remember(&self, _namespace: &str, _stream: &StreamRef) {}
-
     /// The reads of a Store that answers whole reads and describes itself, such as the
     /// server. The service then forwards those calls and uses no [Store::read].
     fn remote_reads(&self) -> Option<&dyn RemoteReads> {
@@ -366,8 +363,6 @@ pub struct RunOwner<'a> {
     pub producer: &'a Producer,
     /// Close the Stream when the owner's run chain closes.
     pub close_with_run: bool,
-    /// The Stream's ref, with the owner fields.
-    pub stream: Option<&'a StreamRef>,
 }
 
 /// Whole reads and describes, which a remote Store answers itself.

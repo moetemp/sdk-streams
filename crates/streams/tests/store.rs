@@ -57,7 +57,7 @@ async fn append(
         .store
         .append(
             &target.namespace,
-            &target.stream,
+            &target.stream_ref(),
             &Batch {
                 producer,
                 sequence,
@@ -84,7 +84,7 @@ async fn a_create_writes_the_key_once_and_keeps_its_retention() {
             .store
             .create(
                 &target.namespace,
-                &target.stream,
+                &target.stream_ref(),
                 day,
                 None,
                 Owner::Client,
@@ -97,7 +97,7 @@ async fn a_create_writes_the_key_once_and_keeps_its_retention() {
             .store
             .create(
                 &target.namespace,
-                &target.stream,
+                &target.stream_ref(),
                 day,
                 None,
                 Owner::Client,
@@ -110,7 +110,7 @@ async fn a_create_writes_the_key_once_and_keeps_its_retention() {
             .store
             .create(
                 &target.namespace,
-                &target.stream,
+                &target.stream_ref(),
                 None,
                 None,
                 Owner::Client,
@@ -199,7 +199,7 @@ async fn a_close_stops_appends_but_not_a_resend() {
             .store
             .create(
                 &target.namespace,
-                &target.stream,
+                &target.stream_ref(),
                 None,
                 None,
                 Owner::Client,
@@ -226,7 +226,7 @@ async fn a_newer_format_refuses_every_write() {
             .store
             .create(
                 &target.namespace,
-                &target.stream,
+                &target.stream_ref(),
                 None,
                 None,
                 Owner::Client,
@@ -248,7 +248,7 @@ async fn an_expired_stream_refuses_writes_and_its_create() {
             .store
             .create(
                 &target.namespace,
-                &target.stream,
+                &target.stream_ref(),
                 None,
                 None,
                 Owner::Client,
@@ -493,7 +493,7 @@ async fn an_append_trims_by_retention_and_keeps_the_watermark() {
             .store
             .create(
                 &target.namespace,
-                &target.stream,
+                &target.stream_ref(),
                 Some(Duration::from_millis(200)),
                 None,
                 // An open Workflow Stream keeps its key, so only the Retention trims.
@@ -751,10 +751,11 @@ async fn an_auto_close_closes_a_quiet_stream_on_its_next_write() {
     for target in stores().await {
         let none = Withdrawal::default();
         let period = Some(Duration::from_millis(300));
+        let stream = target.stream_ref();
         let create = || {
             target.store.create(
                 &target.namespace,
-                &target.stream,
+                &stream,
                 None,
                 period,
                 Owner::Client,
@@ -769,7 +770,7 @@ async fn an_auto_close_closes_a_quiet_stream_on_its_next_write() {
             .store
             .create(
                 &target.namespace,
-                &target.stream,
+                &target.stream_ref(),
                 None,
                 None,
                 Owner::Client,
@@ -840,7 +841,7 @@ async fn an_auto_close_counts_from_the_create_and_each_step_applies_it_once() {
             .store
             .create(
                 &target.namespace,
-                &target.stream,
+                &target.stream_ref(),
                 None,
                 Some(Duration::from_millis(200)),
                 Owner::Workflow(None),
@@ -931,7 +932,7 @@ async fn an_auto_close_period_at_the_edges_neither_overflows_nor_rounds_to_zero(
             .store
             .create(
                 &target.namespace,
-                &target.stream,
+                &target.stream_ref(),
                 None,
                 Some(Duration::from_micros(500)),
                 Owner::Client,
@@ -947,7 +948,7 @@ async fn an_auto_close_period_at_the_edges_neither_overflows_nor_rounds_to_zero(
             .store
             .create(
                 &target.namespace,
-                &target.stream,
+                &target.stream_ref(),
                 None,
                 Some(Duration::from_secs(u64::MAX / 4)),
                 Owner::Client,

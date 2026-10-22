@@ -95,6 +95,6 @@
   (`WorkflowService.StartNexusOperation` on `__temporal_system`), not the `StreamService` gRPC
   reads, so every caller reads through the path Workflow code uses. A failed operation maps to
   the crate's reasons by its application failure type.
-- The native Store sends the full `StreamRef` of a Stream, with its owner fields, on every
-  call. The server finds a Workflow's Stream by them. `Store::remember` gives a Store the ref
-  that a call names, since the Store calls take the id alone.
+- The Store calls that write (`create`, `append`, `close`) take the Stream's `StreamRef`, so the
+  native Store sends the owner fields on every call. The server finds a Workflow's Stream by
+  them. Redis and memory key on the id.

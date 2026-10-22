@@ -17,10 +17,9 @@ use crate::{
     },
 };
 use bytes::Bytes;
-use parking_lot::{Mutex, RwLock};
+use parking_lot::RwLock;
 use prost::Message;
 use std::{
-    collections::HashMap,
     sync::atomic::{AtomicU64, Ordering},
     time::Duration,
 };
@@ -46,9 +45,6 @@ const SERVER_RETENTION: Duration = Duration::from_secs(7 * 24 * 60 * 60);
 #[derive(Default)]
 pub struct ServiceStore {
     connection: RwLock<Option<Connection>>,
-    /// The full ref of each Stream that a call named with owner fields. The server finds a
-    /// Workflow's Stream only by them, and the Store calls get the id alone.
-    refs: Mutex<HashMap<(String, String), StreamRef>>,
     /// The Retention of a create that gives none, or the server's default.
     retention: Option<Duration>,
 }
@@ -156,23 +152,7 @@ fn decode_record(bytes: &[u8]) -> StreamResult<StreamRecord> {
         .map_err(|error| StreamError::invalid(format!("A Record is bad: {error}")))
 }
 
-/// The most refs a Store keeps. Past it, it forgets them all, and later calls note them again.
-const MAX_REFS: usize = 100_000;
-
 impl ServiceStore {
-    /// The full ref of a Stream, or one with the id alone.
-    fn stream_ref(&self, namespace: &str, id: &str) -> Option<StreamRef> {
-        let known = self
-            .refs
-            .lock()
-            .get(&(namespace.to_string(), id.to_string()))
-            .cloned();
-        Some(known.unwrap_or_else(|| StreamRef {
-            id: id.to_string(),
-            ..Default::default()
-        }))
-    }
-
     async fn create_request(
         &self,
         request: CreateStreamRequest,
@@ -220,7 +200,7 @@ impl Store for ServiceStore {
     async fn create(
         &self,
         namespace: &str,
-        stream_id: &str,
+        stream: &StreamRef,
         retention: Option<Duration>,
         auto_close: Option<Duration>,
         owner: Owner<'_>,
@@ -233,17 +213,13 @@ impl Store for ServiceStore {
         let retention = retention.or(self.retention);
         let request = CreateStreamRequest {
             namespace: namespace.to_string(),
-            stream_id: stream_id.to_string(),
+            stream_id: stream.id.clone(),
             retention: retention.map(proto_duration),
             withdraw_run: withdrawal.withdraw_run.to_string(),
             auto_close: auto_close.map(proto_duration),
             owner: run.map(|run| run.producer.clone()),
             close_with_run: run.is_some_and(|run| run.close_with_run),
-            r#ref: run.and_then(|run| {
-                run.stream
-                    .cloned()
-                    .or_else(|| self.stream_ref(namespace, stream_id))
-            }),
+            r#ref: Some(stream.clone()),
         };
         self.create_request(request, retention).await
     }
@@ -251,7 +227,7 @@ impl Store for ServiceStore {
     async fn append(
         &self,
         namespace: &str,
-        stream_id: &str,
+        stream: &StreamRef,
         batch: &Batch<'_>,
     ) -> StreamResult<Appended> {
         let records = batch
@@ -268,7 +244,7 @@ impl Store for ServiceStore {
         let withdrawal = &batch.withdrawal;
         let request = AppendRecordsRequest {
             namespace: namespace.to_string(),
-            stream: self.stream_ref(namespace, stream_id),
+            stream: Some(stream.clone()),
             producer: Some(batch.producer.clone()),
             sequence: batch.sequence,
             records,
@@ -291,7 +267,7 @@ impl Store for ServiceStore {
     async fn close(
         &self,
         namespace: &str,
-        stream_id: &str,
+        stream: &StreamRef,
         producer: &Producer,
         record: &[u8],
         withdrawal: &Withdrawal<'_>,
@@ -299,7 +275,7 @@ impl Store for ServiceStore {
         let record = decode_record(record)?;
         let request = CloseStreamRequest {
             namespace: namespace.to_string(),
-            stream: self.stream_ref(namespace, stream_id),
+            stream: Some(stream.clone()),
             producer: Some(producer.clone()),
             result: record.close_result,
             failure: record.close_failure,
@@ -348,17 +324,6 @@ impl Store for ServiceStore {
 
     fn remote_reads(&self) -> Option<&dyn RemoteReads> {
         Some(self)
-    }
-
-    fn remember(&self, namespace: &str, stream: &StreamRef) {
-        if stream.workflow_id.is_empty() {
-            return;
-        }
-        let mut refs = self.refs.lock();
-        if refs.len() >= MAX_REFS {
-            refs.clear();
-        }
-        refs.insert((namespace.to_string(), stream.id.clone()), stream.clone());
     }
 }
 

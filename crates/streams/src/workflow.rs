@@ -117,7 +117,7 @@ struct Taken {
     /// The next `sequence` of each Stream, when an earlier write of this task used some.
     next: HashMap<String, i64>,
     /// The Streams that an earlier write of this task left without withdrawal facts.
-    unsettled: Vec<String>,
+    unsettled: Vec<StreamRef>,
     /// The calls of this write that a later task must write again if this task never
     /// completes. Empty for a write with facts.
     early: Vec<WorkflowCall>,
@@ -329,17 +329,15 @@ impl WorkflowRuns {
 }
 
 /// The Streams that have appends among `calls`, in order.
-fn streams_with_records(calls: &[WorkflowCall]) -> Vec<String> {
+fn streams_with_records(calls: &[WorkflowCall]) -> Vec<StreamRef> {
     let mut seen = HashSet::new();
     calls
         .iter()
         .filter_map(|call| match &call.call {
-            Some(Call::Append(append)) if !append.records.is_empty() => {
-                append.stream.as_ref().map(|s| s.id.clone())
-            }
+            Some(Call::Append(append)) if !append.records.is_empty() => append.stream.clone(),
             _ => None,
         })
-        .filter(|id| seen.insert(id.clone()))
+        .filter(|stream| seen.insert(stream.id.clone()))
         .collect()
 }
 
@@ -379,17 +377,29 @@ struct CreateCall {
     retention: Option<Duration>,
     auto_close: Option<Duration>,
     close_with_run: bool,
-    stream: Option<StreamRef>,
 }
 
 /// The calls of one Stream in one write, in the order Workflow code made them.
 #[derive(Default)]
 struct StreamCalls {
+    /// The Stream's ref. The fullest one that a call gave, so the owner fields reach a Store
+    /// that finds a Workflow's Stream by them.
+    stream: StreamRef,
     /// The Retention and the auto close of each create.
     creates: Vec<CreateCall>,
     records: Vec<AppendRecord>,
     /// Send a batch also with no Records, so the task's withdrawal facts reach the Stream.
     settle: bool,
+}
+
+impl StreamCalls {
+    /// Keeps the ref of a call, unless an earlier one already has the owner fields.
+    fn refer(&mut self, id: &str, stream: Option<StreamRef>) {
+        if self.stream.workflow_id.is_empty() {
+            self.stream = stream.unwrap_or_default();
+        }
+        self.stream.id = id.to_string();
+    }
 }
 
 fn duration(value: Option<prost_types::Duration>) -> Option<Duration> {
@@ -588,29 +598,29 @@ impl StreamService {
             let when_run_closes = call.when_run_closes;
             match call.call {
                 Some(Call::Create(create)) => {
-                    self.remember(task.namespace, create.r#ref.as_ref());
                     if !streams.contains_key(&create.stream_id) {
                         order.push(create.stream_id.clone());
                     }
-                    let entry = streams.entry(create.stream_id).or_default();
+                    let entry = streams.entry(create.stream_id.clone()).or_default();
+                    entry.refer(&create.stream_id, create.r#ref);
                     entry.creates.push(CreateCall {
                         retention: duration(create.retention),
                         auto_close: duration(create.auto_close),
                         close_with_run: create.close_with_run,
-                        stream: create.r#ref,
                     });
                 }
                 Some(Call::Append(append)) => {
-                    self.remember(task.namespace, append.stream.as_ref());
-                    let id = append.stream.map(|s| s.id).unwrap_or_default();
+                    let id = append
+                        .stream
+                        .as_ref()
+                        .map(|s| s.id.clone())
+                        .unwrap_or_default();
                     if !streams.contains_key(&id) {
                         order.push(id.clone());
                     }
-                    streams
-                        .entry(id)
-                        .or_default()
-                        .records
-                        .extend(append.records);
+                    let entry = streams.entry(id.clone()).or_default();
+                    entry.refer(&id, append.stream);
+                    entry.records.extend(append.records);
                 }
                 // A failure that the server retries, or a cron run, goes on with the Run Chain,
                 // so the auto close doesn't go out.
@@ -619,11 +629,14 @@ impl StreamService {
                 None => {}
             }
         }
-        for id in unsettled {
+        for stream in unsettled {
+            let id = stream.id.clone();
             if !streams.contains_key(&id) {
                 order.push(id.clone());
             }
-            streams.entry(id).or_default().settle = true;
+            let entry = streams.entry(id.clone()).or_default();
+            entry.refer(&id, Some(stream));
+            entry.settle = true;
         }
         let durable = (options.durable_writes > 0)
             .then(|| self.store.durable_store())
@@ -722,6 +735,7 @@ impl StreamService {
     ) -> StreamResult<(usize, i64)> {
         let namespace = task.namespace;
         let producer = &task.producer;
+        let stream = calls.stream.clone();
         let (completed, failed) = match &task.facts {
             Some((completed, failed)) => (completed.as_ref(), *failed),
             None => (None, &[][..]),
@@ -748,12 +762,11 @@ impl StreamService {
             let owner = RunOwner {
                 producer,
                 close_with_run: create.close_with_run,
-                stream: create.stream.as_ref(),
             };
             let created = retried(task.deadline, || {
                 store.create(
                     namespace,
-                    id,
+                    &stream,
                     create.retention,
                     create.auto_close,
                     Owner::Workflow(Some(owner)),
@@ -810,7 +823,8 @@ impl StreamService {
                 records,
                 withdrawal: withdrawal.clone(),
             };
-            let appended = retried(task.deadline, || store.append(namespace, id, &batch)).await;
+            let appended =
+                retried(task.deadline, || store.append(namespace, &stream, &batch)).await;
             match self.count(appended) {
                 Ok(_) => written += records.len(),
                 Err(error) if dropped_for(error.reason) => {
@@ -825,7 +839,8 @@ impl StreamService {
                             withdrawal: withdrawal.clone(),
                         };
                         let settled =
-                            retried(task.deadline, || store.append(namespace, id, &facts)).await;
+                            retried(task.deadline, || store.append(namespace, &stream, &facts))
+                                .await;
                         if let Err(error) = self.count(settled) {
                             warn!(stream = id, %error, "A late withdrawal did not go in");
                         }
@@ -890,18 +905,14 @@ impl StreamService {
             if when_run_closes && task.closes_run.is_none() {
                 continue;
             }
-            let id = close
-                .stream
-                .as_ref()
-                .map(|s| s.id.clone())
-                .unwrap_or_default();
-            self.remember(&task.namespace, close.stream.as_ref());
+            let stream = close.stream.clone().unwrap_or_default();
+            let id = stream.id.clone();
             let record = close_record(&producer, close.result, close.failure);
             let mut backoff = FIRST_BACKOFF * 4;
             for attempt in 1..=CLOSE_ATTEMPTS {
                 let closed = self
                     .store
-                    .close(&task.namespace, &id, &producer, &record, &withdrawal)
+                    .close(&task.namespace, &stream, &producer, &record, &withdrawal)
                     .await;
                 match self.count(closed) {
                     Ok(_) => break,
