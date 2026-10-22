@@ -174,15 +174,6 @@ interface stream-service {
     stream-status-expired,
   }
 
-  /// @nexus.proto "temporal.api.streamservice.v1.CreateStreamResponse"
-  record create-stream-response {
-    %stream: option<stream-ref>,
-    /// @nexus.doc "False when the Stream existed with the same Retention."
-    created: option<bool>,
-    /// @nexus.doc "Closed when an earlier create and close used the id."
-    status: option<stream-status>,
-  }
-
   // The meta key of each Stream has a format version v. Lua refuses a write to a Stream with a
   // higher v with FAILED_PRECONDITION and the detail stream_format_too_new.
   /// @nexus.doc
@@ -331,13 +322,19 @@ interface stream-service {
     describe: func() -> describe-stream-response;
   }
 
-  // The handle is built from the response. The created and status fields of the response are
-  // not on the handle.
+  // The handle is built from the stream field of the response. The other fields stay beside
+  // it, since they describe this create, not the Stream.
   /// @nexus.proto "temporal.api.streamservice.v1.CreateStreamResponse"
-  type stream-result = own<%stream>;
+  record create-stream-result {
+    %stream: own<%stream>,
+    /// @nexus.doc "False when the Stream existed with the same Retention."
+    created: option<bool>,
+    /// @nexus.doc "Closed when an earlier create and close used the id."
+    status: option<stream-status>,
+  }
 
   /// @nexus.operation name="CreateStream"
-  create-stream: func(request: create-stream-request) -> stream-result;
+  create-stream: func(request: create-stream-request) -> create-stream-result;
 
   /// @nexus.doc
   ///   "In Workflow code, Brook buffers this call in the run, and the facade drops the answer."

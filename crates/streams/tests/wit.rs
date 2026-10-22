@@ -46,5 +46,5 @@ fn the_wit_declares_the_stream_handle_with_its_methods() {
             "{method}"
         );
     }
-    assert!(WIT.contains("create-stream: func(request: create-stream-request) -> stream-result;"));
+    assert!(WIT.contains("create-stream: func(request: create-stream-request) -> create-stream-result;"));
 }
