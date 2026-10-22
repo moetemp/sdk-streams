@@ -80,6 +80,12 @@ See the known limits for a Reader of a Stream with an auto close.
 
 ## Known limits
 
+- A Local Activity call of a failed Workflow Task is withdrawn only when the retry task runs that
+  call again, or when a later Local Activity write names the failed task. A call that no later
+  write covers, for example because a Signal changed the path and no Local Activity writes
+  again, keeps its Records. The memory Store has the same limit.
+- Core names only the last 100 failed Workflow Tasks of a run. An older failed task before the
+  last completed one keeps its Local Activity Records.
 - A Reader of a Stream with an auto close needs `+evalsha` with write access to the Stream's
   keys, since its read or describe may apply a due close. A Reader with read-only access gets
   an error from that step.
