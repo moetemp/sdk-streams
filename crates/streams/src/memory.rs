@@ -257,7 +257,7 @@ impl Keys {
             return false;
         };
         let last: i64 = self.get("la").and_then(|la| la.parse().ok()).unwrap_or(0);
-        if now < last + period || self.check_ids_fit(now, 1).is_err() {
+        if now < last.saturating_add(period) || self.check_ids_fit(now, 1).is_err() {
             return false;
         }
         self.trim(now);
@@ -435,7 +435,8 @@ impl Store for MemoryStore {
         let retention = millis(retention.filter(|r| !r.is_zero()).unwrap_or(self.retention));
         let period = auto_close
             .filter(|period| !period.is_zero())
-            .map(|period| millis(period).to_string())
+            // Stored in ms, so a period below 1 ms rounds up and never stores as no wait.
+            .map(|period| millis(period).max(1).to_string())
             .unwrap_or_default();
         let owner = match owner {
             Owner::Workflow => "wf",

@@ -222,7 +222,14 @@ impl StreamService {
         if !state.auto_close_due() {
             return Ok(state);
         }
-        self.store.auto_close(namespace, id).await?;
+        match self.store.auto_close(namespace, id).await {
+            // The read may come from a replica that is behind, so the Stream can expire
+            // between the two steps. The read then reports the expiry itself.
+            Err(error) if error.reason == Reason::Expired => {}
+            result => {
+                result?;
+            }
+        }
         Ok(self.store.read(namespace, id, 0, 0).await?.0)
     }
 
