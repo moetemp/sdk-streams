@@ -12,8 +12,8 @@ use crate::{
         StreamRef, StreamStatus,
     },
     store::{
-        Appended, Batch, Capabilities, Closed, CreateOutcome, Created, Entry, Owner, RemoteReads,
-        Store, StreamState, Withdrawal,
+        Appended, Batch, Capabilities, Closed, CreateOutcome, Created, Entry, Owner, ReaderRun,
+        RemoteReads, Store, StreamState, Withdrawal,
     },
 };
 use bytes::Bytes;
@@ -25,7 +25,7 @@ use std::{
 };
 use temporalio_client::Connection;
 use temporalio_common::protos::temporal::api::{
-    common::v1::Payload,
+    common::v1::{Link, Payload, link},
     failure::v1::{Failure, failure::FailureInfo},
 };
 use tokio::time::Instant;
@@ -335,7 +335,24 @@ impl Store for ServiceStore {
 impl RemoteReads for ServiceStore {
     // Reads take the direct System Nexus call, which persists nothing, so every caller reads
     // through the one path that Workflow code uses too.
-    async fn read_records(&self, request: ReadRecordsRequest) -> StreamResult<ReadRecordsResponse> {
+    async fn read_records(
+        &self,
+        request: ReadRecordsRequest,
+        reader: Option<&ReaderRun>,
+    ) -> StreamResult<ReadRecordsResponse> {
+        // The server keeps the lowest offset that an open reading run read, and Retention keeps
+        // the Records from there.
+        let links = reader
+            .map(|reader| Link {
+                variant: Some(link::Variant::WorkflowEvent(link::WorkflowEvent {
+                    namespace: request.namespace.clone(),
+                    workflow_id: reader.workflow_id.clone(),
+                    run_id: reader.run_id.clone(),
+                    reference: None,
+                })),
+            })
+            .into_iter()
+            .collect();
         // The server answers about 1 s before the call's deadline, so the deadline leaves room
         // past the read's own wait.
         let wait = [request.wait, request.create_wait]
@@ -353,6 +370,7 @@ impl RemoteReads for ServiceStore {
                 ..request
             },
             Some(wait + READ_MARGIN),
+            links,
         )
         .await
     }
@@ -369,6 +387,7 @@ impl RemoteReads for ServiceStore {
                 ..request
             },
             None,
+            vec![],
         )
         .await
     }
@@ -392,6 +411,8 @@ struct StartNexusOperationRequest {
     operation: String,
     #[prost(message, optional, tag = "7")]
     input: Option<Payload>,
+    #[prost(message, repeated, tag = "8")]
+    links: Vec<Link>,
 }
 
 /// `temporal.api.workflowservice.v1.StartNexusOperationResponse`, without its links.
@@ -441,6 +462,7 @@ impl ServiceStore {
         namespace: String,
         request: Req,
         timeout: Option<Duration>,
+        links: Vec<Link>,
     ) -> StreamResult<Resp> {
         let message_type = format!("{SERVICE_PACKAGE}.{operation}Request");
         let identity = self
@@ -465,6 +487,7 @@ impl ServiceStore {
                 data: request.encode_to_vec(),
                 ..Default::default()
             }),
+            links,
         };
         let answer: StartNexusOperationResponse =
             self.call(START_NEXUS, &namespace, call, timeout).await?;

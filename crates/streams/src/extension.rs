@@ -10,12 +10,12 @@ use crate::{
         CloseStreamRequest, CloseWriterRequest, CloseWriterResponse, CloseWritersRequest,
         CloseWritersResponse, DescribeStreamRequest, DrainClosesRequest, DrainClosesResponse,
         FlushRunBufferRequest, FlushRunBufferResponse, NativeStreamConfig, OpenWriterRequest,
-        OpenWriterResponse, ReadRecordsRequest, RedisStreamConfig, WriteRecordsRequest,
-        WriteRecordsResponse,
+        OpenWriterResponse, ReadRecordsRequest, RedisStreamConfig, WorkflowReadRecordsRequest,
+        WriteRecordsRequest, WriteRecordsResponse,
     },
     redis::{RedisStore, RedisStoreOptions},
     service::StreamService,
-    store::Store,
+    store::{ReaderRun, Store},
     workflow::{FlushOptions, WorkflowHooks, WorkflowRuns},
     writer::Writers,
 };
@@ -281,6 +281,17 @@ impl StreamExtension {
                 .read_records(decode::<ReadRecordsRequest>(input)?)
                 .await?
                 .encode_to_vec(),
+            "WorkflowReadRecords" => {
+                let request = decode::<WorkflowReadRecordsRequest>(input)?;
+                let reader = ReaderRun {
+                    workflow_id: request.workflow_id,
+                    run_id: request.run_id,
+                };
+                service
+                    .read_records_by(request.read.unwrap_or_default(), Some(&reader))
+                    .await?
+                    .encode_to_vec()
+            }
             "DescribeStream" => service
                 .describe_stream(decode::<DescribeStreamRequest>(input)?)
                 .await?

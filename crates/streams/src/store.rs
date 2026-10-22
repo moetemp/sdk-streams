@@ -356,6 +356,15 @@ pub trait Store: Send + Sync + 'static {
     }
 }
 
+/// The Workflow run that reads a Stream.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ReaderRun {
+    /// The run's Workflow id.
+    pub workflow_id: String,
+    /// The run id.
+    pub run_id: String,
+}
+
 /// The Workflow run that owns a Stream, for a Store that keeps it.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct RunOwner<'a> {
@@ -368,8 +377,12 @@ pub struct RunOwner<'a> {
 /// Whole reads and describes, which a remote Store answers itself.
 #[async_trait::async_trait]
 pub trait RemoteReads: Send + Sync {
-    /// A long-polling read.
-    async fn read_records(&self, request: ReadRecordsRequest) -> StreamResult<ReadRecordsResponse>;
+    /// A long-polling read. `reader` is the Workflow run that reads, if one does.
+    async fn read_records(
+        &self,
+        request: ReadRecordsRequest,
+        reader: Option<&ReaderRun>,
+    ) -> StreamResult<ReadRecordsResponse>;
 
     /// The state of a Stream.
     async fn describe_stream(

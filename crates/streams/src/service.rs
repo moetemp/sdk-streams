@@ -14,8 +14,8 @@ use crate::{
     },
     record::{close_record, data_records, supersession},
     store::{
-        Batch, Capabilities, CreateOutcome, FORMAT_VERSION, Owner, RunOwner, Store, StreamState,
-        Withdrawal,
+        Batch, Capabilities, CreateOutcome, FORMAT_VERSION, Owner, ReaderRun, RunOwner, Store,
+        StreamState, Withdrawal,
     },
 };
 use prost::Message;
@@ -292,8 +292,17 @@ impl StreamService {
         &self,
         request: ReadRecordsRequest,
     ) -> StreamResult<ReadRecordsResponse> {
+        self.read_records_by(request, None).await
+    }
+
+    /// A read that a Workflow run makes. Only a remote Store gets the run.
+    pub(crate) async fn read_records_by(
+        &self,
+        request: ReadRecordsRequest,
+        reader: Option<&ReaderRun>,
+    ) -> StreamResult<ReadRecordsResponse> {
         if let Some(remote) = self.store.remote_reads() {
-            return remote.read_records(request).await;
+            return remote.read_records(request, reader).await;
         }
         let id = stream_id(request.stream.as_ref())?.to_string();
         let namespace = request.namespace.as_str();

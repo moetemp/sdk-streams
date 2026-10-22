@@ -102,3 +102,7 @@
   code, such as S108's Local Activities. `CreateStreamRequest.owner` (6) makes the Stream
   Workflow-owned, and `withdraw_run` on both withdraws a retry run's previous run. The proto
   also has `close_with_run` (7) and `ref` (8), which only the server reads.
+- Added `WorkflowReadRecords`, a `ReadRecords` that names the Workflow run that reads. On native
+  the run goes as a `WorkflowEvent` link on the direct call, so Retention keeps a nested
+  Workflow Stream from the lowest offset that the open run read (S109). Redis and memory read
+  as `ReadRecords` does.

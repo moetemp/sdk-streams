@@ -74,6 +74,17 @@ message WorkflowCall {
 message BufferWorkflowCallsResponse {
 }
 
+// Method `WorkflowReadRecords`, asynchronous. A `ReadRecords` that a Workflow run makes, for
+// example from its read Local Activity. It answers a `ReadRecordsResponse`. On native the server
+// gets the reading run as a link, and Retention never trims a nested Workflow Stream past the
+// lowest offset that the open run read. The other backends read as `ReadRecords` does.
+message WorkflowReadRecordsRequest {
+    temporal.api.streamservice.v1.ReadRecordsRequest read = 1;
+    // The reading run.
+    string workflow_id = 2;
+    string run_id = 3;
+}
+
 // Method `FlushRunBuffer`, asynchronous. Lang calls it before it runs a Local Activity, also
 // before each retry that Core runs in the same task. The crate writes the run's buffered
 // creates and appends in the epoch of the Workflow Task that dispatched the Local Activity, so

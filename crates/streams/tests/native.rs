@@ -639,3 +639,35 @@ async fn a_direct_read_long_polls_until_an_append() {
     assert_eq!(woke.records.len(), 1);
     assert!(waited < Duration::from_secs(5), "{waited:?}");
 }
+
+#[tokio::test]
+async fn a_workflow_read_names_its_run_and_reads_as_a_read_does() {
+    let Some(case) = case().await else {
+        return;
+    };
+    let workflow_id = format!("reader-{}", case.stream);
+    let run_id = case.start_workflow(&workflow_id).await;
+    let _: CreateStreamResponse = case
+        .call(
+            "CreateStream",
+            CreateStreamRequest {
+                namespace: case.namespace.clone(),
+                stream_id: case.stream.clone(),
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+    case.append(1, &["a"]).await.unwrap();
+    let request = temporalio_streams::proto::WorkflowReadRecordsRequest {
+        read: Some(ReadRecordsRequest {
+            namespace: case.namespace.clone(),
+            stream: case.stream_ref(),
+            ..Default::default()
+        }),
+        workflow_id,
+        run_id,
+    };
+    let read: ReadRecordsResponse = case.call("WorkflowReadRecords", request).await.unwrap();
+    assert_eq!(read.records.len(), 1);
+}
