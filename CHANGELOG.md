@@ -58,3 +58,7 @@
 - A Workflow batch with withdrawal facts and no Records goes in also after a close, and a read
   that reaches the close Record gives the `Superseded` items written after it just before the
   close Record. So a task that completes after a close still withdraws a failed task's Records.
+- A Workflow batch with withdrawal facts and no Records goes in also after a close, and a read
+  that reaches the close Record gives the `Superseded` items written after it just before the
+  close Record. So a task that completes after a close still withdraws a failed task's Records.
+  A Workflow batch with Records that a close refuses is followed by one with only the facts.
