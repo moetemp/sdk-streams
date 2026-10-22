@@ -68,6 +68,9 @@
   the methods `append-records`, `close`, `read-records` and `describe`. Each method takes its
   request without the `stream` field. `create-stream` returns the handle through
   `stream-result`. The proto messages and the operation names on the wire stay the same.
+- Added `nexus/stream-writer.wit`, the writer calls as an internal, client-only WIT interface.
+  `open-writer` returns `own<writer>`, a resource whose identity is `writer-id`, with
+  `write-records` and `close`. The epoch and the sequence stay in the crate.
 - Removed the buffered writer path: the `Publish` and `FlushWriter` calls and their messages,
   the interval flush, the buffer limit, the `stream_buffer_full` reason and its metric.
   `OpenWriterRequest` reserves `batch_interval` (4) and `max_buffered_records` (7). An SDK

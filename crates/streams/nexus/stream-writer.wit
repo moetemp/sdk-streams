@@ -1,0 +1,98 @@
+// Internal. Not a Temporal API, and no server serves it. The crate's Worker extension serves
+// these calls in process, backed by the messages in ../protos/temporal/sdk/streams/v1/
+// extension.proto. Lang reaches them through an extension-call transport, from Activities and
+// clients only. So the interface is client-only and has no endpoint, which keeps it out of the
+// System Nexus path. The writer keeps the Producer epoch and the sequence in the crate. This file
+// is the source. Each SDK copies it beside stream-service.wit and generates its bindings with
+// nexgen.
+package temporal:streams@1.0.0;
+
+world writer {
+  export stream-writer;
+}
+
+/// @nexus.service-name "temporal.sdk.streams.v1.StreamWriter"
+/// @nexus.client-only
+/// @nexus.experimental
+interface stream-writer {
+  use nexus:temporal-types/model@1.0.0.{duration, placeholder};
+  use temporal:nexus/stream-service@1.0.0.{append-record, producer, stream-ref};
+
+  /// @nexus.doc "Open a writer for one Producer of one Stream."
+  /// @nexus.proto "temporal.sdk.streams.v1.OpenWriterRequest"
+  record open-writer-request {
+    %stream: option<stream-ref>,
+    producer: option<producer>,
+    /// @nexus.doc "A write sends at most this many Records in one batch. Zero is 1000."
+    max-batch-size: option<s32>,
+    /// @nexus.doc "How long a write retries a Store failure. Empty is 10 s."
+    max-retry-duration: option<duration>,
+    /// @nexus.omit
+    namespace: placeholder,
+  }
+
+  /// @nexus.proto "temporal.sdk.streams.v1.WriteRecordsRequest"
+  record write-records-request {
+    writer-id: option<u64>,
+    records: list<append-record>,
+  }
+
+  /// @nexus.proto "temporal.sdk.streams.v1.WriteRecordsResponse"
+  record write-records-response {
+    /// @nexus.doc "The offset of the first Record. Zero when the request has no Record."
+    first-offset: option<s64>,
+    /// @nexus.doc "The offset of the last Record. Zero when the request has no Record."
+    last-offset: option<s64>,
+  }
+
+  /// @nexus.proto "temporal.sdk.streams.v1.CloseWriterRequest"
+  record close-writer-request {
+    writer-id: option<u64>,
+  }
+
+  /// @nexus.proto "temporal.sdk.streams.v1.CloseWriterResponse"
+  record close-writer-response {
+    /// @nexus.doc "The offset of the newest Record the writer wrote. Zero if it wrote none."
+    last-offset: option<s64>,
+  }
+
+  /// @nexus.proto "temporal.sdk.streams.v1.CloseWritersRequest"
+  record close-writers-request {
+  }
+
+  /// @nexus.proto "temporal.sdk.streams.v1.CloseWritersResponse"
+  record close-writers-response {
+    /// @nexus.doc "The writers that had failed."
+    failed: option<s32>,
+  }
+
+  // A writer never changes. Offsets are values that its methods return.
+  /// @nexus.doc "An open writer of one Producer. The crate keeps its epoch and sequence."
+  resource writer {
+    constructor(writer-id: u64);
+
+    /// @nexus.doc "Write Records at once. The answer has the first and the last offset."
+    /// @nexus.operation "write-records"
+    write-records: func(records: list<append-record>) -> write-records-response;
+
+    /// @nexus.doc "Wait for a write in flight, then drop the writer. The Stream stays open."
+    /// @nexus.operation "close-writer"
+    close: func() -> close-writer-response;
+  }
+
+  /// @nexus.proto "temporal.sdk.streams.v1.OpenWriterResponse"
+  type writer-result = own<writer>;
+
+  /// @nexus.operation name="OpenWriter"
+  open-writer: func(request: open-writer-request) -> writer-result;
+
+  /// @nexus.operation name="WriteRecords"
+  write-records: func(request: write-records-request) -> write-records-response;
+
+  /// @nexus.operation name="CloseWriter"
+  close-writer: func(request: close-writer-request) -> close-writer-response;
+
+  /// @nexus.doc "Drop every open writer, for example at shutdown."
+  /// @nexus.operation name="CloseWriters"
+  close-writers: func(request: close-writers-request) -> close-writers-response;
+}
