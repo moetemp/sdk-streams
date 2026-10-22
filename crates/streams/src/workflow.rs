@@ -774,6 +774,22 @@ impl StreamService {
             match self.count(appended) {
                 Ok(_) => written += records.len(),
                 Err(error) if dropped_for(error.reason) => {
+                    // The close drops the Records but not the task's facts, so a batch with only
+                    // the facts goes in. The refused batch left its number unused.
+                    if error.reason == Reason::Closed && task.facts.is_some() && !records.is_empty()
+                    {
+                        let facts = Batch {
+                            producer,
+                            sequence: first + n as i64,
+                            records: &[],
+                            withdrawal: withdrawal.clone(),
+                        };
+                        let settled =
+                            retried(task.deadline, || store.append(namespace, id, &facts)).await;
+                        if let Err(error) = self.count(settled) {
+                            warn!(stream = id, %error, "A late withdrawal did not go in");
+                        }
+                    }
                     let count = batches[n..].iter().map(Vec::len).sum();
                     self.metrics.records_dropped(count);
                     warn!(

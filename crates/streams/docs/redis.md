@@ -53,9 +53,14 @@ gives them only with the task's completion. The append script gets `*` as its co
 key. It then withdraws no task, flags nothing and keeps no `lf`, but it still fences, dedupes,
 adds the task to `ti` and applies a retry run's withdrawal. The task's completion sends the next
 batch of the same epoch with the facts, an empty one if it has no Records, so the withdrawal
-reaches the Stream then. Such a Workflow batch with facts and no Records goes in also after a
-close, so a failed task's Records are still withdrawn. A read that reaches the close Record
-gives the `SUPERSEDED` items written after it just before the close Record.
+reaches the Stream then.
+
+## Withdrawals after a close
+
+A Workflow batch with facts and no Records goes in also after a close, so a task that completes
+after a close still withdraws a failed task's Records. When a close refuses a Workflow batch with
+Records, the crate drops the Records and sends a batch with only the facts. A read that reaches
+the close Record gives the `SUPERSEDED` items written after it just before the close Record.
 
 ## Auto close
 
@@ -80,9 +85,9 @@ See the known limits for a Reader of a Stream with an auto close.
 
 ## Known limits
 
-- If a Stream closes between a failed Workflow Task and its retry, the failed task's Records
-  stay visible. A close Record ends every read, so the retry's withdrawal can't reach a Reader
-  after it. The close can be an auto close or a client close.
+- Offsets inside one page may not increase across a close: `SUPERSEDED` items written after
+  the close come just before the close Record, with higher offsets. A Reader resumes from the
+  page's `next_offset`, never from the offset of the last item.
 - A Reader of a Stream with an auto close needs `+evalsha` with write access to the Stream's
   keys, since its read or describe may apply a due close. A Reader with read-only access gets
   an error from that step.

@@ -909,3 +909,37 @@ async fn a_completion_after_a_close_still_withdraws_a_failed_task() {
         assert_eq!(run.visible().await, (texts(&["f2"]), true));
     }
 }
+
+#[tokio::test]
+async fn a_completion_with_records_after_a_close_still_withdraws_a_failed_task() {
+    for run in runs().await {
+        run.activation(vec![run.create(), run.publish(&["f"])])
+            .unwrap();
+        run.complete(&run.task(3, 1), false).await.unwrap();
+        let close = CloseStreamRequest {
+            namespace: run.namespace.clone(),
+            stream: run.stream_ref(),
+            producer: Some(Producer {
+                kind: ProducerKind::Client as i32,
+                id: client_producer_id("me", "closer"),
+                epoch: Some(ProducerEpoch {
+                    attempt: 1,
+                    ..Default::default()
+                }),
+                run_id: String::new(),
+            }),
+            ..Default::default()
+        };
+        run.ext
+            .call_async("CloseStream".to_string(), close.encode_to_vec())
+            .await
+            .unwrap();
+        // The retry's Records are dropped, but its facts still withdraw task [3].
+        run.activation(vec![run.create(), run.publish(&["f2"])])
+            .unwrap();
+        run.complete(&run.task(7, 1).failed(&[3]), true)
+            .await
+            .unwrap();
+        assert_eq!(run.visible().await, (vec![], true));
+    }
+}
