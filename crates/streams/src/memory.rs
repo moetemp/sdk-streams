@@ -21,7 +21,7 @@ use std::{
 use tokio::{sync::Notify, time::Instant};
 
 /// The close Record of an auto close, as `AUTO_CLOSE_RECORD` in `lib.lua`.
-const AUTO_CLOSE_RECORD: &[u8] = b"\x08\x03";
+const AUTO_CLOSE_RECORD: &[u8] = b"\x08\x03\x48\x01";
 
 /// The most sequence numbers of one millisecond, as an offset packs them in 20 bits.
 const SEQ_LIMIT: u64 = 1 << crate::offset::SEQ_BITS;

@@ -8,14 +8,14 @@ use std::{
     sync::Arc,
     time::{Duration, Instant},
 };
-use temporalio_common::protos::temporal::api::common::v1::Payload;
+use temporalio_common::protos::temporal::api::{common::v1::Payload, failure::v1::Failure};
 use temporalio_sdk_core::{ExtensionError, WorkerExtension};
 use temporalio_streams::{
     MemoryStreamExtension, RedisStreamExtension,
     epoch::withdraws,
     ids::{activity_producer_id, client_producer_id},
     proto::{
-        AppendRecord, AppendRecordsRequest, AppendRecordsResponse, CloseStreamRequest,
+        AppendRecord, AppendRecordsRequest, AppendRecordsResponse, CloseStatus, CloseStreamRequest,
         CloseStreamResponse, CreateStreamRequest, CreateStreamResponse, DescribeStreamRequest,
         DescribeStreamResponse, Producer, ProducerEpoch, ProducerKind, ReadRecordsRequest,
         ReadRecordsResponse, ReadStart, RedisStreamConfig, StreamErrorDetails, StreamRecordKind,
@@ -1070,5 +1070,42 @@ async fn a_failed_task_before_the_last_completed_one_is_withdrawn_by_its_id() {
         let superseded = read.records[1].supersession.as_ref().unwrap();
         assert!(withdraws(superseded, &read.records[0]));
         assert!(!withdraws(superseded, &read.records[2]));
+    }
+}
+
+#[tokio::test]
+async fn a_close_record_gives_its_status_and_a_caller_cant_terminate() {
+    for case in cases().await {
+        case.create(None).await.unwrap();
+        let close = |status: CloseStatus, failure: Option<Failure>| CloseStreamRequest {
+            namespace: case.namespace.clone(),
+            stream: case.stream(),
+            producer: Some(client(1)),
+            failure,
+            status: status as i32,
+            ..Default::default()
+        };
+        for status in [CloseStatus::Terminated, CloseStatus::TimedOut] {
+            let error =
+                call::<_, CloseStreamResponse>(&case.ext, "CloseStream", close(status, None))
+                    .await
+                    .unwrap_err();
+            assert_eq!(
+                (error.code, reason(&error).as_str()),
+                (Code::InvalidArgument, "stream_invalid")
+            );
+        }
+        let failure = Failure {
+            message: "boom".to_string(),
+            ..Default::default()
+        };
+        let failed = close(CloseStatus::Unspecified, Some(failure));
+        call::<_, CloseStreamResponse>(&case.ext, "CloseStream", failed)
+            .await
+            .unwrap();
+        let read = case.read(ReadRecordsRequest::default()).await.unwrap();
+        let record = read.records.last().unwrap();
+        assert_eq!(record.close_status, CloseStatus::Failed as i32);
+        assert_eq!(record.close_failure.as_ref().unwrap().message, "boom");
     }
 }

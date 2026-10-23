@@ -13,7 +13,7 @@ use crate::{
         Producer, ProducerKind, ReadRecordsRequest, ReadRecordsResponse, ReadStart, StreamRecord,
         StreamRecordKind, StreamRef, StreamStatus, Supersession, WorkflowTaskEpoch,
     },
-    record::{close_record, data_records, supersession},
+    record::{caller_status, close_record, data_records, supersession},
     store::{
         Batch, Capabilities, CreateOutcome, FORMAT_VERSION, Owner, Store, StreamState, TaskFacts,
         Withdrawal,
@@ -271,7 +271,8 @@ impl StreamService {
         let stream = request.stream.clone().unwrap_or_default();
         let producer = close_producer(request.producer.as_ref())?;
         self.store.capabilities().require(Capabilities::CLOSE)?;
-        let record = close_record(producer, request.result, request.failure);
+        let status = caller_status(request.status, request.failure.is_some())?;
+        let record = close_record(producer, request.result, request.failure, status);
         self.store
             .close(&request.namespace, &stream, producer, &record)
             .await?;

@@ -49,13 +49,14 @@ mod tests {
 
     #[test]
     fn the_auto_close_record_is_an_encoded_close_record() {
-        use crate::proto::{StreamRecord, StreamRecordKind};
+        use crate::proto::{CloseStatus, StreamRecord, StreamRecordKind};
         use prost::Message;
         let record = StreamRecord {
             kind: StreamRecordKind::Close as i32,
+            close_status: CloseStatus::Completed as i32,
             ..Default::default()
         };
-        assert_eq!(record.encode_to_vec(), b"\x08\x03");
-        assert!(LIB.contains("local AUTO_CLOSE_RECORD = '\\8\\3'"));
+        assert_eq!(record.encode_to_vec(), b"\x08\x03\x48\x01");
+        assert!(LIB.contains("local AUTO_CLOSE_RECORD = '\\8\\3\\72\\1'"));
     }
 }

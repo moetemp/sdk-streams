@@ -670,6 +670,10 @@ async fn an_auto_close_closes_a_quiet_stream_on_its_next_write() {
         );
         assert!(record.producer.is_none());
         assert!(record.close_result.is_none() && record.close_failure.is_none());
+        assert_eq!(
+            record.close_status,
+            temporalio_streams::proto::CloseStatus::Completed as i32
+        );
         assert_eq!(target.texts().await, ["a", "b", "c"]);
         let closed = target.close(&p).await.unwrap();
         assert!(closed.already);

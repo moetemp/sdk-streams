@@ -129,6 +129,17 @@ interface stream-service {
     run-id: option<string>,
   }
 
+  /// @nexus.doc "How a Stream closed. Only the owner's end on the server terminates or times out."
+  /// @nexus.proto "temporal.api.streamservice.v1.CloseStatus"
+  enum close-status {
+    close-status-unspecified,
+    close-status-completed,
+    close-status-failed,
+    close-status-canceled,
+    close-status-terminated,
+    close-status-timed-out,
+  }
+
   // An offset is the Redis entry id packed as ms << 20 | seq. It is ordered and unique in one
   // Stream, and it is sparse: offsets have gaps, so they don't count Records. A read names its
   // Stream, so the read checks the offset against that Stream.
@@ -149,6 +160,8 @@ interface stream-service {
     /// @nexus.doc "Set on a close Record with an outcome."
     close-result: option<payload>,
     close-failure: option<failure>,
+    /// @nexus.doc "Set on a close Record. The result or the failure stays next to it."
+    close-status: option<close-status>,
   }
 
   /// @nexus.doc "Create a Stream idempotently. ALREADY_EXISTS for another Retention or auto-close."
@@ -217,6 +230,8 @@ interface stream-service {
     producer: option<producer>,
     %result: option<payload>,
     failure: option<failure>,
+    /// @nexus.doc "Empty is completed, or failed with a failure. A caller may set canceled."
+    status: option<close-status>,
     /// @nexus.doc "Workflow only. The previous completed Workflow Task of the run."
     previous-completed-task: option<workflow-task-epoch>,
     /// @nexus.doc "Workflow only. Failed or timed out tasks since this run's last flush here."

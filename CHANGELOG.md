@@ -116,3 +116,7 @@
   `CloseStreamRequest.status`, `ReadRecordsRequest.last`, `max_bytes` and `floor_from`, and
   `ReadRecordsResponse.continue_as_new_suggested`. The Stream service proto equals the api's
   copy byte for byte.
+- A close Record has `close_status`. A close with no status is `COMPLETED`, or `FAILED` with a
+  failure, and a caller may set `CANCELED`. A caller's `TERMINATED` or `TIMED_OUT` fails with
+  `stream_invalid`, since only the owner's end on the server sets them. An auto close is
+  `COMPLETED`, so its Record is `08 03 48 01`. The result and the failure stay.

@@ -176,9 +176,10 @@ local function add(log, fields)
   return redis.call('XADD', log, '*', unpack(fields))
 end
 
--- The close Record of an auto close: an encoded StreamRecord with only kind = CLOSE (3). It has
--- no Producer, result or failure, so every script can write it with no argument.
-local AUTO_CLOSE_RECORD = '\8\3'
+-- The close Record of an auto close: an encoded StreamRecord with kind = CLOSE (3) and
+-- close_status = COMPLETED (field 9, 1). It has no Producer, result or failure, so every script
+-- can write it with no argument.
+local AUTO_CLOSE_RECORD = '\8\3\72\1'
 
 -- Closes an open Stream whose auto close period passed since its last append, so the call that
 -- finds it late acts as if the close came on time. Answers true when the Stream is closed after

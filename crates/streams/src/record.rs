@@ -2,7 +2,7 @@
 
 use crate::{
     Reason, StreamError, StreamResult,
-    proto::{AppendRecord, Producer, StreamRecord, StreamRecordKind, Supersession},
+    proto::{AppendRecord, CloseStatus, Producer, StreamRecord, StreamRecordKind, Supersession},
     store::{MAX_BATCH_BYTES, MAX_RECORD_BYTES},
 };
 use prost::Message;
@@ -57,15 +57,33 @@ pub(crate) fn close_record(
     producer: &Producer,
     result: Option<Payload>,
     failure: Option<Failure>,
+    status: CloseStatus,
 ) -> Vec<u8> {
     StreamRecord {
         kind: StreamRecordKind::Close as i32,
         producer: Some(producer.clone()),
         close_result: result,
         close_failure: failure,
+        close_status: status as i32,
         ..Default::default()
     }
     .encode_to_vec()
+}
+
+/// The status of a caller's close. Only the owner's end on the server terminates or times out a
+/// Stream, so a reader can trust those two.
+pub(crate) fn caller_status(status: i32, failed: bool) -> StreamResult<CloseStatus> {
+    match CloseStatus::try_from(status) {
+        Ok(CloseStatus::Unspecified) if failed => Ok(CloseStatus::Failed),
+        Ok(CloseStatus::Unspecified) => Ok(CloseStatus::Completed),
+        Ok(CloseStatus::Terminated | CloseStatus::TimedOut) => Err(StreamError::invalid(
+            "Only the owner's end terminates or times out a Stream",
+        )),
+        Ok(status) => Ok(status),
+        Err(_) => Err(StreamError::invalid(format!(
+            "The close status {status} is unknown"
+        ))),
+    }
 }
 
 /// The facts a `Superseded` item of this batch gives the Reader.

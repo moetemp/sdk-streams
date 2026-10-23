@@ -65,10 +65,11 @@ skips the rule. A Stream that the run never writes again keeps its orphans.
 
 A Stream with `ac` closes with no result when `la + ac` passes. Nothing runs at that time. The
 next create, append, close or auto close step finds it due and first writes the close Record
-`08 03` (a `StreamRecord` with only `kind = CLOSE`), then acts on the closed Stream. So an append
-is refused with `stream_closed`, and a close answers that the Stream was already closed. The
-read script writes nothing, so a read or a describe that finds the close due runs the auto close
-step, then reads again. A long-polling read wakes when the period passes.
+`08 03 48 01` (a `StreamRecord` with only `kind = CLOSE` and `close_status = COMPLETED`), then
+acts on the closed Stream. So an append is refused with `stream_closed`, and a close answers that
+the Stream was already closed. The read script writes nothing, so a read or a describe that finds
+the close due runs the auto close step, then reads again. A long-polling read wakes when the
+period passes.
 
 ## Close
 
