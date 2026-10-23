@@ -591,9 +591,11 @@ impl Store for MemoryStore {
             let records = batch.records.len() as u64;
             keys.check_ids_fit(now, records + 2)?;
 
-            let mut flagged = keys
-                .get(&format!("h{suffix}"))
-                .is_some_and(|holds| holds.as_str() < epoch.as_str());
+            // A client's newer epoch only fences, as in `append.lua`.
+            let mut flagged = producer.kind != ProducerKind::Client as i32
+                && keys
+                    .get(&format!("h{suffix}"))
+                    .is_some_and(|holds| holds.as_str() < epoch.as_str());
             if keys.withdraw_run(&withdrawn_run) {
                 flagged = true;
             }

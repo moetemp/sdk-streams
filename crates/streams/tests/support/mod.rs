@@ -30,12 +30,52 @@ pub(crate) use server::server_url;
 
 static NEXT: AtomicU64 = AtomicU64::new(0);
 
+/// What a case needs beyond the Store's calls on its own Stream. A case runs on every backend
+/// that gives all it needs, so one suite covers each backend as far as its guarantees go. Each
+/// case's comment says its guarantee and what it needs.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct Needs(u8);
+
+impl Needs {
+    /// Only the Store's calls on the Stream and reads of its Records.
+    pub(crate) const CALLS: Self = Self(0);
+    /// The Store's own answers past the API: a conflict's stored Retention, `resend`, `flagged`,
+    /// and a close's offset and `already`.
+    pub(crate) const STORE_ANSWERS: Self = Self(1);
+    /// The keys under the calls: meta fields, TTLs and raw log entries, and the Store's log calls
+    /// `read`, `read_back` and `wait_after`.
+    pub(crate) const RAW_KEYS: Self = Self(1 << 1);
+    /// Producers, owners and runs as sent. The server checks them against its executions, so a
+    /// case with made-up runs, or an Activity with no task token, can't run there.
+    pub(crate) const UNCHECKED: Self = Self(1 << 2);
+    /// A Retention or an auto close of a few hundred ms.
+    pub(crate) const SHORT_TIMES: Self = Self(1 << 3);
+    /// The runtime built from the crate's own config, such as a backend name.
+    pub(crate) const OWN_CONFIG: Self = Self(1 << 4);
+    /// The Store keys on the id only, so the owner fields of a ref don't route a call.
+    pub(crate) const ID_KEYS: Self = Self(1 << 5);
+    /// Every need. Redis and memory give it.
+    pub(crate) const ALL: Self = Self(u8::MAX);
+
+    /// Both needs.
+    pub(crate) const fn and(self, other: Self) -> Self {
+        Self(self.0 | other.0)
+    }
+
+    /// Whether this set gives every need of `needs`.
+    pub(crate) const fn gives(self, needs: Self) -> bool {
+        self.0 & needs.0 == needs.0
+    }
+}
+
 /// One Stream on one server, fresh for each case.
 pub(crate) struct Target {
     pub(crate) store: Arc<dyn Store>,
     pub(crate) backend: Backend,
     pub(crate) namespace: String,
     pub(crate) stream: String,
+    /// What the backend gives. A case checks it before a step that needs more than it asked for.
+    pub(crate) gives: Needs,
 }
 
 /// The Store under a target, for the steps a test takes under the Store's calls.
@@ -60,12 +100,19 @@ fn unique() -> String {
 }
 
 /// A Store on each server that is set, standalone first, then the cluster, then the memory
-/// Store.
+/// Store, for a case that needs all that they give.
 pub(crate) async fn stores() -> Vec<Target> {
-    stores_with(|options| options).await
+    stores_for(Needs::ALL).await
 }
 
-/// Like [stores], with the options changed.
+/// The Stores of every backend that gives `needs`.
+pub(crate) async fn stores_for(needs: Needs) -> Vec<Target> {
+    let mut targets = stores_with(|options| options).await;
+    targets.retain(|target| target.gives.gives(needs));
+    targets
+}
+
+/// Like [stores], with the Redis options changed.
 pub(crate) async fn stores_with(
     change: impl Fn(RedisStoreOptions) -> RedisStoreOptions,
 ) -> Vec<Target> {
@@ -91,6 +138,7 @@ pub(crate) async fn stores_with(
             },
             namespace: format!("ns-{unique}"),
             stream: format!("wf:{unique}"),
+            gives: Needs::ALL,
         });
     }
     // The memory Store runs the same cases, so both Stores keep one set of rules.
@@ -102,6 +150,7 @@ pub(crate) async fn stores_with(
         backend: Backend::Memory(memory),
         namespace: format!("ns-{unique}"),
         stream: format!("wf:{unique}"),
+        gives: Needs::ALL,
     });
     targets
 }
@@ -457,6 +506,29 @@ fn node_of(slots: &redis::Value, slot: u16) -> Option<String> {
         }
     }
     None
+}
+
+/// One runtime under test, the namespace its cases use, and what its backend gives.
+pub(crate) struct Runtime {
+    pub(crate) ext: Arc<StreamExtension>,
+    /// The namespace of a backend that has fixed ones, such as the server. `None` lets the case
+    /// make one of its own.
+    pub(crate) namespace: Option<String>,
+    pub(crate) gives: Needs,
+}
+
+/// A runtime on each backend that is set and gives `needs`, Redis and memory first.
+pub(crate) async fn runtimes(needs: Needs) -> Vec<Runtime> {
+    let mut runtimes: Vec<_> = extensions(|_| {}, true)
+        .into_iter()
+        .map(|ext| Runtime {
+            ext,
+            namespace: None,
+            gives: Needs::ALL,
+        })
+        .collect();
+    runtimes.retain(|runtime| runtime.gives.gives(needs));
+    runtimes
 }
 
 /// An extension on each Redis server that is set, with the config changed by `change`, and on

@@ -1,8 +1,8 @@
 syntax = "proto3";
 
-// The messages of the crate's own extension calls, next to the five Stream service operations.
-// Lang sends them through the bridge's generic extension call, by the method name in each
-// comment. Field numbers are part of the contract with every SDK.
+// The messages of the crate's own calls, next to the five Stream service operations. Lang sends
+// them through the bridge's call on the runtime object, by the method name in each comment. Field
+// numbers are part of the contract with every SDK.
 package temporal.sdk.streams.v1;
 
 import "google/protobuf/duration.proto";
@@ -33,7 +33,10 @@ message RedisStreamConfig {
 
 // Method `OpenWriter`, asynchronous. A writer for an Activity or a client Producer, which keeps
 // its epoch and `sequence` order. A writer of an Activity attempt above 1 first sends an empty
-// batch, so the new epoch withdraws the earlier attempt's Records.
+// batch, so the new epoch withdraws the earlier attempt's Records. The handles of one Producer
+// epoch on one Stream share one writer: each open adds a handle, and each `CloseWriter` or
+// `FreeWriter` releases one. The batches of every writer in a process take their `sequence` from
+// one counter, so a writer opened again after its close goes on above its earlier batches.
 message OpenWriterRequest {
     string namespace = 1;
     temporal.api.streamservice.v1.StreamRef stream = 2;
@@ -71,8 +74,9 @@ message WriteRecordsResponse {
     int64 last_offset = 2;
 }
 
-// Method `CloseWriter`, asynchronous. Waits for a write in flight, then drops the writer. It
-// doesn't close the Stream. It fails with the writer's error if a write failed.
+// Method `CloseWriter`, asynchronous. Releases one handle of the writer. The last handle waits for
+// a write in flight, then drops the writer. It doesn't close the Stream. It fails with the
+// writer's error if a write failed.
 message CloseWriterRequest {
     uint64 writer_id = 1;
 }
@@ -80,6 +84,16 @@ message CloseWriterRequest {
 message CloseWriterResponse {
     // The offset of the newest Record the writer wrote. Zero if it wrote none.
     int64 last_offset = 1;
+}
+
+// Method `FreeWriter`. Releases one handle of the writer with no wait, for a handle that lang
+// drops, such as from a finalizer. The bridge may also call it with no runtime. A write in flight
+// still ends. The writer's error, if any, is lost.
+message FreeWriterRequest {
+    uint64 writer_id = 1;
+}
+
+message FreeWriterResponse {
 }
 
 // Method `CloseWriters`, asynchronous. Drops every open writer, for example when the plugin's
