@@ -39,6 +39,11 @@ interface stream-service {
     first-execution-run-id: option<string>,
     /// @nexus.doc "Registered backend name, empty for the default. The Store never reads it."
     backend: option<string>,
+    // A Standalone Activity's owner fields. Native only. Brook's Stores don't read them.
+    /// @nexus.omit
+    activity-id: placeholder,
+    /// @nexus.omit
+    activity-run-id: placeholder,
   }
 
   /// @nexus.proto "temporal.api.streamservice.v1.ProducerKind"
@@ -183,6 +188,9 @@ interface stream-service {
     %ref: option<stream-ref>,
     /// @nexus.omit
     namespace: placeholder,
+    // Native only. Brook's Stores don't read it.
+    /// @nexus.omit
+    task-token: placeholder,
   }
 
   /// @nexus.proto "temporal.api.streamservice.v1.StreamStatus"
@@ -213,6 +221,11 @@ interface stream-service {
     withdraw-run: option<string>,
     /// @nexus.omit
     namespace: placeholder,
+    // Native only. Brook's Stores don't read them.
+    /// @nexus.omit
+    defer-withdrawal: placeholder,
+    /// @nexus.omit
+    task-token: placeholder,
   }
 
   /// @nexus.proto "temporal.api.streamservice.v1.AppendRecordsResponse"
@@ -238,6 +251,11 @@ interface stream-service {
     failed-tasks: list<s64>,
     /// @nexus.omit
     namespace: placeholder,
+    // Native only. Brook's Stores don't read them.
+    /// @nexus.omit
+    withdraw-run: placeholder,
+    /// @nexus.omit
+    task-token: placeholder,
   }
 
   /// @nexus.proto "temporal.api.streamservice.v1.CloseStreamResponse"
@@ -276,6 +294,13 @@ interface stream-service {
     max-bytes: option<s64>,
     /// @nexus.omit
     namespace: placeholder,
+    // Native only. Brook's Stores refuse to-offset and wake-only.
+    /// @nexus.omit
+    to-offset: placeholder,
+    /// @nexus.omit
+    wake-only: placeholder,
+    /// @nexus.omit
+    floor-from: placeholder,
   }
 
   /// @nexus.proto "temporal.api.streamservice.v1.ReadRecordsResponse"
@@ -286,6 +311,9 @@ interface stream-service {
     next-offset: option<s64>,
     /// @nexus.doc "True after the close Record. No later read gives a Record."
     done: option<bool>,
+    // Native only. Brook's Stores never set it.
+    /// @nexus.omit
+    continue-as-new-suggested: placeholder,
   }
 
   /// @nexus.proto "temporal.api.streamservice.v1.DescribeStreamRequest"
@@ -366,8 +394,7 @@ interface stream-service {
   /// @nexus.operation name="CreateStream"
   create-stream: func(request: create-stream-request) -> create-stream-result;
 
-  /// @nexus.doc
-  ///   "In Workflow code, Brook buffers this call in the run, and the facade drops the answer."
+  /// @nexus.doc "Append one batch. Workflow code makes the call from a Local Activity."
   /// @nexus.operation name="AppendRecords"
   append-records: func(request: append-records-request) -> append-records-response;
 
@@ -376,7 +403,8 @@ interface stream-service {
 
   // The long poll moves from-offset, so nexgen also reads its pages as one async iterator. A WIT
   // stream can't cross a Nexus call, so the read stays request and response on the wire.
-  /// @nexus.doc "Not for Workflow code in Brook. A long poll. NOT_FOUND for an uncreated Stream."
+  /// @nexus.doc
+  ///   "A long poll. NOT_FOUND for an uncreated Stream. Workflow code reads from a Local Activity."
   /// @nexus.operation name="ReadRecords"
   /// @nexus.long-poll
   ///   wait-field="wait"
