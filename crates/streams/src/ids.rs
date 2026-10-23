@@ -179,8 +179,9 @@ pub mod fields {
         format!("e|{kind}|{producer_id}")
     }
 
-    /// The last batch of a Producer's newest epoch, `<epoch key>|<sequence>|<first>|<last>`, the
-    /// dedupe key and the Positions it got.
+    /// The last batch of a Producer's newest epoch,
+    /// `<epoch key>|<sequence>|<first>|<last>|<digest>`, the dedupe key, the Positions it got and
+    /// the content digest that a resend must match.
     pub fn dedupe(kind: i32, producer_id: &str) -> String {
         format!("d|{kind}|{producer_id}")
     }
@@ -188,16 +189,6 @@ pub mod fields {
     /// The newest epoch key of a Producer that still has Records in the Stream.
     pub fn holds(kind: i32, producer_id: &str) -> String {
         format!("h|{kind}|{producer_id}")
-    }
-
-    /// The task keys of a run and its Local Activities that have Records in the Stream.
-    pub fn task_index(run_id: &str) -> String {
-        format!("ti|{}", encode_part(run_id))
-    }
-
-    /// The task keys of a run that a `Superseded` withdrew.
-    pub fn withdrawn_tasks(run_id: &str) -> String {
-        format!("wt|{}", encode_part(run_id))
     }
 
     /// Set when a Producer of the run wrote a Record to the Stream.

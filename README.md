@@ -4,8 +4,8 @@ Internal and experimental.
 
 `temporalio-streams` is the Stream runtime for Temporal SDKs. It serves the Stream service of the
 Brook API proposal on the customer's Redis. The SDKs link this crate into their bridges. Lang
-calls it through the bridge's generic extension calls, and Core calls its Workflow Task
-interceptor. Temporal Core holds no stream code.
+calls it through the bridge's generic extension calls. A Workflow writes through a Local Activity
+per call, on the same calls. Temporal Core holds no stream code.
 
 ## Stage pins
 
@@ -15,6 +15,8 @@ commit must equal the `sdk-core` submodule commit of the sdk-python stage that l
 | Stage | sdk-streams branch | sdk-rust branch |
 |---|---|---|
 | Brook v3 | `moe/brook/v3/s1-protos-and-ids` and up | `moe/brook/v3/c4-local-activity-workflow-task` `3a9203ac` |
+| Brook v4 | `moe/brook/v4/s20-orphan-local-activities` and up | `moe/brook/v4/c6-local-activity-task-history` `32ba79d6` |
+| Jetty v2 | `moe/jetty/v2/k1-service-store` and up | `moe/jetty/v2/c8-no-workflow-task-hooks` `66a7c85c` |
 
 ## Linking from a lang bridge
 

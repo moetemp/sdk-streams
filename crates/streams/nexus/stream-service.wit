@@ -39,6 +39,11 @@ interface stream-service {
     first-execution-run-id: option<string>,
     /// @nexus.doc "Registered backend name, empty for the default. The Store never reads it."
     backend: option<string>,
+    // A Standalone Activity's owner fields. Native only. Brook's Stores don't read them.
+    /// @nexus.omit
+    activity-id: placeholder,
+    /// @nexus.omit
+    activity-run-id: placeholder,
   }
 
   /// @nexus.proto "temporal.api.streamservice.v1.ProducerKind"
@@ -129,6 +134,17 @@ interface stream-service {
     run-id: option<string>,
   }
 
+  /// @nexus.doc "How a Stream closed. Only the owner's end on the server terminates or times out."
+  /// @nexus.proto "temporal.api.streamservice.v1.CloseStatus"
+  enum close-status {
+    close-status-unspecified,
+    close-status-completed,
+    close-status-failed,
+    close-status-canceled,
+    close-status-terminated,
+    close-status-timed-out,
+  }
+
   // An offset is the Redis entry id packed as ms << 20 | seq. It is ordered and unique in one
   // Stream, and it is sparse: offsets have gaps, so they don't count Records. A read names its
   // Stream, so the read checks the offset against that Stream.
@@ -149,6 +165,8 @@ interface stream-service {
     /// @nexus.doc "Set on a close Record with an outcome."
     close-result: option<payload>,
     close-failure: option<failure>,
+    /// @nexus.doc "Set on a close Record. The result or the failure stays next to it."
+    close-status: option<close-status>,
   }
 
   /// @nexus.doc "Create a Stream idempotently. ALREADY_EXISTS for another Retention or auto-close."
@@ -162,8 +180,17 @@ interface stream-service {
     withdraw-run: option<string>,
     /// @nexus.doc "Close with no result after this long with no append. Empty never auto-closes."
     auto-close: option<duration>,
+    /// @nexus.doc "The Workflow run that owns the Stream. The Workflow transport sets it."
+    owner: option<producer>,
+    /// @nexus.doc "Close with the owner run chain's result when it closes. Native only."
+    close-with-run: option<bool>,
+    /// @nexus.doc "The Stream's ref, with the owner fields."
+    %ref: option<stream-ref>,
     /// @nexus.omit
     namespace: placeholder,
+    // Native only. Brook's Stores don't read it.
+    /// @nexus.omit
+    task-token: placeholder,
   }
 
   /// @nexus.proto "temporal.api.streamservice.v1.StreamStatus"
@@ -186,14 +213,19 @@ interface stream-service {
     /// @nexus.doc "The batch number in this epoch, 1 or more. It is part of the dedupe key."
     sequence: option<s64>,
     records: list<append-record>,
-    /// @nexus.doc "Workflow only. The previous completed Workflow Task of the run."
+    /// @nexus.doc "Local Activity only. The run's last completed Workflow Task."
     previous-completed-task: option<workflow-task-epoch>,
-    /// @nexus.doc "Workflow only. Failed or timed out tasks since this run's last flush here."
+    /// @nexus.doc "Local Activity only. The run's failed or timed out Workflow Tasks."
     failed-tasks: list<s64>,
     /// @nexus.doc "Retry run only. The previous run, whose Records this withdraws."
     withdraw-run: option<string>,
+    /// @nexus.doc "Workflow only. The batch before a Local Activity. It withdraws no task."
+    defer-withdrawal: option<bool>,
     /// @nexus.omit
     namespace: placeholder,
+    // An Activity's task token on the native backend. The Activity transport sets it.
+    /// @nexus.omit
+    task-token: placeholder,
   }
 
   /// @nexus.proto "temporal.api.streamservice.v1.AppendRecordsResponse"
@@ -211,12 +243,19 @@ interface stream-service {
     producer: option<producer>,
     %result: option<payload>,
     failure: option<failure>,
+    /// @nexus.doc "Empty is completed, or failed with a failure. A caller may set canceled."
+    status: option<close-status>,
     /// @nexus.doc "Workflow only. The previous completed Workflow Task of the run."
     previous-completed-task: option<workflow-task-epoch>,
     /// @nexus.doc "Workflow only. Failed or timed out tasks since this run's last flush here."
     failed-tasks: list<s64>,
+    /// @nexus.doc "Retry run only. The previous run, whose Records this withdraws."
+    withdraw-run: option<string>,
     /// @nexus.omit
     namespace: placeholder,
+    // An Activity's task token on the native backend. The Activity transport sets it.
+    /// @nexus.omit
+    task-token: placeholder,
   }
 
   /// @nexus.proto "temporal.api.streamservice.v1.CloseStreamResponse"
@@ -249,8 +288,19 @@ interface stream-service {
     wait: option<duration>,
     /// @nexus.doc "How long to wait for an uncreated Stream. Empty fails at once. At most 60 s."
     create-wait: option<duration>,
+    /// @nexus.doc "Read the newest this many Records, oldest first. No from-offset. No wait."
+    last: option<s32>,
+    /// @nexus.doc "The most Record bytes in a page. A larger Record still comes alone."
+    max-bytes: option<s64>,
     /// @nexus.omit
     namespace: placeholder,
+    // Native only. Brook's Stores refuse to-offset and wake-only.
+    /// @nexus.omit
+    to-offset: placeholder,
+    /// @nexus.omit
+    wake-only: placeholder,
+    /// @nexus.omit
+    floor-from: placeholder,
   }
 
   /// @nexus.proto "temporal.api.streamservice.v1.ReadRecordsResponse"
@@ -261,6 +311,9 @@ interface stream-service {
     next-offset: option<s64>,
     /// @nexus.doc "True after the close Record. No later read gives a Record."
     done: option<bool>,
+    // Native only. Brook's Stores never set it.
+    /// @nexus.omit
+    continue-as-new-suggested: placeholder,
   }
 
   /// @nexus.proto "temporal.api.streamservice.v1.DescribeStreamRequest"
@@ -341,8 +394,7 @@ interface stream-service {
   /// @nexus.operation name="CreateStream"
   create-stream: func(request: create-stream-request) -> create-stream-result;
 
-  /// @nexus.doc
-  ///   "In Workflow code, Brook buffers this call in the run, and the facade drops the answer."
+  /// @nexus.doc "Append one batch. Workflow code makes the call from a Local Activity."
   /// @nexus.operation name="AppendRecords"
   append-records: func(request: append-records-request) -> append-records-response;
 
@@ -351,7 +403,8 @@ interface stream-service {
 
   // The long poll moves from-offset, so nexgen also reads its pages as one async iterator. A WIT
   // stream can't cross a Nexus call, so the read stays request and response on the wire.
-  /// @nexus.doc "Not for Workflow code in Brook. A long poll. NOT_FOUND for an uncreated Stream."
+  /// @nexus.doc
+  ///   "A long poll. NOT_FOUND for an uncreated Stream. Workflow code reads from a Local Activity."
   /// @nexus.operation name="ReadRecords"
   /// @nexus.long-poll
   ///   wait-field="wait"

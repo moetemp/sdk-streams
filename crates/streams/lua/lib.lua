@@ -28,6 +28,25 @@ local function check_live(meta, version, now)
   return nil
 end
 
+-- Nil when the Producer kind may close the Stream, or the refusal. A Workflow-owned Stream closes
+-- only from its run chain, as a Workflow (2 is a Local Activity, 1 the run itself), and a ref that
+-- names another chain is refused. Any other Stream closes only from a client (4). Redis can't tie
+-- a run to its chain, so a run of another chain that holds this chain's ref still passes.
+local function check_owner(meta, kind, chain)
+  if redis.call('HGET', meta, 'own') == 'wf' then
+    if kind ~= '1' and kind ~= '2' then
+      return refuse('NOT_OWNER', 'only the owner run chain closes a Workflow-owned Stream')
+    end
+    local owner_chain = redis.call('HGET', meta, 'oc')
+    if owner_chain and chain ~= '' and chain ~= owner_chain then
+      return refuse('NOT_OWNER', 'the ref names another run chain than the owner')
+    end
+  elseif kind ~= '4' then
+    return refuse('NOT_OWNER', 'only a client closes a Stream that a client created')
+  end
+  return nil
+end
+
 -- Sets the time the Stream stays after this write: the safety TTL for an open Workflow-owned
 -- Stream, the Retention otherwise. The meta stays 30 days longer as the Tombstone.
 local function refresh(meta, log, now, safety, tombstone)
@@ -79,12 +98,21 @@ local function words(text)
   return list
 end
 
+local function contains(list, value)
+  for _, item in ipairs(list) do
+    if item == value then
+      return true
+    end
+  end
+  return false
+end
+
 local function started(task_key)
   return tonumber(string.sub(task_key, 1, 16), 16)
 end
 
--- Whether a task key at c's started id is a lower attempt than c. Core gives c with attempt 0
--- when it no longer has c's attempt. The attempts of one task start in time order, so the
+-- Whether a task key at c's started id is a lower attempt than c. Lang gives c with attempt 0
+-- when it knows only c's started id. The attempts of one task start in time order, so the
 -- started time decides then.
 local function below_completed(key, c)
   if string.sub(c, 18, 25) == '00000000' then
@@ -93,10 +121,11 @@ local function below_completed(key, c)
   return key < c
 end
 
--- The Workflow withdrawal rule over the run's task index, for task t with the previous
--- completed task c. It answers the task keys it withdraws and the ones that stay. A task at or
--- before c that stays completed, so the index drops it.
-local function withdraw_tasks(index, t, c, failed)
+-- The orphan rule over the open Local Activity tasks of a run, for a write in task t with the
+-- run's last completed task c and its failed tasks. A task strictly between c and t, a failed
+-- one, or a lower attempt of t or c never completed, so its Records go. A task at or before c
+-- that stays completed, so the list drops it. Answers the withdrawn tasks and the open ones.
+local function orphan_tasks(open, t, c, failed)
   local failed_set = {}
   for _, id in ipairs(words(failed)) do
     failed_set[tonumber(id)] = true
@@ -107,7 +136,7 @@ local function withdraw_tasks(index, t, c, failed)
     cs = started(c)
   end
   local withdrawn, kept = {}, {}
-  for _, key in ipairs(index) do
+  for _, key in ipairs(open) do
     local s = started(key)
     if failed_set[s] or (cs < s and s < ts) or (s == ts and key < t)
         or (c ~= '' and s == cs and below_completed(key, c)) then
@@ -117,31 +146,6 @@ local function withdraw_tasks(index, t, c, failed)
     end
   end
   return withdrawn, kept
-end
-
--- Keeps the withdrawal facts of the run's newest Workflow batch or close, so a Local Activity
--- batch of a task that the run withdrew is fenced also when that task wrote nothing here.
-local function keep_facts(meta, run, t, c, failed)
-  redis.call('HSET', meta, 'lf|' .. run, t .. '|' .. c .. '|' .. failed)
-end
-
-local function withdrawn_by_facts(meta, run, task)
-  local facts = redis.call('HGET', meta, 'lf|' .. run)
-  if not facts then
-    return false
-  end
-  local t, c, failed = string.match(facts, '^([^|]*)|([^|]*)|(.*)$')
-  local withdrawn = withdraw_tasks({task}, t, c, failed)
-  return #withdrawn > 0
-end
-
-local function contains(list, value)
-  for _, item in ipairs(list) do
-    if item == value then
-      return true
-    end
-  end
-  return false
 end
 
 -- Takes a retry run's previous run out of the Stream. Answers true when that run wrote here.
@@ -172,9 +176,10 @@ local function add(log, fields)
   return redis.call('XADD', log, '*', unpack(fields))
 end
 
--- The close Record of an auto close: an encoded StreamRecord with only kind = CLOSE (3). It has
--- no Producer, result or failure, so every script can write it with no argument.
-local AUTO_CLOSE_RECORD = '\8\3'
+-- The close Record of an auto close: an encoded StreamRecord with kind = CLOSE (3) and
+-- close_status = COMPLETED (field 9, 1). It has no Producer, result or failure, so every script
+-- can write it with no argument.
+local AUTO_CLOSE_RECORD = '\8\3\72\1'
 
 -- Closes an open Stream whose auto close period passed since its last append, so the call that
 -- finds it late acts as if the close came on time. Answers true when the Stream is closed after

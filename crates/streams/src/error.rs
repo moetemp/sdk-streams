@@ -24,6 +24,10 @@ pub enum Reason {
     Fenced,
     /// The batch has a lower `sequence` than the last one of its epoch.
     Sequence,
+    /// The batch has the `sequence` of the last one of its epoch, and other content.
+    SeqDivergent,
+    /// The Stream's owner doesn't allow this Producer to close it.
+    NotOwner,
     /// A newer format version wrote the Stream.
     FormatTooNew,
     /// The Stream exists with another Retention.
@@ -40,6 +44,9 @@ pub enum Reason {
     UnknownWriter,
     /// The Store lacks a capability that the call needs.
     Unsupported,
+    /// The server refused the call for one of its limits, such as the most Workflow readers of a
+    /// Stream. A later retry can pass.
+    Exhausted,
 }
 
 impl Reason {
@@ -51,6 +58,8 @@ impl Reason {
             Reason::Closed => "stream_closed",
             Reason::Fenced => "stream_fenced",
             Reason::Sequence => "stream_sequence",
+            Reason::SeqDivergent => "seq_divergent",
+            Reason::NotOwner => "stream_not_owner",
             Reason::FormatTooNew => "stream_format_too_new",
             Reason::AlreadyExists => "stream_already_exists",
             Reason::Offset => "stream_offset",
@@ -59,20 +68,49 @@ impl Reason {
             Reason::Storage => "stream_storage",
             Reason::UnknownWriter => "stream_unknown_writer",
             Reason::Unsupported => "stream_unsupported",
+            Reason::Exhausted => "stream_exhausted",
         }
+    }
+
+    /// The reason of a token, for an error that the server or another runtime sends.
+    pub fn from_token(token: &str) -> Option<Self> {
+        [
+            Reason::NotFound,
+            Reason::Expired,
+            Reason::Closed,
+            Reason::Fenced,
+            Reason::Sequence,
+            Reason::SeqDivergent,
+            Reason::NotOwner,
+            Reason::FormatTooNew,
+            Reason::AlreadyExists,
+            Reason::Offset,
+            Reason::TooLarge,
+            Reason::Invalid,
+            Reason::Storage,
+            Reason::UnknownWriter,
+            Reason::Unsupported,
+            Reason::Exhausted,
+        ]
+        .into_iter()
+        .find(|reason| reason.token() == token)
     }
 
     /// The status code of the reason, as in the proposal's Appendix A.
     pub fn code(self) -> Code {
         match self {
             Reason::NotFound | Reason::Expired | Reason::UnknownWriter => Code::NotFound,
-            Reason::Closed | Reason::Fenced | Reason::Sequence | Reason::FormatTooNew => {
-                Code::FailedPrecondition
-            }
+            Reason::Closed
+            | Reason::Fenced
+            | Reason::Sequence
+            | Reason::SeqDivergent
+            | Reason::NotOwner
+            | Reason::FormatTooNew => Code::FailedPrecondition,
             Reason::AlreadyExists => Code::AlreadyExists,
             Reason::Offset | Reason::TooLarge | Reason::Invalid => Code::InvalidArgument,
             Reason::Storage => Code::Unavailable,
             Reason::Unsupported => Code::Unimplemented,
+            Reason::Exhausted => Code::ResourceExhausted,
         }
     }
 }

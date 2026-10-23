@@ -76,3 +76,83 @@
   `OpenWriterRequest` reserves `batch_interval` (4) and `max_buffered_records` (7). An SDK
   writes with `WriteRecords` and buffers on its own. `CloseWriter` and `CloseWriters` now only
   drop the writers.
+- Added the native Store, `ServiceStore`, over the server's
+  `temporal.api.streamservice.v1.StreamService`, called with `Connection::raw_unary` on the
+  connection that `WorkerExtension::attach` gives. `NativeStreamExtension` builds an extension on
+  it from a `NativeStreamConfig` (`backend`, and `retention` for creates with none), and
+  `StreamExtension::for_backend` picks `redis`, `memory` or `native`. The service forwards whole
+  reads and describes to the server. A Workflow create passes its owner, `close_with_run` and
+  ref in `Owner::Workflow`, which Redis and memory don't read. Server errors map to the crate's
+  reasons by their `StreamErrorDetails`.
+- Synced `stream_service.proto` with the server's: `CreateStreamRequest.owner` (6),
+  `close_with_run` (7), `ref` (8), `CloseStreamRequest.withdraw_run` (8) and
+  `StreamErrorDetails`. The WIT has the same fields.
+- `AppendRecordsRequest.defer_withdrawal` (9) marks the Workflow batch before a Local Activity
+  on the server too, so the native Local Activity flush writes early as on Redis.
+- Synced `stream_service.proto` with the server's `ReadRecordsRequest.to_offset` (11) and
+  `wake_only` (12). The native Store forwards them. The Redis and memory reads don't use them.
+- The native Store reads and describes over the direct System Nexus call
+  (`WorkflowService.StartNexusOperation` on `__temporal_system`), not the `StreamService` gRPC
+  reads, so every caller reads through the path Workflow code uses. A failed operation maps to
+  the crate's reasons by its application failure type. A plain `RESOURCE_EXHAUSTED`, such as a
+  direct read past the reader cap, maps to the new reason `stream_exhausted` with the server's
+  message. A retry can pass.
+- The Store calls that write (`create`, `append`, `close`) take the Stream's `StreamRef`, so the
+  native Store sends the owner fields on every call. The server finds a Workflow's Stream by
+  them. Redis and memory key on the id.
+- The service `CreateStream` and `AppendRecords` take a Workflow's calls from outside Workflow
+  code, such as S108's Local Activities. `CreateStreamRequest.owner` (6) makes the Stream
+  Workflow-owned, and `withdraw_run` on both withdraws a retry run's previous run. The proto
+  also has `close_with_run` (7) and `ref` (8), which only the server reads.
+- Added `WorkflowReadRecords`, a `ReadRecords` that names the Workflow run that reads. On native
+  the run goes as a `WorkflowEvent` link on the direct call, so Retention keeps a nested
+  Workflow Stream from the lowest offset that the open run read (S109). Redis and memory read
+  as `ReadRecords` does.
+- Removed the Workflow write path that S108 replaced, since a Workflow now makes each create,
+  publish and close from a Local Activity on the service calls. Gone are `BufferWorkflowCalls`,
+  `FlushRunBuffer` and `DrainCloses` with their messages, the run buffer, the Workflow Task
+  interceptor, the deferred withdrawal of the batch before a Local Activity, and the metrics
+  only they kept (`stream_hook_latency`, `stream_flush_failures`, `stream_close_retries`,
+  `stream_records_dropped`).
+- Removed `durable_writes` and `durable_timeout` (`RedisStreamConfig` 6 and 7, now reserved), the
+  `replica_wait` capability, `Store::wait_replicas` and `Store::durable_store`. Only the Workflow
+  flush used them, and a Workflow write is now an Activity-path write with the same guarantee.
+- Removed the Workflow withdrawal rule from the Store, since no caller appends with a Workflow
+  Producer any more. The service refuses one, and S108's Local Activities write with their own
+  Producer. Gone are the task index, the withdrawn tasks, the last facts and the Local Activity
+  fence that used them, the facts-only batch after a close and the `Superseded` items that it
+  left after the close Record, and the previous completed task and failed tasks on
+  `Withdrawal`. A close takes no withdrawal. The `withdraws()` reader rule stays.
+- A Local Activity batch that gives its run's last completed Workflow Task and failed tasks
+  withdraws the run's orphaned Local Activity Records, those of tasks that never completed, with a
+  Workflow-kind `Superseded` item that the reader rule already applies (S110). A late write of a
+  withdrawn task is fenced. A rerun in a later task still supersedes by epoch. `OpenWriter` takes
+  the same task facts, and each batch of the writer sends them.
+- A dedupe entry keeps the batch's content digest, SHA-256 over its Topics and payloads with the
+  metadata in key order. A resend with the last `sequence` and other content fails with
+  `FAILED_PRECONDITION` and the reason `seq_divergent`, instead of answering the stored offsets.
+  `testdata/digests.json` pins the digest for the server and every SDK.
+- `Store::create`, `Store::append` and `Store::close` take the Stream's whole `StreamRef`, so a
+  Store can check the owner fields. Redis and memory key on its id.
+- Only the owner closes a Stream. A Workflow-owned Stream closes from a Local Activity or a
+  Workflow Producer, and a ref that names another run chain is refused. A Stream that a client
+  created closes only from a client. Others fail with `FAILED_PRECONDITION` and the reason
+  `stream_not_owner`. A Workflow Producer may close, for the worker's close after the run's final
+  completion.
+- Took the api a3 Stream service protos: the Activity owner fields of `StreamRef`, `CloseStatus`
+  and `StreamRecord.close_status`, `task_token` on create, append and close,
+  `CloseStreamRequest.status`, `ReadRecordsRequest.last`, `max_bytes` and `floor_from`, and
+  `ReadRecordsResponse.continue_as_new_suggested`. The Stream service proto equals the api's
+  copy byte for byte.
+- A close Record has `close_status`. A close with no status is `COMPLETED`, or `FAILED` with a
+  failure, and a caller may set `CANCELED`. A caller's `TERMINATED` or `TIMED_OUT` fails with
+  `stream_invalid`, since only the owner's end on the server sets them. An auto close is
+  `COMPLETED`, so its Record is `08 03 48 01`. The result and the failure stay.
+- `ReadRecordsRequest.last` reads the newest Records that pass the filter, oldest first, with the
+  close Record at the end of a closed Stream. A Record that a newer `Superseded` item withdraws
+  doesn't count. It never waits, and it takes no `from_offset` or `wake_only`. Redis reads it
+  with `XREVRANGE` through the new `Store::read_back`.
+- `ReadRecordsRequest.max_bytes` caps the bytes of a page's items. A larger entry still comes
+  alone, so a read always moves on.
+- The Redis and memory Stores read no `to_offset` or `wake_only`. A read with one fails with
+  `stream_unsupported`, since only the native backend serves them.

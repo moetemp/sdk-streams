@@ -3,11 +3,16 @@
 
 use prost_types::Timestamp;
 use serde_json::Value;
+use temporalio_common::protos::temporal::api::common::v1::Payload;
 use temporalio_streams::{
+    digest::batch_digest,
     epoch::{epoch_key, task_key, withdraws},
     ids::{self, StreamKeys, fields},
     offset::{entry_id_of_offset, offset_of_entry_id},
-    proto::{Producer, ProducerEpoch, ProducerKind, StreamRecord, Supersession, WorkflowTaskEpoch},
+    proto::{
+        AppendRecord, Producer, ProducerEpoch, ProducerKind, StreamRecord, Supersession,
+        WorkflowTaskEpoch,
+    },
 };
 
 fn load(name: &str) -> Value {
@@ -139,8 +144,6 @@ fn meta_fields_match() {
     assert_eq!(fields::fence(kind, producer), text(&case, "fence"));
     assert_eq!(fields::dedupe(kind, producer), text(&case, "dedupe"));
     assert_eq!(fields::holds(kind, producer), text(&case, "holds"));
-    assert_eq!(fields::task_index(run), text(&case, "task_index"));
-    assert_eq!(fields::withdrawn_tasks(run), text(&case, "withdrawn_tasks"));
     assert_eq!(fields::run_wrote(run), text(&case, "run_wrote"));
     assert_eq!(fields::withdrawn_run(run), text(&case, "withdrawn_run"));
 }
@@ -180,6 +183,44 @@ fn the_appendix_e_withdrawals_match() {
         assert_eq!(
             withdraws(&supersession, &record),
             case["withdraws"].as_bool().unwrap(),
+            "{}",
+            text(case, "name")
+        );
+    }
+}
+
+fn hex(text: &str) -> Vec<u8> {
+    (0..text.len())
+        .step_by(2)
+        .map(|i| u8::from_str_radix(&text[i..i + 2], 16).unwrap())
+        .collect()
+}
+
+#[test]
+fn batch_digests_match() {
+    for case in load("digests.json").as_array().unwrap() {
+        let records: Vec<_> = case["records"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|r| AppendRecord {
+                topic: text(r, "topic").to_string(),
+                // A record with neither metadata nor data has no body.
+                body: (r.get("metadata").is_some() || r.get("data").is_some()).then(|| Payload {
+                    metadata: r["metadata"]
+                        .as_object()
+                        .into_iter()
+                        .flatten()
+                        .map(|(key, value)| (key.clone(), hex(value.as_str().unwrap())))
+                        .collect(),
+                    data: hex(r["data"].as_str().unwrap_or_default()),
+                    ..Default::default()
+                }),
+            })
+            .collect();
+        assert_eq!(
+            batch_digest(&records),
+            text(case, "digest"),
             "{}",
             text(case, "name")
         );

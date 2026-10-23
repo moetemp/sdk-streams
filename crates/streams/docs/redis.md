@@ -20,6 +20,7 @@ slot. `CreateStream` writes `:meta`, and the first entry makes `:log`.
 | `v` | The format version, 1 |
 | `ret` | The Retention, in ms |
 | `own` | `wf` for a Workflow-owned Stream, `client` otherwise |
+| `oc` | The encoded Workflow id of the owner's run chain, from the create's ref |
 | `exp` | When the Stream stops taking writes, in ms since 1970 |
 | `closed`, `close_id` | Set by the close, with the entry id of the close Record |
 | `newest` | The entry id of the newest entry |
@@ -27,17 +28,19 @@ slot. `CreateStream` writes `:meta`, and the first entry makes `:log`.
 | `ac` | The auto close period in ms, absent when the Stream has none |
 | `la` | When the create or the newest append with Records ran, in ms since 1970, with `ac` only |
 | `e\|<kind>\|<producer id>` | The newest epoch key of the Producer, the fence |
-| `d\|<kind>\|<producer id>` | `<epoch key>\|<sequence>\|<first id>\|<last id>` of the last batch |
+| `d\|<kind>\|<producer id>` | `<epoch key>\|<sequence>\|<first id>\|<last id>\|<digest>`, last batch |
 | `h\|<kind>\|<producer id>` | The newest epoch key that still has Records here |
-| `ti\|<run>` | The task keys of the run and its Local Activities that have Records here |
-| `wt\|<run>` | The task keys of the run that a `Superseded` item withdrew |
-| `lf\|<run>` | `<task key>\|<completed task key>\|<failed ids>` of the run's newest Workflow write with facts |
+| `oa\|<run>` | The run's Local Activity task keys here that may not have completed |
+| `ow\|<run>` | The task keys of the run whose Local Activity Records an orphan item withdrew |
 | `run\|<run>` | Set when a Producer of the run wrote a Record here |
 | `wr\|<run>` | Set when a Workflow retry withdrew the run |
 
-`<kind>` is the `ProducerKind` number, and `<run>` is the percent-encoded run id. An epoch key is
+`<kind>` is the `ProducerKind` number, and `<run>` is the percent-encoded run id. The digest is
+the batch's content digest (`testdata/digests.json`). A resend with the last `sequence` and the
+same digest gets the stored ids. Another digest is refused with `seq_divergent`. An entry with no
+digest, written by an older crate, takes any resend. An epoch key is
 the epoch's fields as fixed-width hex, in the order of comparison, so two keys compare as
-strings. A task key is the first four fields of an epoch key.
+strings.
 
 ## Log entries
 
@@ -46,30 +49,34 @@ Each entry has `r`, the encoded `temporal.api.streamservice.v1.StreamRecord` wit
 only `s` withdraws and has no Record. A reader gives a `SUPERSEDED` item for `s` just before the
 Record of the same entry. An offset is the entry id `<ms>-<seq>` packed as `ms << 20 | seq`.
 
-## Workflow batches before a Local Activity
+## Orphaned Local Activity Records
 
-A Workflow batch that a Local Activity flush writes has no withdrawal facts yet, since Core
-gives them only with the task's completion. The append script gets `*` as its completed task
-key. It then withdraws no task, flags nothing and keeps no `lf`, but it still fences, dedupes,
-adds the task to `ti` and applies a retry run's withdrawal. The task's completion sends the next
-batch of the same epoch with the facts, an empty one if it has no Records, so the withdrawal
-reaches the Stream then.
-
-## Withdrawals after a close
-
-A Workflow batch with facts and no Records goes in also after a close, so a task that completes
-after a close still withdraws a failed task's Records. When a close refuses a Workflow batch with
-Records, the crate drops the Records and sends a batch with only the facts. A read that reaches
-the close Record gives the `SUPERSEDED` items written after it just before the close Record.
+A Local Activity batch that gives its run's last completed Workflow Task (`previous_completed_task`,
+0 before the first) and failed tasks names its dispatching task in its epoch. Before it writes,
+the append script withdraws the Records of the run's Local Activity tasks in `oa` that never
+completed: those after the completed task and before the batch's own task, the failed ones and the
+lower attempts. It writes one entry with only `s`, a Workflow-kind `Supersession` (the run's
+Workflow Producer, the batch's task, the completed and failed tasks), so a Reader's Workflow rule
+withdraws them. It drops the tasks at or before the completed one, adds its own task, and keeps the
+withdrawn ones in `ow`, which fences a late write of such a task. A batch with no completed task
+skips the rule. A Stream that the run never writes again keeps its orphans.
 
 ## Auto close
 
 A Stream with `ac` closes with no result when `la + ac` passes. Nothing runs at that time. The
 next create, append, close or auto close step finds it due and first writes the close Record
-`08 03` (a `StreamRecord` with only `kind = CLOSE`), then acts on the closed Stream. So an append
-is refused with `stream_closed`, and a close answers that the Stream was already closed. The
-read script writes nothing, so a read or a describe that finds the close due runs the auto close
-step, then reads again. A long-polling read wakes when the period passes.
+`08 03 48 01` (a `StreamRecord` with only `kind = CLOSE` and `close_status = COMPLETED`), then
+acts on the closed Stream. So an append is refused with `stream_closed`, and a close answers that
+the Stream was already closed. The read script writes nothing, so a read or a describe that finds
+the close due runs the auto close step, then reads again. A long-polling read wakes when the
+period passes.
+
+## Close
+
+Only the owner closes a Stream. A Workflow-owned Stream closes from its run chain, as a Local
+Activity or as the run itself, and a close whose ref names another chain than `oc` is refused.
+Any other Stream closes only from a client. The script refuses others with `stream_not_owner`
+before it writes. An auto close has no Producer and is not checked.
 
 ## TTLs
 
@@ -80,16 +87,23 @@ otherwise. Each append drops the Records older than the Retention, and a read hi
 ## Access
 
 A Producer needs `+evalsha` and `+script|load` on `~<prefix>:{<namespace>:*`. A Reader needs
-`+evalsha_ro` or `+evalsha`, `+xread` and the read keys. A cluster also needs `+cluster|slots`.
+`+evalsha_ro` or `+evalsha`, `+xread` and the read keys, and `+xrevrange` for a read of the last
+Records. A cluster also needs `+cluster|slots`.
 See the known limits for a Reader of a Stream with an auto close.
 
 ## Known limits
 
-- Offsets inside one page may not increase across a close: `SUPERSEDED` items written after
-  the close come just before the close Record, with higher offsets. A Reader resumes from the
-  page's `next_offset`, never from the offset of the last item.
+- A Local Activity call of a failed Workflow Task is withdrawn only when the retry task runs that
+  call again, or when a later Local Activity write names the failed task. A call that no later
+  write covers, for example because a Signal changed the path and no Local Activity writes
+  again, keeps its Records. The memory Store has the same limit.
+- Core names only the last 100 failed Workflow Tasks of a run. An older failed task before the
+  last completed one keeps its Local Activity Records.
 - A Reader of a Stream with an auto close needs `+evalsha` with write access to the Stream's
   keys, since its read or describe may apply a due close. A Reader with read-only access gets
   an error from that step.
 - A read or a describe served by a replica that is behind can report a Stream open just after
   its close.
+- Redis can't tie a run to its run chain. A run of another chain that holds the owner's ref, such
+  as a child Workflow with its parent's Stream, can still close it. The native server checks the
+  run.

@@ -7,6 +7,7 @@ use crate::{
     Reason, StreamError, StreamResult,
     proto::{
         AppendRecord, AppendRecordsRequest, OpenWriterRequest, Producer, ProducerKind, StreamRef,
+        WorkflowTaskEpoch,
     },
     service::StreamService,
     store::{MAX_BATCH_BYTES, MAX_RECORD_BYTES},
@@ -42,6 +43,8 @@ struct Writer {
     namespace: String,
     stream: StreamRef,
     producer: Producer,
+    previous_completed_task: Option<WorkflowTaskEpoch>,
+    failed_tasks: Vec<i64>,
     max_batch: usize,
     max_retry: Duration,
     service: Arc<StreamService>,
@@ -124,6 +127,8 @@ impl Writer {
             producer: Some(self.producer.clone()),
             sequence,
             records,
+            previous_completed_task: self.previous_completed_task,
+            failed_tasks: self.failed_tasks.clone(),
             ..Default::default()
         };
         let until = Instant::now() + self.max_retry;
@@ -212,6 +217,8 @@ impl Writers {
             namespace: request.namespace,
             stream,
             producer,
+            previous_completed_task: request.previous_completed_task,
+            failed_tasks: request.failed_tasks,
             max_batch: match request.max_batch_size {
                 n if n > 0 => n as usize,
                 _ => DEFAULT_BATCH,

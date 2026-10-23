@@ -5,8 +5,6 @@
   "fence": "e|3|act:run%3A1:a:s",
   "dedupe": "d|3|act:run%3A1:a:s",
   "holds": "h|3|act:run%3A1:a:s",
-  "task_index": "ti|run%3A1",
-  "withdrawn_tasks": "wt|run%3A1",
   "run_wrote": "run|run%3A1",
   "withdrawn_run": "wr|run%3A1"
 }

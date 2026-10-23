@@ -3,9 +3,12 @@
 
 use crate::{
     Reason, StreamError, StreamResult,
-    proto::{Producer, WorkflowTaskEpoch},
+    proto::{
+        DescribeStreamRequest, DescribeStreamResponse, Producer, ReadRecordsRequest,
+        ReadRecordsResponse, StreamRef, WorkflowTaskEpoch,
+    },
 };
-use std::{sync::Arc, time::Duration};
+use std::time::Duration;
 use tokio::time::Instant;
 
 /// The format version this crate writes. A Stream with a higher one refuses writes.
@@ -19,9 +22,11 @@ pub const TOMBSTONE: Duration = Duration::from_secs(30 * 24 * 60 * 60);
 
 /// Who created a Stream, which decides its TTL while it is open.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum Owner {
-    /// The Stream stays `safety_ttl` after its last write until it closes.
-    Workflow,
+pub enum Owner<'a> {
+    /// The Stream stays `safety_ttl` after its last write until it closes. The owning run, when
+    /// the create knows it, for a Store that keeps the owner, such as the server. Redis and
+    /// memory don't read it.
+    Workflow(Option<RunOwner<'a>>),
     /// The Stream stays one Retention after its last write.
     Client,
 }
@@ -57,18 +62,26 @@ pub struct Created {
 /// The withdrawal facts of a Workflow batch or close, and the `Superseded` item they make.
 #[derive(Debug, Clone, Default)]
 pub struct Withdrawal<'a> {
-    /// The previous completed Workflow Task of the run.
-    pub previous_completed: Option<&'a WorkflowTaskEpoch>,
-    /// The started event ids of the run's failed Workflow Tasks.
-    pub failed_tasks: &'a [i64],
     /// A retry run's previous run.
     pub withdraw_run: &'a str,
     /// The encoded Supersession, which the log keeps when the batch withdraws something.
     pub supersession: &'a [u8],
-    /// A Workflow batch whose task facts come later, with the task's completion. It withdraws
-    /// nothing and keeps no facts, since a batch with no previous completed task would
-    /// withdraw every earlier task. A retry run's `withdraw_run` still applies.
-    pub defer: bool,
+    /// The run's task facts of a Local Activity batch, which withdraw the run's orphaned Local
+    /// Activity Records.
+    pub tasks: Option<TaskFacts<'a>>,
+}
+
+/// The run's Workflow Task facts that a Local Activity batch gives. A task of the run after
+/// `completed` and before the batch's own task, or one in `failed_tasks`, never completed, so
+/// its Local Activity Records are orphans.
+#[derive(Debug, Clone, Copy, Default)]
+pub struct TaskFacts<'a> {
+    /// The run's last completed Workflow Task, `None` before the first one.
+    pub completed: Option<&'a WorkflowTaskEpoch>,
+    /// The started event ids of the run's failed Workflow Tasks.
+    pub failed_tasks: &'a [i64],
+    /// The encoded Workflow-kind Supersession that withdraws the orphans.
+    pub supersession: &'a [u8],
 }
 
 /// One batch of one Producer.
@@ -80,6 +93,8 @@ pub struct Batch<'a> {
     pub sequence: i64,
     /// The encoded Records.
     pub records: &'a [Vec<u8>],
+    /// The [crate::digest::batch_digest] of the batch, which the dedupe entry keeps.
+    pub digest: &'a str,
     /// What the batch withdraws.
     pub withdrawal: Withdrawal<'a>,
 }
@@ -103,8 +118,6 @@ pub struct Closed {
     pub offset: i64,
     /// Someone closed the Stream before.
     pub already: bool,
-    /// The close withdrew earlier Records.
-    pub flagged: bool,
 }
 
 /// The state of a Stream as one read saw it.
@@ -185,29 +198,26 @@ pub struct Capabilities(u8);
 impl Capabilities {
     /// Each append checks the Producer's epoch and its last `sequence` before it writes.
     pub const PRODUCER_FENCE: Self = Self(1);
-    /// Each append flags the first batch of a new epoch that withdraws, keeps the run's task
-    /// index and refuses a Local Activity of a withdrawn task.
+    /// Each append flags the first batch of a Producer's newer epoch, which withdraws the
+    /// Records of its earlier ones.
     pub const WITHDRAWAL: Self = Self(1 << 1);
     /// A retry run's first write withdraws the previous run and fences its Producers.
     pub const RUN_FENCE: Self = Self(1 << 2);
     /// A close writes the close Record and every later append is refused.
     pub const CLOSE: Self = Self(1 << 3);
-    /// A write can wait until replicas have it, for `durable_writes`.
-    pub const REPLICA_WAIT: Self = Self(1 << 4);
     /// An open Workflow-owned Stream keeps the safety TTL, not the Retention.
-    pub const SAFETY_TTL: Self = Self(1 << 5);
+    pub const SAFETY_TTL: Self = Self(1 << 4);
     /// A Stream with an auto close period closes with no result when no append came for that
     /// long. Each write step applies it before it acts, so no call sees the Stream open late.
-    pub const AUTO_CLOSE: Self = Self(1 << 6);
+    pub const AUTO_CLOSE: Self = Self(1 << 5);
     /// Every capability.
-    pub const ALL: Self = Self((1 << 7) - 1);
+    pub const ALL: Self = Self((1 << 6) - 1);
 
-    const NAMES: [(Self, &'static str); 7] = [
+    const NAMES: [(Self, &'static str); 6] = [
         (Self::PRODUCER_FENCE, "producer_fence"),
         (Self::WITHDRAWAL, "withdrawal"),
         (Self::RUN_FENCE, "run_fence"),
         (Self::CLOSE, "close"),
-        (Self::REPLICA_WAIT, "replica_wait"),
         (Self::SAFETY_TTL, "safety_ttl"),
         (Self::AUTO_CLOSE, "auto_close"),
     ];
@@ -268,15 +278,17 @@ pub trait Store: Send + Sync + 'static {
     /// The Retention of a Stream that its create gives none.
     fn default_retention(&self) -> Duration;
 
-    /// Creates a Stream, or finds it. A retry run's create withdraws its previous run. An
-    /// `auto_close` needs [Capabilities::AUTO_CLOSE].
+    /// Creates a Stream, or finds it. The calls that write take the Stream's whole ref, since
+    /// the server finds a Workflow's Stream by its owner fields. Redis and memory key on the id.
+    /// A retry run's create withdraws its previous run. An `auto_close` needs
+    /// [Capabilities::AUTO_CLOSE].
     async fn create(
         &self,
         namespace: &str,
-        stream_id: &str,
+        stream: &StreamRef,
         retention: Option<Duration>,
         auto_close: Option<Duration>,
-        owner: Owner,
+        owner: Owner<'_>,
         withdrawal: &Withdrawal<'_>,
     ) -> StreamResult<Created>;
 
@@ -284,7 +296,7 @@ pub trait Store: Send + Sync + 'static {
     async fn append(
         &self,
         namespace: &str,
-        stream_id: &str,
+        stream: &StreamRef,
         batch: &Batch<'_>,
     ) -> StreamResult<Appended>;
 
@@ -312,12 +324,23 @@ pub trait Store: Send + Sync + 'static {
     async fn close(
         &self,
         _namespace: &str,
-        _stream_id: &str,
+        _stream: &StreamRef,
         _producer: &Producer,
         _record: &[u8],
-        _withdrawal: &Withdrawal<'_>,
     ) -> StreamResult<Closed> {
         Err(unsupported("close"))
+    }
+
+    /// Reads up to `count` entries at or before `before`, newest first, for a read of the newest
+    /// Records.
+    async fn read_back(
+        &self,
+        _namespace: &str,
+        _stream_id: &str,
+        _before: i64,
+        _count: usize,
+    ) -> StreamResult<Vec<Entry>> {
+        Err(unsupported("last"))
     }
 
     /// Closes the Stream if its auto close is due, for a read that found it due. Answers the
@@ -326,22 +349,46 @@ pub trait Store: Send + Sync + 'static {
         Err(unsupported("auto_close"))
     }
 
-    /// Waits until `replicas` replicas have this process's writes to the Stream. Answers how
-    /// many have them. Needs [Capabilities::REPLICA_WAIT].
-    async fn wait_replicas(
-        &self,
-        _namespace: &str,
-        _stream_id: &str,
-        _replicas: u32,
-        _timeout: Duration,
-    ) -> StreamResult<i64> {
-        Err(unsupported("replica_wait"))
-    }
-
-    /// The Store for flushes that wait for replicas, if it has one of its own.
-    fn durable_store(&self) -> Option<Arc<dyn Store>> {
+    /// The reads of a Store that answers whole reads and describes itself, such as the
+    /// server. The service then forwards those calls and uses no [Store::read].
+    fn remote_reads(&self) -> Option<&dyn RemoteReads> {
         None
     }
+}
+
+/// The Workflow run that reads a Stream.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ReaderRun {
+    /// The run's Workflow id.
+    pub workflow_id: String,
+    /// The run id.
+    pub run_id: String,
+}
+
+/// The Workflow run that owns a Stream, for a Store that keeps it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct RunOwner<'a> {
+    /// The run's Producer in the task of the create.
+    pub producer: &'a Producer,
+    /// Close the Stream when the owner's run chain closes.
+    pub close_with_run: bool,
+}
+
+/// Whole reads and describes, which a remote Store answers itself.
+#[async_trait::async_trait]
+pub trait RemoteReads: Send + Sync {
+    /// A long-polling read. `reader` is the Workflow run that reads, if one does.
+    async fn read_records(
+        &self,
+        request: ReadRecordsRequest,
+        reader: Option<&ReaderRun>,
+    ) -> StreamResult<ReadRecordsResponse>;
+
+    /// The state of a Stream.
+    async fn describe_stream(
+        &self,
+        request: DescribeStreamRequest,
+    ) -> StreamResult<DescribeStreamResponse>;
 }
 
 #[cfg(test)]
@@ -353,17 +400,17 @@ mod tests {
         let some = Capabilities::PRODUCER_FENCE.union(Capabilities::CLOSE);
         some.require(Capabilities::CLOSE).unwrap();
         let error = some
-            .require(Capabilities::CLOSE.union(Capabilities::REPLICA_WAIT))
+            .require(Capabilities::CLOSE.union(Capabilities::AUTO_CLOSE))
             .unwrap_err();
         assert_eq!(error.reason, Reason::Unsupported);
-        assert!(error.message.ends_with("replica_wait"), "{}", error.message);
-        assert_eq!(Capabilities::ALL.names().len(), 7);
+        assert!(error.message.ends_with("auto_close"), "{}", error.message);
+        assert_eq!(Capabilities::ALL.names().len(), 6);
         assert_eq!(
             Capabilities::ALL
-                .without(Capabilities::REPLICA_WAIT)
+                .without(Capabilities::AUTO_CLOSE)
                 .names()
                 .len(),
-            6
+            5
         );
     }
 }

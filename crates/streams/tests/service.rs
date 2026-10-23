@@ -8,13 +8,14 @@ use std::{
     sync::Arc,
     time::{Duration, Instant},
 };
-use temporalio_common::protos::temporal::api::common::v1::Payload;
+use temporalio_common::protos::temporal::api::{common::v1::Payload, failure::v1::Failure};
 use temporalio_sdk_core::{ExtensionError, WorkerExtension};
 use temporalio_streams::{
     MemoryStreamExtension, RedisStreamExtension,
+    epoch::withdraws,
     ids::{activity_producer_id, client_producer_id},
     proto::{
-        AppendRecord, AppendRecordsRequest, AppendRecordsResponse, CloseStreamRequest,
+        AppendRecord, AppendRecordsRequest, AppendRecordsResponse, CloseStatus, CloseStreamRequest,
         CloseStreamResponse, CreateStreamRequest, CreateStreamResponse, DescribeStreamRequest,
         DescribeStreamResponse, Producer, ProducerEpoch, ProducerKind, ReadRecordsRequest,
         ReadRecordsResponse, ReadStart, RedisStreamConfig, StreamErrorDetails, StreamRecordKind,
@@ -776,5 +777,404 @@ async fn a_create_answer_names_the_backend_and_the_store_never_reads_it() {
     for case in cases().await {
         let created = case.create(None).await.unwrap();
         assert_eq!(created.stream.unwrap().backend, "");
+    }
+}
+
+/// The Local Activity Producer of a Workflow call in run `run`, as S108 writes it.
+fn local_activity(run: &str) -> Producer {
+    Producer {
+        kind: ProducerKind::LocalActivity as i32,
+        id: temporalio_streams::ids::local_activity_producer_id(run, "call-1"),
+        epoch: Some(ProducerEpoch {
+            task_started_event_id: 3,
+            task_attempt: 1,
+            task_started_time: Some(Timestamp {
+                seconds: 100,
+                nanos: 0,
+            }),
+            attempt: 1,
+            ..Default::default()
+        }),
+        run_id: run.to_string(),
+    }
+}
+
+fn workflow_owner(run: &str) -> Producer {
+    Producer {
+        kind: ProducerKind::Workflow as i32,
+        id: temporalio_streams::ids::workflow_producer_id(run),
+        run_id: run.to_string(),
+        ..Default::default()
+    }
+}
+
+#[tokio::test]
+async fn a_retry_run_s_local_activity_calls_withdraw_the_previous_run() {
+    for case in cases().await {
+        let (previous, retry) = (format!("{}-r1", case.stream), format!("{}-r2", case.stream));
+        let create = |run: &str, withdraw_run: &str| CreateStreamRequest {
+            namespace: case.namespace.clone(),
+            stream_id: case.stream.clone(),
+            withdraw_run: withdraw_run.to_string(),
+            owner: Some(workflow_owner(run)),
+            ..Default::default()
+        };
+        let append = |run: &str, withdraw_run: &str, text: &str| AppendRecordsRequest {
+            namespace: case.namespace.clone(),
+            stream: case.stream(),
+            producer: Some(local_activity(run)),
+            sequence: 1,
+            records: vec![record("", text)],
+            withdraw_run: withdraw_run.to_string(),
+            ..Default::default()
+        };
+        let _: CreateStreamResponse = call(&case.ext, "CreateStream", create(&previous, ""))
+            .await
+            .unwrap();
+        let _: AppendRecordsResponse =
+            call(&case.ext, "AppendRecords", append(&previous, "", "old"))
+                .await
+                .unwrap();
+        // The retry run's first create withdraws the previous run.
+        let _: CreateStreamResponse = call(&case.ext, "CreateStream", create(&retry, &previous))
+            .await
+            .unwrap();
+        let first: AppendRecordsResponse =
+            call(&case.ext, "AppendRecords", append(&retry, &previous, "new"))
+                .await
+                .unwrap();
+        // A retried Local Activity sends the same batch and gets its first answer.
+        let again: AppendRecordsResponse =
+            call(&case.ext, "AppendRecords", append(&retry, &previous, "new"))
+                .await
+                .unwrap();
+        assert_eq!(
+            (again.first_offset, again.last_offset),
+            (first.first_offset, first.last_offset)
+        );
+        assert!(first.last_offset > 0);
+        let read = case.read(ReadRecordsRequest::default()).await.unwrap();
+        assert_eq!(texts(&read), ["old", "<superseded>", "new"]);
+        let superseded = read.records[1].supersession.as_ref().unwrap();
+        assert_eq!(superseded.withdraw_run, previous);
+        // The item names its Producer, which the WIT requires.
+        assert_eq!(
+            superseded.producer_id,
+            temporalio_streams::ids::workflow_producer_id(&retry)
+        );
+        assert_eq!(superseded.run_id, retry);
+        let error = call::<_, CreateStreamResponse>(
+            &case.ext,
+            "CreateStream",
+            CreateStreamRequest {
+                owner: None,
+                ..create(&retry, &previous)
+            },
+        )
+        .await
+        .unwrap_err();
+        assert_eq!(reason(&error), "stream_invalid");
+        assert!(withdraws(superseded, &read.records[0]));
+        assert!(!withdraws(superseded, &read.records[2]));
+    }
+}
+
+/// The user Local Activity `call-1` of `run`, dispatched by the Workflow Task `[started]`. A
+/// rerun in a later task keeps the Producer id and gets newer task facts (field 20).
+fn user_local_activity(run: &str, started: i64, seconds: i64) -> Producer {
+    Producer {
+        kind: ProducerKind::LocalActivity as i32,
+        id: temporalio_streams::ids::local_activity_producer_id(run, "call-1"),
+        epoch: Some(ProducerEpoch {
+            task_started_event_id: started,
+            task_attempt: 1,
+            task_started_time: Some(Timestamp { seconds, nanos: 0 }),
+            attempt: 1,
+            ..Default::default()
+        }),
+        run_id: run.to_string(),
+    }
+}
+
+#[tokio::test]
+async fn a_rerun_local_activity_supersedes_its_first_attempt() {
+    for case in cases().await {
+        let run = format!("{}-run", case.stream);
+        let _: CreateStreamResponse = call(
+            &case.ext,
+            "CreateStream",
+            CreateStreamRequest {
+                namespace: case.namespace.clone(),
+                stream_id: case.stream.clone(),
+                owner: Some(workflow_owner(&run)),
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+        let write = |producer: Producer, text: &str| AppendRecordsRequest {
+            namespace: case.namespace.clone(),
+            stream: case.stream(),
+            producer: Some(producer),
+            sequence: 1,
+            records: vec![record("", text)],
+            ..Default::default()
+        };
+        // Task [3] runs the Local Activity, which writes, and then the task fails.
+        let _: AppendRecordsResponse = call(
+            &case.ext,
+            "AppendRecords",
+            write(user_local_activity(&run, 3, 100), "first"),
+        )
+        .await
+        .unwrap();
+        // The next task [7] runs the same call again, and it writes again.
+        let _: AppendRecordsResponse = call(
+            &case.ext,
+            "AppendRecords",
+            write(user_local_activity(&run, 7, 200), "second"),
+        )
+        .await
+        .unwrap();
+        // A late write of the failed attempt is fenced.
+        let late = call::<_, AppendRecordsResponse>(
+            &case.ext,
+            "AppendRecords",
+            AppendRecordsRequest {
+                sequence: 2,
+                ..write(user_local_activity(&run, 3, 100), "late")
+            },
+        )
+        .await
+        .unwrap_err();
+        assert_eq!(reason(&late), "stream_fenced");
+        // A Reader sees the first attempt, then the Superseded item that withdraws it, then
+        // the second attempt. Applied, only the second attempt stays.
+        let read = case.read(ReadRecordsRequest::default()).await.unwrap();
+        assert_eq!(texts(&read), ["first", "<superseded>", "second"]);
+        let superseded = read.records[1].supersession.as_ref().unwrap();
+        assert!(withdraws(superseded, &read.records[0]));
+        assert!(!withdraws(superseded, &read.records[2]));
+    }
+}
+
+/// A write of the Local Activity `call` of `run`, dispatched by task `[started]`, with the run's
+/// last completed task `[completed]` (0 before the first) as S110 has lang send it.
+fn local_activity_write(
+    case: &Case,
+    run: &str,
+    call: &str,
+    started: i64,
+    completed: i64,
+    text: &str,
+) -> AppendRecordsRequest {
+    let mut producer = user_local_activity(run, started, 100 + started);
+    producer.id = temporalio_streams::ids::local_activity_producer_id(run, call);
+    AppendRecordsRequest {
+        namespace: case.namespace.clone(),
+        stream: case.stream(),
+        producer: Some(producer),
+        sequence: 1,
+        records: vec![record("", text)],
+        previous_completed_task: Some(temporalio_streams::proto::WorkflowTaskEpoch {
+            started_event_id: completed,
+            ..Default::default()
+        }),
+        ..Default::default()
+    }
+}
+
+#[tokio::test]
+async fn a_local_activity_of_a_task_that_never_completed_is_withdrawn_by_the_next_write() {
+    for case in cases().await {
+        let run = format!("{}-run", case.stream);
+        case.create(None).await.unwrap();
+        // Task [2] completed. Task [3] runs a Local Activity that writes, then task [3] fails.
+        let _: AppendRecordsResponse = call(
+            &case.ext,
+            "AppendRecords",
+            local_activity_write(&case, &run, "call-1", 2, 0, "done"),
+        )
+        .await
+        .unwrap();
+        let _: AppendRecordsResponse = call(
+            &case.ext,
+            "AppendRecords",
+            local_activity_write(&case, &run, "call-2", 3, 2, "orphan"),
+        )
+        .await
+        .unwrap();
+        // Task [4] takes another path and writes once.
+        let _: AppendRecordsResponse = call(
+            &case.ext,
+            "AppendRecords",
+            local_activity_write(&case, &run, "call-3", 4, 2, "other"),
+        )
+        .await
+        .unwrap();
+        let read = case.read(ReadRecordsRequest::default()).await.unwrap();
+        assert_eq!(texts(&read), ["done", "orphan", "<superseded>", "other"]);
+        let superseded = read.records[2].supersession.as_ref().unwrap();
+        let kept: Vec<_> = [0, 1, 3]
+            .iter()
+            .filter(|&&i| !withdraws(superseded, &read.records[i]))
+            .map(|&i| texts(&read)[i].clone())
+            .collect();
+        assert_eq!(kept, ["done", "other"]);
+        // A late write of the orphaned call is fenced.
+        let late = call::<_, AppendRecordsResponse>(
+            &case.ext,
+            "AppendRecords",
+            AppendRecordsRequest {
+                sequence: 2,
+                ..local_activity_write(&case, &run, "call-2", 3, 2, "late")
+            },
+        )
+        .await
+        .unwrap_err();
+        assert_eq!(reason(&late), "stream_fenced");
+        // A later write that knows task [4] completed withdraws nothing more.
+        let _: AppendRecordsResponse = call(
+            &case.ext,
+            "AppendRecords",
+            local_activity_write(&case, &run, "call-4", 7, 4, "later"),
+        )
+        .await
+        .unwrap();
+        let read = case.read(ReadRecordsRequest::default()).await.unwrap();
+        assert_eq!(
+            texts(&read),
+            ["done", "orphan", "<superseded>", "other", "later"]
+        );
+    }
+}
+
+#[tokio::test]
+async fn a_failed_task_before_the_last_completed_one_is_withdrawn_by_its_id() {
+    for case in cases().await {
+        let run = format!("{}-run", case.stream);
+        case.create(None).await.unwrap();
+        let _: AppendRecordsResponse = call(
+            &case.ext,
+            "AppendRecords",
+            local_activity_write(&case, &run, "call-1", 3, 2, "orphan"),
+        )
+        .await
+        .unwrap();
+        // Task [3] failed and task [4] completed with no write here. Task [5] knows both.
+        let mut next = local_activity_write(&case, &run, "call-2", 5, 4, "next");
+        next.failed_tasks = vec![3];
+        let _: AppendRecordsResponse = call(&case.ext, "AppendRecords", next).await.unwrap();
+        let read = case.read(ReadRecordsRequest::default()).await.unwrap();
+        assert_eq!(texts(&read), ["orphan", "<superseded>", "next"]);
+        let superseded = read.records[1].supersession.as_ref().unwrap();
+        assert!(withdraws(superseded, &read.records[0]));
+        assert!(!withdraws(superseded, &read.records[2]));
+    }
+}
+
+#[tokio::test]
+async fn a_close_record_gives_its_status_and_a_caller_cant_terminate() {
+    for case in cases().await {
+        case.create(None).await.unwrap();
+        let close = |status: CloseStatus, failure: Option<Failure>| CloseStreamRequest {
+            namespace: case.namespace.clone(),
+            stream: case.stream(),
+            producer: Some(client(1)),
+            failure,
+            status: status as i32,
+            ..Default::default()
+        };
+        for status in [CloseStatus::Terminated, CloseStatus::TimedOut] {
+            let error =
+                call::<_, CloseStreamResponse>(&case.ext, "CloseStream", close(status, None))
+                    .await
+                    .unwrap_err();
+            assert_eq!(
+                (error.code, reason(&error).as_str()),
+                (Code::InvalidArgument, "stream_invalid")
+            );
+        }
+        let failure = Failure {
+            message: "boom".to_string(),
+            ..Default::default()
+        };
+        let failed = close(CloseStatus::Unspecified, Some(failure));
+        call::<_, CloseStreamResponse>(&case.ext, "CloseStream", failed)
+            .await
+            .unwrap();
+        let read = case.read(ReadRecordsRequest::default()).await.unwrap();
+        let record = read.records.last().unwrap();
+        assert_eq!(record.close_status, CloseStatus::Failed as i32);
+        assert_eq!(record.close_failure.as_ref().unwrap().message, "boom");
+    }
+}
+
+#[tokio::test]
+async fn a_last_read_gives_the_newest_records_oldest_first_without_withdrawn_ones() {
+    for case in cases().await {
+        case.create(None).await.unwrap();
+        let last = |n: i32, topics: &[&str]| ReadRecordsRequest {
+            last: n,
+            topics: topics.iter().map(|t| t.to_string()).collect(),
+            ..Default::default()
+        };
+        assert!(case.read(last(5, &[])).await.unwrap().records.is_empty());
+        let records = vec![record("t", "c1"), record("u", "c2"), record("t", "c3")];
+        case.append(client(1), 1, records).await.unwrap();
+        case.append(activity(1, 10), 1, vec![record("t", "a1")])
+            .await
+            .unwrap();
+        // The retry's first batch withdraws a1, so a1 doesn't count.
+        case.append(activity(2, 20), 1, vec![record("t", "a2")])
+            .await
+            .unwrap();
+        assert_eq!(
+            texts(&case.read(last(3, &[])).await.unwrap()),
+            ["c2", "c3", "a2"]
+        );
+        let read = case.read(last(2, &["t"])).await.unwrap();
+        assert_eq!(texts(&read), ["c3", "a2"]);
+        assert!(!read.done);
+        let newest = case.describe().await.unwrap().last_offset;
+        assert_eq!(read.next_offset, newest + 1);
+        let error = case
+            .read(ReadRecordsRequest {
+                from_offset: 1,
+                ..last(1, &[])
+            })
+            .await
+            .unwrap_err();
+        assert_eq!(reason(&error), "stream_invalid");
+        case.close(client(1)).await.unwrap();
+        let read = case.read(last(1, &[])).await.unwrap();
+        assert_eq!(texts(&read), ["a2", "<close>"]);
+        assert!(read.done);
+    }
+}
+
+#[tokio::test]
+async fn a_page_keeps_under_max_bytes_and_a_larger_record_comes_alone() {
+    for case in cases().await {
+        case.create(None).await.unwrap();
+        let big = "x".repeat(1000);
+        let records = vec![
+            record("t", "a"),
+            record("t", "b"),
+            record("t", &big),
+            record("t", "c"),
+        ];
+        case.append(client(1), 1, records).await.unwrap();
+        let capped = |from_offset| ReadRecordsRequest {
+            from_offset,
+            max_bytes: 200,
+            ..Default::default()
+        };
+        let first = case.read(capped(0)).await.unwrap();
+        assert_eq!(texts(&first), ["a", "b"]);
+        let second = case.read(capped(first.next_offset)).await.unwrap();
+        assert_eq!(texts(&second), [big]);
+        let third = case.read(capped(second.next_offset)).await.unwrap();
+        assert_eq!(texts(&third), ["c"]);
     }
 }
