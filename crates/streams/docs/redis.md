@@ -27,14 +27,17 @@ slot. `CreateStream` writes `:meta`, and the first entry makes `:log`.
 | `ac` | The auto close period in ms, absent when the Stream has none |
 | `la` | When the create or the newest append with Records ran, in ms since 1970, with `ac` only |
 | `e\|<kind>\|<producer id>` | The newest epoch key of the Producer, the fence |
-| `d\|<kind>\|<producer id>` | `<epoch key>\|<sequence>\|<first id>\|<last id>` of the last batch |
+| `d\|<kind>\|<producer id>` | `<epoch key>\|<sequence>\|<first id>\|<last id>\|<digest>` of the last batch |
 | `h\|<kind>\|<producer id>` | The newest epoch key that still has Records here |
 | `oa\|<run>` | The run's Local Activity task keys here that may not have completed |
 | `ow\|<run>` | The task keys of the run whose Local Activity Records an orphan item withdrew |
 | `run\|<run>` | Set when a Producer of the run wrote a Record here |
 | `wr\|<run>` | Set when a Workflow retry withdrew the run |
 
-`<kind>` is the `ProducerKind` number, and `<run>` is the percent-encoded run id. An epoch key is
+`<kind>` is the `ProducerKind` number, and `<run>` is the percent-encoded run id. The digest is
+the batch's content digest (`testdata/digests.json`). A resend with the last `sequence` and the
+same digest gets the stored ids. Another digest is refused with `seq_divergent`. An entry with no
+digest, written by an older crate, takes any resend. An epoch key is
 the epoch's fields as fixed-width hex, in the order of comparison, so two keys compare as
 strings.
 

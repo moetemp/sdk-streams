@@ -24,6 +24,8 @@ pub enum Reason {
     Fenced,
     /// The batch has a lower `sequence` than the last one of its epoch.
     Sequence,
+    /// The batch has the `sequence` of the last one of its epoch, and other content.
+    SeqDivergent,
     /// A newer format version wrote the Stream.
     FormatTooNew,
     /// The Stream exists with another Retention.
@@ -51,6 +53,7 @@ impl Reason {
             Reason::Closed => "stream_closed",
             Reason::Fenced => "stream_fenced",
             Reason::Sequence => "stream_sequence",
+            Reason::SeqDivergent => "seq_divergent",
             Reason::FormatTooNew => "stream_format_too_new",
             Reason::AlreadyExists => "stream_already_exists",
             Reason::Offset => "stream_offset",
@@ -66,9 +69,11 @@ impl Reason {
     pub fn code(self) -> Code {
         match self {
             Reason::NotFound | Reason::Expired | Reason::UnknownWriter => Code::NotFound,
-            Reason::Closed | Reason::Fenced | Reason::Sequence | Reason::FormatTooNew => {
-                Code::FailedPrecondition
-            }
+            Reason::Closed
+            | Reason::Fenced
+            | Reason::Sequence
+            | Reason::SeqDivergent
+            | Reason::FormatTooNew => Code::FailedPrecondition,
             Reason::AlreadyExists => Code::AlreadyExists,
             Reason::Offset | Reason::TooLarge | Reason::Invalid => Code::InvalidArgument,
             Reason::Storage => Code::Unavailable,

@@ -3,6 +3,7 @@
 
 use crate::{
     Reason, StreamError, StreamResult,
+    digest::batch_digest,
     ids::check_producer,
     ids::check_stream_id,
     metrics::Metrics,
@@ -200,6 +201,7 @@ impl StreamService {
         if !request.withdraw_run.is_empty() {
             self.store.capabilities().require(Capabilities::RUN_FENCE)?;
         }
+        let digest = batch_digest(&request.records);
         let records = data_records(producer, request.records)?;
         let bytes = supersession(producer, &request.withdraw_run);
         // A Local Activity gives its run's task facts, so the batch withdraws the run's
@@ -214,6 +216,7 @@ impl StreamService {
             producer,
             sequence: request.sequence,
             records: &records,
+            digest: &digest,
             withdrawal: Withdrawal {
                 withdraw_run: &request.withdraw_run,
                 supersession: &bytes,

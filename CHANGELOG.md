@@ -100,3 +100,7 @@
   Workflow-kind `Superseded` item that the reader rule already applies (S110). A late write of a
   withdrawn task is fenced. A rerun in a later task still supersedes by epoch. `OpenWriter` takes
   the same task facts, and each batch of the writer sends them.
+- A dedupe entry keeps the batch's content digest, SHA-256 over its Topics and payloads with the
+  metadata in key order. A resend with the last `sequence` and other content fails with
+  `FAILED_PRECONDITION` and the reason `seq_divergent`, instead of answering the stored offsets.
+  `testdata/digests.json` pins the digest for the server and every SDK.

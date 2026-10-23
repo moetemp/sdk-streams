@@ -232,7 +232,8 @@ impl RedisStore {
             .arg(local_activity_task(producer))
             .arg(completed_arg(withdrawal))
             .arg(failed_list(withdrawal))
-            .arg(withdrawal.tasks.map_or(&[][..], |tasks| tasks.supersession));
+            .arg(withdrawal.tasks.map_or(&[][..], |tasks| tasks.supersession))
+            .arg(batch.digest);
         for record in batch.records {
             invocation.arg(record.as_slice());
         }

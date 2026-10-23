@@ -504,9 +504,20 @@ impl Store for MemoryStore {
             keys.check_live(now)?;
             if let Some(last) = keys.get(&format!("d{suffix}")) {
                 let parts: Vec<&str> = last.split('|').collect();
-                if parts.len() == 4 && parts[0] == epoch {
+                if (4..=5).contains(&parts.len()) && parts[0] == epoch {
                     let last_sequence: i64 = parts[1].parse().unwrap_or(0);
                     if sequence == last_sequence {
+                        // An entry written before the digest has none, and takes any resend.
+                        let last_digest = parts.get(4).copied().unwrap_or_default();
+                        if !last_digest.is_empty() && last_digest != batch.digest {
+                            return Err(refuse(
+                                Reason::SeqDivergent,
+                                &format!(
+                                    "sequence {sequence} has other content than the batch the \
+                                     Store has"
+                                ),
+                            ));
+                        }
                         return Ok((true, parts[2].to_string(), parts[3].to_string(), false));
                     }
                     if sequence < last_sequence {
@@ -604,7 +615,7 @@ impl Store for MemoryStore {
             keys.set(&format!("e{suffix}"), epoch.clone());
             keys.set(
                 &format!("d{suffix}"),
-                format!("{epoch}|{sequence}|{first}|{last}"),
+                format!("{epoch}|{sequence}|{first}|{last}|{}", batch.digest),
             );
             if records > 0 {
                 keys.set(&format!("h{suffix}"), epoch.clone());

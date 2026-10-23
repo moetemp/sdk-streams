@@ -88,6 +88,8 @@ pub struct Batch<'a> {
     pub sequence: i64,
     /// The encoded Records.
     pub records: &'a [Vec<u8>],
+    /// The [crate::digest::batch_digest] of the batch, which the dedupe entry keeps.
+    pub digest: &'a str,
     /// What the batch withdraws.
     pub withdrawal: Withdrawal<'a>,
 }

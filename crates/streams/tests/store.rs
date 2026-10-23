@@ -7,7 +7,7 @@ mod support;
 use prost::Message;
 use prost_types::Timestamp;
 use std::time::Duration;
-use support::{Run, Target, record, records_of, stores, supersession};
+use support::{Run, Target, digest, record, records_of, stores, supersession};
 use temporalio_streams::{
     Reason,
     ids::{activity_producer_id, client_producer_id},
@@ -62,6 +62,7 @@ async fn append(
                 producer,
                 sequence,
                 records: &records,
+                digest: &digest(texts),
                 withdrawal,
             },
         )
@@ -144,6 +145,26 @@ async fn a_resend_gets_its_first_positions_and_a_lower_sequence_is_refused() {
         );
         let texts = target.texts().await;
         assert_eq!(texts, ["p1", "p2", "q1", "p3"]);
+    }
+}
+
+#[tokio::test]
+async fn a_resend_with_other_content_fails_as_divergent() {
+    for target in stores().await {
+        target.create(Owner::Client).await;
+        let p = client(1);
+        let first = append(&target, &p, 1, &["p1"]).await.unwrap();
+        let divergent = append(&target, &p, 1, &["other"]).await.unwrap_err();
+        assert_eq!(divergent.reason, Reason::SeqDivergent);
+        assert_eq!(target.texts().await, ["p1"]);
+        // A dedupe entry written before the digest has none, so it takes any resend.
+        let field = temporalio_streams::ids::fields::dedupe(ProducerKind::Client as i32, &p.id);
+        let entry = target.meta(&field).await.unwrap();
+        target
+            .set_meta(&field, &entry[..entry.rfind('|').unwrap()])
+            .await;
+        let resend = append(&target, &p, 1, &["other"]).await.unwrap();
+        assert_eq!((resend.resend, resend.offsets), (true, first.offsets));
     }
 }
 

@@ -6,6 +6,7 @@
 //! reaches it through the bridge's generic extension calls, with an operation name and proto
 //! bytes. A Workflow makes each call from a Local Activity.
 
+pub mod digest;
 pub mod epoch;
 mod error;
 mod extension;

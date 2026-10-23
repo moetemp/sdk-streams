@@ -1,0 +1,74 @@
+[
+  {
+    "name": "empty batch",
+    "records": [],
+    "digest": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+  },
+  {
+    "name": "one record, no body",
+    "records": [
+      {
+        "topic": ""
+      }
+    ],
+    "digest": "9d908ecfb6b256def8b49a7c504e6c889c4b0e41fe6ce3e01863dd7b61a20aa0"
+  },
+  {
+    "name": "one record",
+    "records": [
+      {
+        "topic": "t",
+        "data": "68656c6c6f"
+      }
+    ],
+    "digest": "62e73e9bb80768f913eb01c40a5c8bc6c4e6a4c8f68205fdaad5b11643783783"
+  },
+  {
+    "name": "metadata in key order",
+    "records": [
+      {
+        "topic": "turns",
+        "metadata": {
+          "encoding": "6a736f6e2f706c61696e",
+          "a": "00ff"
+        },
+        "data": "7b2278223a317d"
+      }
+    ],
+    "digest": "840bc808a032d391264a1697b33e71ec3cc6c51944f530ce47c1135810208fe0"
+  },
+  {
+    "name": "two records",
+    "records": [
+      {
+        "topic": "a",
+        "data": "01"
+      },
+      {
+        "topic": "",
+        "data": "0203"
+      }
+    ],
+    "digest": "6b1a653421bd7e9d1674036644dc305ead949e0224717b570decc66859eed756"
+  },
+  {
+    "name": "topic and data split one way",
+    "records": [
+      {
+        "topic": "ab",
+        "data": "63"
+      }
+    ],
+    "digest": "9c24d27974bb3b173e762a999df89274e93d1e37cba113b996aa47139a011d4a"
+  },
+  {
+    "name": "topic and data split another way",
+    "records": [
+      {
+        "topic": "a",
+        "data": "6263"
+      }
+    ],
+    "digest": "fb9abcb07180be92066c09ce253c0a060e4634fe3accf064b556d89a691c8e5f"
+  }
+]
