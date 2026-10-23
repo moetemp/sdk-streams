@@ -55,6 +55,7 @@ struct Writer {
     producer: Producer,
     previous_completed_task: Option<WorkflowTaskEpoch>,
     failed_tasks: Vec<i64>,
+    task_token: Vec<u8>,
     max_batch: usize,
     max_retry: Duration,
     service: Arc<StreamService>,
@@ -135,6 +136,7 @@ impl Writer {
             records,
             previous_completed_task: self.previous_completed_task,
             failed_tasks: self.failed_tasks.clone(),
+            task_token: self.task_token.clone(),
             ..Default::default()
         };
         let until = Instant::now() + self.max_retry;
@@ -251,6 +253,7 @@ impl Writers {
             producer,
             previous_completed_task: request.previous_completed_task,
             failed_tasks: request.failed_tasks,
+            task_token: request.task_token,
             max_batch: match request.max_batch_size {
                 n if n > 0 => n as usize,
                 _ => DEFAULT_BATCH,

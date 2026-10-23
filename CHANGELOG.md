@@ -174,3 +174,9 @@
   `NativeStreamExtension::from_config_bytes`, `NativeStreamExtension::create`,
   `StreamExtension::for_backend` and `ServiceStore::new` take a `Connection`. `attach` and
   `attach_connection` are gone, so one runtime never calls on another client's connection.
+- The native Store sends the Activity task token on append, close and create, so the server
+  checks the Producer against the Activity's current attempt. `OpenWriterRequest.task_token`
+  (10) gives a writer's token, `Batch::task_token` carries it, and `Store::close` takes it.
+  `Owner::Activity` is a Standalone Activity's create of its own Stream, with its token and the
+  Activity owner fields of its ref. Redis and memory refuse it with `stream_unsupported`.
+- The native Store sends the close Record's status as `CloseStreamRequest.status`.

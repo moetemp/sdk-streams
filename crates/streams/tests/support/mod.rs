@@ -396,6 +396,7 @@ impl Target {
                     sequence,
                     records: &records,
                     digest: &digest(texts),
+                    task_token: &[],
                     withdrawal,
                 },
             )
@@ -419,7 +420,7 @@ impl Target {
         }
         .encode_to_vec();
         self.store
-            .close(&self.namespace, stream, producer, &record)
+            .close(&self.namespace, stream, producer, &[], &record)
             .await
     }
 }

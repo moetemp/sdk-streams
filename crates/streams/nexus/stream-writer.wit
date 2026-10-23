@@ -35,6 +35,10 @@ interface stream-writer {
     failed-tasks: list<s64>,
     /// @nexus.omit
     namespace: placeholder,
+    // An Activity's task token, which each batch sends on the native backend. The Activity
+    // transport sets it.
+    /// @nexus.omit
+    task-token: placeholder,
   }
 
   /// @nexus.proto "temporal.sdk.streams.v1.WriteRecordsRequest"

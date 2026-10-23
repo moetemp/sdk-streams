@@ -29,6 +29,9 @@ pub enum Owner<'a> {
     Workflow(Option<RunOwner<'a>>),
     /// The Stream stays one Retention after its last write.
     Client,
+    /// A Standalone Activity's own Stream, with the Activity's task token, which the server
+    /// checks against the Activity's current attempt. Only the native Store keeps one.
+    Activity(&'a [u8]),
 }
 
 /// What a create found.
@@ -97,6 +100,9 @@ pub struct Batch<'a> {
     pub digest: &'a str,
     /// What the batch withdraws.
     pub withdrawal: Withdrawal<'a>,
+    /// An Activity's task token. The native Store sends it, so the server checks the Producer
+    /// against the Activity's current attempt. Redis and memory can't check it.
+    pub task_token: &'a [u8],
 }
 
 /// The answer of an append.
@@ -321,11 +327,13 @@ pub trait Store: Send + Sync + 'static {
     ) -> StreamResult<bool>;
 
     /// Closes a Stream with an encoded close Record. Needs [Capabilities::CLOSE].
+    /// `task_token` is an Activity's, as on [Batch::task_token].
     async fn close(
         &self,
         _namespace: &str,
         _stream: &StreamRef,
         _producer: &Producer,
+        _task_token: &[u8],
         _record: &[u8],
     ) -> StreamResult<Closed> {
         Err(unsupported("close"))

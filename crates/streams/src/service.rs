@@ -149,6 +149,15 @@ impl StreamService {
                     close_with_run: request.close_with_run,
                 }))
             }
+            // A Standalone Activity creates its own Stream with its task token.
+            None if !request.task_token.is_empty() => {
+                if stream.activity_id.is_empty() {
+                    return Err(StreamError::invalid(
+                        "A create with a task token needs the ref of the owning Activity",
+                    ));
+                }
+                Owner::Activity(&request.task_token)
+            }
             None => Owner::Client,
         };
         if !request.withdraw_run.is_empty() {
@@ -238,6 +247,7 @@ impl StreamService {
             sequence: request.sequence,
             records: &records,
             digest: &digest,
+            task_token: &request.task_token,
             withdrawal: Withdrawal {
                 withdraw_run: &request.withdraw_run,
                 supersession: &bytes,
@@ -278,7 +288,13 @@ impl StreamService {
         let status = caller_status(request.status, request.failure.is_some())?;
         let record = close_record(producer, request.result, request.failure, status);
         self.store
-            .close(&request.namespace, &stream, producer, &record)
+            .close(
+                &request.namespace,
+                &stream,
+                producer,
+                &request.task_token,
+                &record,
+            )
             .await?;
         Ok(CloseStreamResponse {})
     }

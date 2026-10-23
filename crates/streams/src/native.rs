@@ -198,9 +198,10 @@ impl Store for ServiceStore {
         owner: Owner<'_>,
         withdrawal: &Withdrawal<'_>,
     ) -> StreamResult<Created> {
-        let run = match owner {
-            Owner::Workflow(run) => run,
-            Owner::Client => None,
+        let (run, task_token) = match owner {
+            Owner::Workflow(run) => (run, &[][..]),
+            Owner::Client => (None, &[][..]),
+            Owner::Activity(token) => (None, token),
         };
         let retention = retention.or(self.retention);
         let request = CreateStreamRequest {
@@ -212,7 +213,7 @@ impl Store for ServiceStore {
             owner: run.map(|run| run.producer.clone()),
             close_with_run: run.is_some_and(|run| run.close_with_run),
             r#ref: Some(stream.clone()),
-            ..Default::default()
+            task_token: task_token.to_vec(),
         };
         self.create_request(request, retention).await
     }
@@ -252,6 +253,7 @@ impl Store for ServiceStore {
                 .as_ref()
                 .map(|tasks| tasks.failed_tasks.to_vec())
                 .unwrap_or_default(),
+            task_token: batch.task_token.to_vec(),
             ..Default::default()
         };
         let answer: AppendRecordsResponse = self.call(APPEND, namespace, request, None).await?;
@@ -270,6 +272,7 @@ impl Store for ServiceStore {
         namespace: &str,
         stream: &StreamRef,
         producer: &Producer,
+        task_token: &[u8],
         record: &[u8],
     ) -> StreamResult<Closed> {
         let record = decode_record(record)?;
@@ -279,6 +282,8 @@ impl Store for ServiceStore {
             producer: Some(producer.clone()),
             result: record.close_result,
             failure: record.close_failure,
+            status: record.close_status,
+            task_token: task_token.to_vec(),
             ..Default::default()
         };
         let _: CloseStreamResponse = self.call(CLOSE, namespace, request, None).await?;

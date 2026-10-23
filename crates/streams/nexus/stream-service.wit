@@ -39,6 +39,10 @@ interface stream-service {
     first-execution-run-id: option<string>,
     /// @nexus.doc "Registered backend name, empty for the default. The Store never reads it."
     backend: option<string>,
+    /// @nexus.doc "The owning Standalone Activity. Native only. The Store never reads it."
+    activity-id: option<string>,
+    /// @nexus.doc "The run id of the owning Standalone Activity. Empty when activity-id is."
+    activity-run-id: option<string>,
   }
 
   /// @nexus.proto "temporal.api.streamservice.v1.ProducerKind"
@@ -183,6 +187,9 @@ interface stream-service {
     %ref: option<stream-ref>,
     /// @nexus.omit
     namespace: placeholder,
+    // A Standalone Activity's create of its own Stream. The Activity transport sets it.
+    /// @nexus.omit
+    task-token: placeholder,
   }
 
   /// @nexus.proto "temporal.api.streamservice.v1.StreamStatus"
@@ -215,6 +222,9 @@ interface stream-service {
     defer-withdrawal: option<bool>,
     /// @nexus.omit
     namespace: placeholder,
+    // An Activity's write on the native backend. The Activity transport sets it.
+    /// @nexus.omit
+    task-token: placeholder,
   }
 
   /// @nexus.proto "temporal.api.streamservice.v1.AppendRecordsResponse"
@@ -242,6 +252,9 @@ interface stream-service {
     withdraw-run: option<string>,
     /// @nexus.omit
     namespace: placeholder,
+    // An Activity's close on the native backend. The Activity transport sets it.
+    /// @nexus.omit
+    task-token: placeholder,
   }
 
   /// @nexus.proto "temporal.api.streamservice.v1.CloseStreamResponse"

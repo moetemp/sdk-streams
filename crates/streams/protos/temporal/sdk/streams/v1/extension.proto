@@ -73,6 +73,9 @@ message OpenWriterRequest {
     // the writes withdraw the run's orphaned Local Activity Records.
     temporal.api.streamservice.v1.WorkflowTaskEpoch previous_completed_task = 8;
     repeated int64 failed_tasks = 9;
+    // Activity and Standalone Activity only. The task token, which each batch sends as
+    // AppendRecords does, so the native server checks the Producer against the current attempt.
+    bytes task_token = 10;
 }
 
 message OpenWriterResponse {

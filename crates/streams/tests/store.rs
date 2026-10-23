@@ -63,6 +63,7 @@ async fn append(
                 sequence,
                 records: &records,
                 digest: &digest(texts),
+                task_token: &[],
                 withdrawal,
             },
         )

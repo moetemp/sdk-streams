@@ -1164,3 +1164,34 @@ async fn a_page_keeps_under_max_bytes_and_a_larger_record_comes_alone() {
         assert_eq!(texts(&third), ["c"]);
     }
 }
+
+#[tokio::test]
+async fn only_the_native_backend_keeps_a_stream_that_a_standalone_activity_owns() {
+    for case in cases().await {
+        let create = |activity_id: &str| CreateStreamRequest {
+            namespace: case.namespace.clone(),
+            stream_id: case.stream.clone(),
+            r#ref: Some(StreamRef {
+                id: case.stream.clone(),
+                activity_id: activity_id.to_string(),
+                activity_run_id: "ar-1".to_string(),
+                ..Default::default()
+            }),
+            task_token: b"token".to_vec(),
+            ..Default::default()
+        };
+        let error = call::<_, CreateStreamResponse>(&case.ext, "CreateStream", create("a-1"))
+            .await
+            .unwrap_err();
+        assert_eq!(reason(&error), "stream_unsupported");
+        let error = call::<_, CreateStreamResponse>(&case.ext, "CreateStream", create(""))
+            .await
+            .unwrap_err();
+        assert_eq!(reason(&error), "stream_invalid");
+        // Nothing was created.
+        assert_eq!(
+            reason(&case.describe().await.unwrap_err()),
+            "stream_not_found"
+        );
+    }
+}

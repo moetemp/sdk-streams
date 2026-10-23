@@ -94,9 +94,12 @@ impl Store for Masked {
         namespace: &str,
         stream: &StreamRef,
         producer: &Producer,
+        task_token: &[u8],
         record: &[u8],
     ) -> StreamResult<Closed> {
-        self.inner.close(namespace, stream, producer, record).await
+        self.inner
+            .close(namespace, stream, producer, task_token, record)
+            .await
     }
 
     async fn auto_close(&self, namespace: &str, stream_id: &str) -> StreamResult<Option<i64>> {

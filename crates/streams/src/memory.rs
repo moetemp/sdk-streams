@@ -385,6 +385,14 @@ impl MemoryStore {
     }
 }
 
+/// The refusal of a Stream that a Standalone Activity owns, which only the server keeps.
+pub(crate) fn activity_owner() -> StreamError {
+    StreamError::new(
+        Reason::Unsupported,
+        "Only the native backend keeps a Stream that a Standalone Activity owns",
+    )
+}
+
 fn encode_run(run_id: &str) -> String {
     if run_id.is_empty() {
         String::new()
@@ -432,6 +440,7 @@ impl Store for MemoryStore {
         let owner = match owner {
             Owner::Workflow(_) => "wf",
             Owner::Client => "client",
+            Owner::Activity(_) => return Err(activity_owner()),
         };
         let (safety, tombstone) = (millis(self.safety_ttl), millis(TOMBSTONE));
         let withdrawn_run = encode_run(withdrawal.withdraw_run);
@@ -708,6 +717,7 @@ impl Store for MemoryStore {
         namespace: &str,
         stream: &StreamRef,
         producer: &Producer,
+        _task_token: &[u8],
         record: &[u8],
     ) -> StreamResult<Closed> {
         let stream_id = stream.id.as_str();
