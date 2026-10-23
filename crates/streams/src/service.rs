@@ -114,6 +114,14 @@ impl StreamService {
         request: CreateStreamRequest,
     ) -> StreamResult<CreateStreamResponse> {
         check_stream_id(&request.stream_id)?;
+        let stream = request
+            .r#ref
+            .clone()
+            .filter(|stream| stream.id == request.stream_id)
+            .unwrap_or_else(|| StreamRef {
+                id: request.stream_id.clone(),
+                ..Default::default()
+            });
         let auto_close = duration(request.auto_close);
         if auto_close.is_some() {
             self.store
@@ -150,7 +158,7 @@ impl StreamService {
             .store
             .create(
                 &request.namespace,
-                &request.stream_id,
+                &stream,
                 duration(request.retention),
                 auto_close,
                 owner,
@@ -189,7 +197,8 @@ impl StreamService {
         &self,
         request: AppendRecordsRequest,
     ) -> StreamResult<AppendRecordsResponse> {
-        let id = stream_id(request.stream.as_ref())?;
+        stream_id(request.stream.as_ref())?;
+        let stream = request.stream.clone().unwrap_or_default();
         let producer = outside_producer(request.producer.as_ref())?;
         if request.sequence < 1 {
             return Err(StreamError::invalid("The sequence must be 1 or more"));
@@ -227,7 +236,7 @@ impl StreamService {
                 }),
             },
         };
-        let appended = self.store.append(&request.namespace, id, &batch).await;
+        let appended = self.store.append(&request.namespace, &stream, &batch).await;
         let appended = self.count(appended)?;
         let (first_offset, last_offset) = appended.offsets.unwrap_or_default();
         Ok(AppendRecordsResponse {
@@ -250,12 +259,13 @@ impl StreamService {
         &self,
         request: CloseStreamRequest,
     ) -> StreamResult<CloseStreamResponse> {
-        let id = stream_id(request.stream.as_ref())?;
+        stream_id(request.stream.as_ref())?;
+        let stream = request.stream.clone().unwrap_or_default();
         let producer = outside_producer(request.producer.as_ref())?;
         self.store.capabilities().require(Capabilities::CLOSE)?;
         let record = close_record(producer, request.result, request.failure);
         self.store
-            .close(&request.namespace, id, producer, &record)
+            .close(&request.namespace, &stream, producer, &record)
             .await?;
         Ok(CloseStreamResponse {})
     }

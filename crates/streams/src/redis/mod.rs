@@ -14,7 +14,7 @@ use crate::{
     epoch::{epoch_key, task_key, task_of},
     ids::{StreamKeys, encode_part},
     offset::{entry_id_of_offset, offset_of_entry_id},
-    proto::{Producer, ProducerKind},
+    proto::{Producer, ProducerKind, StreamRef},
     store::{Capabilities, Store},
 };
 use conn::{BlockingPool, Shared};
@@ -363,14 +363,14 @@ impl Store for RedisStore {
     async fn create(
         &self,
         namespace: &str,
-        stream_id: &str,
+        stream: &StreamRef,
         retention: Option<Duration>,
         auto_close: Option<Duration>,
         owner: Owner,
         withdrawal: &Withdrawal<'_>,
     ) -> StreamResult<Created> {
         RedisStore::create(
-            self, namespace, stream_id, retention, auto_close, owner, withdrawal,
+            self, namespace, &stream.id, retention, auto_close, owner, withdrawal,
         )
         .await
     }
@@ -378,20 +378,20 @@ impl Store for RedisStore {
     async fn append(
         &self,
         namespace: &str,
-        stream_id: &str,
+        stream: &StreamRef,
         batch: &Batch<'_>,
     ) -> StreamResult<Appended> {
-        RedisStore::append(self, namespace, stream_id, batch).await
+        RedisStore::append(self, namespace, &stream.id, batch).await
     }
 
     async fn close(
         &self,
         namespace: &str,
-        stream_id: &str,
+        stream: &StreamRef,
         producer: &Producer,
         record: &[u8],
     ) -> StreamResult<Closed> {
-        RedisStore::close(self, namespace, stream_id, producer, record).await
+        RedisStore::close(self, namespace, &stream.id, producer, record).await
     }
 
     async fn read(

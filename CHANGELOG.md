@@ -104,3 +104,5 @@
   metadata in key order. A resend with the last `sequence` and other content fails with
   `FAILED_PRECONDITION` and the reason `seq_divergent`, instead of answering the stored offsets.
   `testdata/digests.json` pins the digest for the server and every SDK.
+- `Store::create`, `Store::append` and `Store::close` take the Stream's whole `StreamRef`, so a
+  Store can check the owner fields. Redis and memory key on its id.
