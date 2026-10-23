@@ -187,3 +187,8 @@
 - A native error with the reason `seq_divergent` or `stream_not_owner` reads back to its reason.
   The native tests write with named clients, since the server refuses an Activity Producer with
   no task token.
+  earlier one.
+- A client Producer's newer epoch fences its earlier epochs but writes no `Superseded` item and
+  withdraws nothing, in the Redis script, the memory Store and the reader rule. The withdrawal
+  rule stays for Workflow, Local Activity and Activity Producers. `testdata/withdrawals.json` has
+  the case.

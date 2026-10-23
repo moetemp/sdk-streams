@@ -366,8 +366,8 @@ async fn a_named_client_with_a_higher_epoch_fences_its_earlier_self() {
         case.write(new, &["new"]).await.unwrap();
         let error = case.write(old, &["late"]).await.unwrap_err();
         assert_eq!(reason(&error), "stream_fenced");
-        // A new epoch withdraws what the earlier one wrote, as an Activity retry does.
-        assert_eq!(case.visible().await, ["new"]);
+        // The earlier epoch's Records are real messages, so the new epoch withdraws none.
+        assert_eq!(case.visible().await, ["old", "new"]);
     }
 }
 
