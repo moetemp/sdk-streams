@@ -351,8 +351,11 @@ async fn a_topic_filter_keeps_superseded_items() {
             .unwrap();
         let all = case.read(ReadRecordsRequest::default()).await.unwrap();
         assert_eq!(texts(&all), ["old", "<superseded>", "b1", "a1"]);
+        // The item comes just before the batch's first Record. Redis keeps both in one entry with
+        // one offset, and the server gives the item its own offset just below.
         let superseded = &all.records[1];
-        assert_eq!(superseded.offset, all.records[2].offset);
+        assert!(all.records[0].offset < superseded.offset);
+        assert!(superseded.offset <= all.records[2].offset);
         let supersession = superseded.supersession.as_ref().unwrap();
         assert_eq!(supersession.producer_id, named("w", 2).id);
         let only_a = case
