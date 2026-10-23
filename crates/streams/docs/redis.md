@@ -49,6 +49,10 @@ Each entry has `r`, the encoded `temporal.api.streamservice.v1.StreamRecord` wit
 only `s` withdraws and has no Record. A reader gives a `SUPERSEDED` item for `s` just before the
 Record of the same entry. An offset is the entry id `<ms>-<seq>` packed as `ms << 20 | seq`.
 
+The first batch of a Producer's newer epoch withdraws its earlier epochs' Records, for a
+Workflow, a Local Activity and an Activity. A client's newer epoch only fences: it writes no `s`,
+since a restarted client's earlier Records are real messages, not a failed attempt's.
+
 ## Orphaned Local Activity Records
 
 A Local Activity batch that gives its run's last completed Workflow Task (`previous_completed_task`,

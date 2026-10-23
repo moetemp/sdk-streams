@@ -141,4 +141,8 @@
   gone, and it no longer grows for the life of the process.
 - `ids::named_client_producer_id` makes `client:<name>`, a client Producer id that the caller
   keeps across restarts. With the caller's epoch in `attempt`, a new incarnation fences the
-  earlier one and withdraws its Records, as an Activity retry does.
+  earlier one.
+- A client Producer's newer epoch fences its earlier epochs but writes no `Superseded` item and
+  withdraws nothing, in the Redis script, the memory Store and the reader rule. The withdrawal
+  rule stays for Workflow, Local Activity and Activity Producers. `testdata/withdrawals.json` has
+  the case.

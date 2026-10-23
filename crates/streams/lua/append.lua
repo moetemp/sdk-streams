@@ -68,9 +68,10 @@ if refused then
   return refused
 end
 
--- The first batch of a newer epoch withdraws the Records of the earlier ones.
+-- The first batch of a newer epoch withdraws the Records of the earlier ones. A client's (4)
+-- newer epoch only fences, since its earlier Records are real messages.
 local holds = redis.call('HGET', meta, 'h' .. suffix)
-local flagged = holds ~= false and holds < epoch
+local flagged = kind ~= '4' and holds ~= false and holds < epoch
 if withdraw_run(meta, withdrawn_run) then
   flagged = true
 end

@@ -14,7 +14,7 @@ use temporalio_common::protos::temporal::api::{common::v1::Payload, failure::v1:
 use temporalio_streams::{
     MemoryStreamExtension, RedisStreamExtension, StreamError,
     epoch::withdraws,
-    ids::{client_producer_id, named_client_producer_id},
+    ids::{activity_producer_id, client_producer_id, named_client_producer_id},
     proto::{
         AppendRecord, AppendRecordsRequest, AppendRecordsResponse, CloseStatus, CloseStreamRequest,
         CloseStreamResponse, CreateStreamRequest, CreateStreamResponse, DescribeStreamRequest,
@@ -29,6 +29,8 @@ struct Case {
     ext: Arc<RedisStreamExtension>,
     namespace: String,
     stream: String,
+    /// What the backend gives, for a step that needs more than the case asked for.
+    gives: Needs,
 }
 
 static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
@@ -53,6 +55,7 @@ async fn cases_for(needs: Needs) -> Vec<Case> {
                 ext: runtime.ext,
                 namespace: runtime.namespace.unwrap_or(format!("ns-{unique}")),
                 stream: format!("s-{unique}"),
+                gives: runtime.gives,
             }
         })
         .collect()
@@ -85,8 +88,7 @@ fn client(attempt: i32) -> Producer {
     }
 }
 
-/// A client Producer that a test names, at `attempt`. A higher attempt withdraws the Records of the
-/// lower ones, as an Activity retry does, on every backend.
+/// A client Producer that a test names, at `attempt`. Every backend takes it as sent.
 fn named(name: &str, attempt: i32) -> Producer {
     Producer {
         kind: ProducerKind::Client as i32,
@@ -96,6 +98,24 @@ fn named(name: &str, attempt: i32) -> Producer {
             ..Default::default()
         }),
         run_id: String::new(),
+    }
+}
+
+/// An Activity Producer of a made-up run, at `attempt`. A higher attempt withdraws the lower
+/// ones' Records. The server wants the Activity's task token, so only Redis and memory take it.
+fn activity(attempt: i32, scheduled: i64) -> Producer {
+    Producer {
+        kind: ProducerKind::Activity as i32,
+        id: activity_producer_id("r1", "a", "s"),
+        epoch: Some(ProducerEpoch {
+            attempt_scheduled_time: Some(Timestamp {
+                seconds: scheduled,
+                nanos: 0,
+            }),
+            attempt,
+            ..Default::default()
+        }),
+        run_id: "r1".to_string(),
     }
 }
 
@@ -341,14 +361,18 @@ async fn a_read_is_inclusive_from_its_offset_and_get_offset_reads_only_new_recor
 /// A Topic filter keeps the `Superseded` items, which pass every filter.
 #[tokio::test]
 async fn a_topic_filter_keeps_superseded_items() {
-    for case in cases_for(Needs::CALLS).await {
+    for case in cases_for(Needs::UNCHECKED).await {
         case.create(None).await.unwrap();
-        case.append(named("w", 1), 1, vec![record("a", "old")])
+        case.append(activity(1, 10), 1, vec![record("a", "old")])
             .await
             .unwrap();
-        case.append(named("w", 2), 1, vec![record("b", "b1"), record("a", "a1")])
-            .await
-            .unwrap();
+        case.append(
+            activity(2, 20),
+            1,
+            vec![record("b", "b1"), record("a", "a1")],
+        )
+        .await
+        .unwrap();
         let all = case.read(ReadRecordsRequest::default()).await.unwrap();
         assert_eq!(texts(&all), ["old", "<superseded>", "b1", "a1"]);
         // The item comes just before the batch's first Record. Redis keeps both in one entry with
@@ -357,7 +381,7 @@ async fn a_topic_filter_keeps_superseded_items() {
         assert!(all.records[0].offset < superseded.offset);
         assert!(superseded.offset <= all.records[2].offset);
         let supersession = superseded.supersession.as_ref().unwrap();
-        assert_eq!(supersession.producer_id, named("w", 2).id);
+        assert_eq!(supersession.producer_id, activity(2, 20).id);
         let only_a = case
             .read(ReadRecordsRequest {
                 topics: vec!["a".to_string()],
@@ -578,13 +602,13 @@ async fn a_read_of_an_expired_open_stream_fails_instead_of_waiting() {
 /// A prefix filter reads the Topics under it and keeps the `Superseded` items.
 #[tokio::test]
 async fn a_prefix_filter_reads_the_topics_under_it_and_keeps_superseded_items() {
-    for case in cases_for(Needs::CALLS).await {
+    for case in cases_for(Needs::UNCHECKED).await {
         case.create(None).await.unwrap();
-        case.append(named("w", 1), 1, vec![record("tool/a", "old")])
+        case.append(activity(1, 10), 1, vec![record("tool/a", "old")])
             .await
             .unwrap();
         case.append(
-            named("w", 2),
+            activity(2, 20),
             1,
             vec![
                 record("turns", "t1"),
@@ -746,6 +770,7 @@ async fn a_create_answer_names_the_backend_and_the_store_never_reads_it() {
             ext,
             namespace: format!("ns-{unique}"),
             stream: format!("s-{unique}"),
+            gives: Needs::ALL,
         };
         let created = case.create(None).await.unwrap();
         let stream = created.stream.unwrap();
@@ -1134,13 +1159,19 @@ async fn a_last_read_gives_the_newest_records_oldest_first_without_withdrawn_one
         assert!(case.read(last(5, &[])).await.unwrap().records.is_empty());
         let records = vec![record("t", "c1"), record("u", "c2"), record("t", "c3")];
         case.append(client(1), 1, records).await.unwrap();
-        case.append(named("w", 1), 1, vec![record("t", "a1")])
-            .await
-            .unwrap();
-        // The next epoch's first batch withdraws a1, so a1 doesn't count.
-        case.append(named("w", 2), 1, vec![record("t", "a2")])
-            .await
-            .unwrap();
+        if case.gives.gives(Needs::UNCHECKED) {
+            case.append(activity(1, 10), 1, vec![record("t", "a1")])
+                .await
+                .unwrap();
+            // The retry's first batch withdraws a1, so a1 doesn't count.
+            case.append(activity(2, 20), 1, vec![record("t", "a2")])
+                .await
+                .unwrap();
+        } else {
+            case.append(named("w", 1), 1, vec![record("t", "a2")])
+                .await
+                .unwrap();
+        }
         assert_eq!(
             texts(&case.read(last(3, &[])).await.unwrap()),
             ["c2", "c3", "a2"]
