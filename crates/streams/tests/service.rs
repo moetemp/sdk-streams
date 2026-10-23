@@ -2,6 +2,8 @@
 
 mod support;
 
+use support::Needs;
+
 use prost::Message;
 use prost_types::Timestamp;
 use std::{
@@ -12,7 +14,7 @@ use temporalio_common::protos::temporal::api::{common::v1::Payload, failure::v1:
 use temporalio_streams::{
     MemoryStreamExtension, RedisStreamExtension, StreamError,
     epoch::withdraws,
-    ids::{activity_producer_id, client_producer_id},
+    ids::{client_producer_id, named_client_producer_id},
     proto::{
         AppendRecord, AppendRecordsRequest, AppendRecordsResponse, CloseStatus, CloseStreamRequest,
         CloseStreamResponse, CreateStreamRequest, CreateStreamResponse, DescribeStreamRequest,
@@ -40,14 +42,16 @@ fn unique() -> String {
     format!("{now}-{n}")
 }
 
-async fn cases() -> Vec<Case> {
-    support::extensions(|_| {}, true)
+/// A fresh Stream on each backend that gives `needs`.
+async fn cases_for(needs: Needs) -> Vec<Case> {
+    support::runtimes(needs)
+        .await
         .into_iter()
-        .map(|ext| {
+        .map(|runtime| {
             let unique = unique();
             Case {
-                ext,
-                namespace: format!("ns-{unique}"),
+                ext: runtime.ext,
+                namespace: runtime.namespace.unwrap_or(format!("ns-{unique}")),
                 stream: format!("s-{unique}"),
             }
         })
@@ -81,19 +85,17 @@ fn client(attempt: i32) -> Producer {
     }
 }
 
-fn activity(attempt: i32, scheduled: i64) -> Producer {
+/// A client Producer that a test names, at `attempt`. A higher attempt withdraws the Records of the
+/// lower ones, as an Activity retry does, on every backend.
+fn named(name: &str, attempt: i32) -> Producer {
     Producer {
-        kind: ProducerKind::Activity as i32,
-        id: activity_producer_id("r1", "a", "s"),
+        kind: ProducerKind::Client as i32,
+        id: named_client_producer_id(name),
         epoch: Some(ProducerEpoch {
-            attempt_scheduled_time: Some(Timestamp {
-                seconds: scheduled,
-                nanos: 0,
-            }),
             attempt,
             ..Default::default()
         }),
-        run_id: "r1".to_string(),
+        run_id: String::new(),
     }
 }
 
@@ -239,9 +241,11 @@ fn texts(response: &ReadRecordsResponse) -> Vec<String> {
         .collect()
 }
 
+/// A create is idempotent for one Retention, and another Retention fails with
+/// `stream_already_exists`.
 #[tokio::test]
 async fn a_create_is_idempotent_for_one_retention() {
-    for case in cases().await {
+    for case in cases_for(Needs::CALLS).await {
         let created = case.create(None).await.unwrap();
         assert!(created.created);
         assert_eq!(created.status, StreamStatus::Open as i32);
@@ -252,9 +256,10 @@ async fn a_create_is_idempotent_for_one_retention() {
     }
 }
 
+/// A Producer's id must match its kind, and a Workflow appends only through a Local Activity.
 #[tokio::test]
 async fn a_producer_must_match_its_kind_and_not_be_a_workflow() {
-    for case in cases().await {
+    for case in cases_for(Needs::CALLS).await {
         case.create(None).await.unwrap();
         let wrong = Producer {
             kind: ProducerKind::Activity as i32,
@@ -279,9 +284,11 @@ async fn a_producer_must_match_its_kind_and_not_be_a_workflow() {
     }
 }
 
+/// A read is inclusive from its offset, a read from the end gives only new Records, and an
+/// offset past the newest + 1 fails with `stream_offset`.
 #[tokio::test]
 async fn a_read_is_inclusive_from_its_offset_and_get_offset_reads_only_new_records() {
-    for case in cases().await {
+    for case in cases_for(Needs::CALLS).await {
         case.create(None).await.unwrap();
         let first = case
             .append(client(1), 1, vec![record("a", "1"), record("b", "2")])
@@ -331,26 +338,23 @@ async fn a_read_is_inclusive_from_its_offset_and_get_offset_reads_only_new_recor
     }
 }
 
+/// A Topic filter keeps the `Superseded` items, which pass every filter.
 #[tokio::test]
 async fn a_topic_filter_keeps_superseded_items() {
-    for case in cases().await {
+    for case in cases_for(Needs::CALLS).await {
         case.create(None).await.unwrap();
-        case.append(activity(1, 10), 1, vec![record("a", "old")])
+        case.append(named("w", 1), 1, vec![record("a", "old")])
             .await
             .unwrap();
-        case.append(
-            activity(2, 20),
-            1,
-            vec![record("b", "b1"), record("a", "a1")],
-        )
-        .await
-        .unwrap();
+        case.append(named("w", 2), 1, vec![record("b", "b1"), record("a", "a1")])
+            .await
+            .unwrap();
         let all = case.read(ReadRecordsRequest::default()).await.unwrap();
         assert_eq!(texts(&all), ["old", "<superseded>", "b1", "a1"]);
         let superseded = &all.records[1];
         assert_eq!(superseded.offset, all.records[2].offset);
         let supersession = superseded.supersession.as_ref().unwrap();
-        assert_eq!(supersession.producer_id, activity(2, 20).id);
+        assert_eq!(supersession.producer_id, named("w", 2).id);
         let only_a = case
             .read(ReadRecordsRequest {
                 topics: vec!["a".to_string()],
@@ -362,9 +366,10 @@ async fn a_topic_filter_keeps_superseded_items() {
     }
 }
 
+/// A read waits for the Stream's create only as long as `create_wait`.
 #[tokio::test]
 async fn a_read_waits_for_the_create_only_as_long_as_create_wait() {
-    for case in cases().await {
+    for case in cases_for(Needs::CALLS).await {
         let error = case.read(ReadRecordsRequest::default()).await.unwrap_err();
         assert_eq!(
             (error.code(), reason(&error).as_str()),
@@ -403,9 +408,10 @@ async fn a_read_waits_for_the_create_only_as_long_as_create_wait() {
     }
 }
 
+/// A quiet read ends empty after its wait, and a long poll wakes on an append.
 #[tokio::test]
 async fn a_quiet_read_ends_empty_after_its_wait_and_a_long_poll_wakes_on_append() {
-    for case in cases().await {
+    for case in cases_for(Needs::CALLS).await {
         case.create(None).await.unwrap();
         let first = case
             .append(client(1), 1, vec![record("", "1")])
@@ -456,9 +462,11 @@ async fn a_quiet_read_ends_empty_after_its_wait_and_a_long_poll_wakes_on_append(
     }
 }
 
+/// A close ends every read with its close Record and refuses later appends, and a create finds
+/// the Stream closed.
 #[tokio::test]
 async fn a_close_ends_every_read_with_its_record() {
-    for case in cases().await {
+    for case in cases_for(Needs::CALLS).await {
         case.create(None).await.unwrap();
         case.append(client(1), 1, vec![record("", "1")])
             .await
@@ -494,9 +502,10 @@ async fn a_close_ends_every_read_with_its_record() {
     }
 }
 
+/// A read from an offset that the Retention trimmed fails with `stream_expired`.
 #[tokio::test]
 async fn a_read_from_a_trimmed_offset_fails_as_expired() {
-    for case in cases().await {
+    for case in cases_for(Needs::SHORT_TIMES).await {
         case.create(millis(200)).await.unwrap();
         // Each write keeps the client Stream one more Retention, so only the old Record goes.
         let old = case
@@ -527,17 +536,19 @@ async fn a_read_from_a_trimmed_offset_fails_as_expired() {
     }
 }
 
+/// An unknown method fails with UNIMPLEMENTED.
 #[tokio::test]
 async fn an_unknown_method_is_unimplemented() {
-    for case in cases().await {
+    for case in cases_for(Needs::CALLS).await {
         let error = case.ext.call("Nope", &[]).await.unwrap_err();
         assert_eq!(error.code(), Code::Unimplemented);
     }
 }
 
+/// A read of an open Stream that expired fails at once instead of waiting.
 #[tokio::test]
 async fn a_read_of_an_expired_open_stream_fails_instead_of_waiting() {
-    for case in cases().await {
+    for case in cases_for(Needs::SHORT_TIMES).await {
         case.create(millis(300)).await.unwrap();
         case.append(client(1), 1, vec![record("", "1")])
             .await
@@ -561,15 +572,16 @@ async fn a_read_of_an_expired_open_stream_fails_instead_of_waiting() {
     }
 }
 
+/// A prefix filter reads the Topics under it and keeps the `Superseded` items.
 #[tokio::test]
 async fn a_prefix_filter_reads_the_topics_under_it_and_keeps_superseded_items() {
-    for case in cases().await {
+    for case in cases_for(Needs::CALLS).await {
         case.create(None).await.unwrap();
-        case.append(activity(1, 10), 1, vec![record("tool/a", "old")])
+        case.append(named("w", 1), 1, vec![record("tool/a", "old")])
             .await
             .unwrap();
         case.append(
-            activity(2, 20),
+            named("w", 2),
             1,
             vec![
                 record("turns", "t1"),
@@ -601,9 +613,10 @@ async fn a_prefix_filter_reads_the_topics_under_it_and_keeps_superseded_items() 
     }
 }
 
+/// A ref with the owner fields and one without reach the same Stream.
 #[tokio::test]
 async fn a_ref_with_the_owner_fields_and_one_without_reach_the_same_stream() {
-    for case in cases().await {
+    for case in cases_for(Needs::ID_KEYS).await {
         case.create(None).await.unwrap();
         let owned = Some(StreamRef {
             id: case.stream.clone(),
@@ -644,9 +657,10 @@ async fn a_ref_with_the_owner_fields_and_one_without_reach_the_same_stream() {
     }
 }
 
+/// An auto close ends a long poll with its close Record and refuses later appends.
 #[tokio::test]
 async fn an_auto_close_ends_a_long_poll_and_refuses_later_appends() {
-    for case in cases().await {
+    for case in cases_for(Needs::SHORT_TIMES).await {
         let created = case.create_auto_close(millis(400)).await.unwrap();
         assert!(created.created);
         assert!(case.create_auto_close(millis(400)).await.is_ok());
@@ -690,9 +704,10 @@ async fn an_auto_close_ends_a_long_poll_and_refuses_later_appends() {
     }
 }
 
+/// A describe or a read applies a due auto close.
 #[tokio::test]
 async fn a_describe_or_a_read_applies_a_due_auto_close() {
-    for case in cases().await {
+    for case in cases_for(Needs::SHORT_TIMES).await {
         case.create_auto_close(millis(200)).await.unwrap();
         tokio::time::sleep(Duration::from_millis(300)).await;
         let described = case.describe().await.unwrap();
@@ -702,7 +717,7 @@ async fn a_describe_or_a_read_applies_a_due_auto_close() {
         assert_eq!(texts(&read), ["<close>"]);
         assert_eq!(read.records[0].offset, described.last_offset);
     }
-    for case in cases().await {
+    for case in cases_for(Needs::SHORT_TIMES).await {
         case.create_auto_close(millis(200)).await.unwrap();
         tokio::time::sleep(Duration::from_millis(300)).await;
         let read = case.read(ReadRecordsRequest::default()).await.unwrap();
@@ -711,6 +726,7 @@ async fn a_describe_or_a_read_applies_a_due_auto_close() {
     }
 }
 
+/// A create answer names the configured backend, and the Store never reads it.
 #[tokio::test]
 async fn a_create_answer_names_the_backend_and_the_store_never_reads_it() {
     let mut configured =
@@ -760,7 +776,7 @@ async fn a_create_answer_names_the_backend_and_the_store_never_reads_it() {
         assert_eq!(texts(&read), ["1", "2", "3"]);
     }
     // With no backend in the config, the ref has none, and lang reads it as the default.
-    for case in cases().await {
+    for case in cases_for(Needs::OWN_CONFIG).await {
         let created = case.create(None).await.unwrap();
         assert_eq!(created.stream.unwrap().backend, "");
         // The answer keeps the owner fields of the create's ref, which the server routes by.
@@ -816,9 +832,10 @@ fn workflow_owner(run: &str) -> Producer {
     }
 }
 
+/// A retry run's Local Activity calls withdraw the previous run.
 #[tokio::test]
 async fn a_retry_run_s_local_activity_calls_withdraw_the_previous_run() {
-    for case in cases().await {
+    for case in cases_for(Needs::UNCHECKED).await {
         let (previous, retry) = (format!("{}-r1", case.stream), format!("{}-r2", case.stream));
         let create = |run: &str, withdraw_run: &str| CreateStreamRequest {
             namespace: case.namespace.clone(),
@@ -904,9 +921,10 @@ fn user_local_activity(run: &str, started: i64, seconds: i64) -> Producer {
     }
 }
 
+/// A Local Activity rerun in a later task supersedes its first attempt.
 #[tokio::test]
 async fn a_rerun_local_activity_supersedes_its_first_attempt() {
-    for case in cases().await {
+    for case in cases_for(Needs::UNCHECKED).await {
         let run = format!("{}-run", case.stream);
         let _: CreateStreamResponse = call(
             &case.ext,
@@ -992,9 +1010,10 @@ fn local_activity_write(
     }
 }
 
+/// A Local Activity of a task that never completed is withdrawn by the run's next write.
 #[tokio::test]
 async fn a_local_activity_of_a_task_that_never_completed_is_withdrawn_by_the_next_write() {
-    for case in cases().await {
+    for case in cases_for(Needs::UNCHECKED).await {
         let run = format!("{}-run", case.stream);
         case.create(None).await.unwrap();
         // Task [2] completed. Task [3] runs a Local Activity that writes, then task [3] fails.
@@ -1057,9 +1076,10 @@ async fn a_local_activity_of_a_task_that_never_completed_is_withdrawn_by_the_nex
     }
 }
 
+/// A failed task before the last completed one is withdrawn by its id.
 #[tokio::test]
 async fn a_failed_task_before_the_last_completed_one_is_withdrawn_by_its_id() {
-    for case in cases().await {
+    for case in cases_for(Needs::UNCHECKED).await {
         let run = format!("{}-run", case.stream);
         case.create(None).await.unwrap();
         let _: AppendRecordsResponse = call(
@@ -1081,9 +1101,10 @@ async fn a_failed_task_before_the_last_completed_one_is_withdrawn_by_its_id() {
     }
 }
 
+/// A close Record gives its status, and a caller can't close as terminated or timed out.
 #[tokio::test]
 async fn a_close_record_gives_its_status_and_a_caller_cant_terminate() {
-    for case in cases().await {
+    for case in cases_for(Needs::CALLS).await {
         case.create(None).await.unwrap();
         let close = |status: CloseStatus, failure: Option<Failure>| CloseStreamRequest {
             namespace: case.namespace.clone(),
@@ -1118,9 +1139,11 @@ async fn a_close_record_gives_its_status_and_a_caller_cant_terminate() {
     }
 }
 
+/// A last read gives the newest Records oldest first, skips withdrawn ones, and ends with the
+/// close Record of a closed Stream.
 #[tokio::test]
 async fn a_last_read_gives_the_newest_records_oldest_first_without_withdrawn_ones() {
-    for case in cases().await {
+    for case in cases_for(Needs::CALLS).await {
         case.create(None).await.unwrap();
         let last = |n: i32, topics: &[&str]| ReadRecordsRequest {
             last: n,
@@ -1130,11 +1153,11 @@ async fn a_last_read_gives_the_newest_records_oldest_first_without_withdrawn_one
         assert!(case.read(last(5, &[])).await.unwrap().records.is_empty());
         let records = vec![record("t", "c1"), record("u", "c2"), record("t", "c3")];
         case.append(client(1), 1, records).await.unwrap();
-        case.append(activity(1, 10), 1, vec![record("t", "a1")])
+        case.append(named("w", 1), 1, vec![record("t", "a1")])
             .await
             .unwrap();
-        // The retry's first batch withdraws a1, so a1 doesn't count.
-        case.append(activity(2, 20), 1, vec![record("t", "a2")])
+        // The next epoch's first batch withdraws a1, so a1 doesn't count.
+        case.append(named("w", 2), 1, vec![record("t", "a2")])
             .await
             .unwrap();
         assert_eq!(
@@ -1161,9 +1184,10 @@ async fn a_last_read_gives_the_newest_records_oldest_first_without_withdrawn_one
     }
 }
 
+/// A page keeps under `max_bytes`, and a larger Record still comes alone.
 #[tokio::test]
 async fn a_page_keeps_under_max_bytes_and_a_larger_record_comes_alone() {
-    for case in cases().await {
+    for case in cases_for(Needs::CALLS).await {
         case.create(None).await.unwrap();
         let big = "x".repeat(1000);
         let records = vec![
@@ -1187,9 +1211,11 @@ async fn a_page_keeps_under_max_bytes_and_a_larger_record_comes_alone() {
     }
 }
 
+/// A Store that keys on the id only, as Redis and memory do, can't nest a Stream in a Standalone
+/// Activity, so it refuses one with `stream_unsupported` and writes nothing.
 #[tokio::test]
 async fn only_the_native_backend_keeps_a_stream_that_a_standalone_activity_owns() {
-    for case in cases().await {
+    for case in cases_for(Needs::ID_KEYS).await {
         let create = |activity_id: &str| CreateStreamRequest {
             namespace: case.namespace.clone(),
             stream_id: case.stream.clone(),

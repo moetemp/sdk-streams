@@ -7,10 +7,12 @@ mod support;
 use prost::Message;
 use prost_types::Timestamp;
 use std::time::Duration;
-use support::{Run, Target, digest, record, records_of, stores, supersession};
+use support::{Needs, Run, Target, digest, record, records_of, stores_for, supersession};
 use temporalio_streams::{
     Reason,
-    ids::{activity_producer_id, client_producer_id, workflow_producer_id},
+    ids::{
+        activity_producer_id, client_producer_id, named_client_producer_id, workflow_producer_id,
+    },
     proto::{Producer, ProducerEpoch, ProducerKind, StreamRef},
     store::{Batch, Capabilities, CreateOutcome, Owner, Withdrawal},
 };
@@ -43,6 +45,14 @@ fn client(attempt: i32) -> Producer {
     }
 }
 
+/// A second client Producer, which every backend takes as sent.
+fn other_client() -> Producer {
+    Producer {
+        id: named_client_producer_id("other"),
+        ..client(1)
+    }
+}
+
 async fn append(
     target: &Target,
     producer: &Producer,
@@ -70,9 +80,10 @@ async fn append(
         .await
 }
 
+/// A create writes the key once, and another Retention is a conflict that keeps the stored one.
 #[tokio::test]
 async fn a_create_writes_the_key_once_and_keeps_its_retention() {
-    for target in stores().await {
+    for target in stores_for(Needs::STORE_ANSWERS).await {
         let none = Withdrawal::default();
         assert_eq!(
             append(&target, &client(1), 1, &["x"])
@@ -125,20 +136,21 @@ async fn a_create_writes_the_key_once_and_keeps_its_retention() {
     }
 }
 
+/// A resend with the last sequence gets the offsets of its first answer, also after another
+/// Producer wrote, and a lower sequence is refused.
 #[tokio::test]
 async fn a_resend_gets_its_first_positions_and_a_lower_sequence_is_refused() {
-    for target in stores().await {
+    for target in stores_for(Needs::CALLS).await {
         target.create(Owner::Client).await;
         let p = client(1);
         let first = append(&target, &p, 1, &["p1", "p2"]).await.unwrap();
-        assert!(!first.resend);
         // Another Producer writes between the batch and its resend.
-        append(&target, &activity("r", 1, 10), 1, &["q1"])
-            .await
-            .unwrap();
+        append(&target, &other_client(), 1, &["q1"]).await.unwrap();
         let resend = append(&target, &p, 1, &["p1", "p2"]).await.unwrap();
-        assert!(resend.resend);
         assert_eq!(resend.offsets, first.offsets);
+        if target.gives.gives(Needs::STORE_ANSWERS) {
+            assert!(!first.resend && resend.resend);
+        }
         append(&target, &p, 2, &["p3"]).await.unwrap();
         assert_eq!(
             append(&target, &p, 1, &["p1"]).await.unwrap_err().reason,
@@ -149,15 +161,20 @@ async fn a_resend_gets_its_first_positions_and_a_lower_sequence_is_refused() {
     }
 }
 
+/// A resend with the last sequence and other content fails as `seq_divergent` and writes
+/// nothing. With `RAW_KEYS`, a dedupe entry from before the digest takes any resend.
 #[tokio::test]
 async fn a_resend_with_other_content_fails_as_divergent() {
-    for target in stores().await {
+    for target in stores_for(Needs::CALLS).await {
         target.create(Owner::Client).await;
         let p = client(1);
         let first = append(&target, &p, 1, &["p1"]).await.unwrap();
         let divergent = append(&target, &p, 1, &["other"]).await.unwrap_err();
         assert_eq!(divergent.reason, Reason::SeqDivergent);
         assert_eq!(target.texts().await, ["p1"]);
+        if !target.gives.gives(Needs::RAW_KEYS) {
+            continue;
+        }
         // A dedupe entry written before the digest has none, so it takes any resend.
         let field = temporalio_streams::ids::fields::dedupe(ProducerKind::Client as i32, &p.id);
         let entry = target.meta(&field).await.unwrap();
@@ -169,9 +186,10 @@ async fn a_resend_with_other_content_fails_as_divergent() {
     }
 }
 
+/// A lower epoch is fenced for each Producer kind.
 #[tokio::test]
 async fn a_lower_epoch_is_fenced_for_each_producer_kind() {
-    for target in stores().await {
+    for target in stores_for(Needs::UNCHECKED).await {
         target.create(Owner::Workflow(None)).await;
         let run = Run::new("r1");
         let la = run.local_activity("k", 8, 1, 2);
@@ -192,14 +210,15 @@ async fn a_lower_epoch_is_fenced_for_each_producer_kind() {
     }
 }
 
+/// A close refuses later appends but not a resend of an earlier batch, and a create finds the
+/// Stream closed. With `STORE_ANSWERS`, a second close answers `already` with the same offset.
 #[tokio::test]
 async fn a_close_stops_appends_but_not_a_resend() {
-    for target in stores().await {
+    for target in stores_for(Needs::CALLS).await {
         target.create(Owner::Client).await;
         let p = client(1);
         let first = append(&target, &p, 1, &["a"]).await.unwrap();
         let closed = target.close(&p).await.unwrap();
-        assert!(!closed.already);
         assert_eq!(
             append(&target, &p, 2, &["b"]).await.unwrap_err().reason,
             Reason::Closed
@@ -209,8 +228,10 @@ async fn a_close_stops_appends_but_not_a_resend() {
             first.offsets
         );
         let again = target.close(&p).await.unwrap();
-        assert!(again.already);
-        assert_eq!(again.offset, closed.offset);
+        if target.gives.gives(Needs::STORE_ANSWERS) {
+            assert!(!closed.already && again.already);
+            assert_eq!(again.offset, closed.offset);
+        }
         let created = target
             .store
             .create(
@@ -227,9 +248,10 @@ async fn a_close_stops_appends_but_not_a_resend() {
     }
 }
 
+/// A Stream with a newer format version refuses every write.
 #[tokio::test]
 async fn a_newer_format_refuses_every_write() {
-    for target in stores().await {
+    for target in stores_for(Needs::RAW_KEYS).await {
         target.create(Owner::Client).await;
         target.set_meta("v", "2").await;
         let error = append(&target, &client(1), 1, &["a"]).await.unwrap_err();
@@ -253,9 +275,10 @@ async fn a_newer_format_refuses_every_write() {
     }
 }
 
+/// An expired Stream refuses writes, and its create finds it expired.
 #[tokio::test]
 async fn an_expired_stream_refuses_writes_and_its_create() {
-    for target in stores().await {
+    for target in stores_for(Needs::RAW_KEYS).await {
         target.create(Owner::Client).await;
         target.set_meta("exp", "1").await;
         let error = append(&target, &client(1), 1, &["a"]).await.unwrap_err();
@@ -276,9 +299,10 @@ async fn an_expired_stream_refuses_writes_and_its_create() {
     }
 }
 
+/// An Activity retry flags only its first batch, which withdraws the earlier attempt.
 #[tokio::test]
 async fn an_activity_retry_flags_its_first_batch_only() {
-    for target in stores().await {
+    for target in stores_for(Needs::UNCHECKED.and(Needs::STORE_ANSWERS)).await {
         target.create(Owner::Workflow(None)).await;
         let (a1, a2) = (activity("r1", 1, 10), activity("r1", 2, 20));
         let other = Producer {
@@ -293,9 +317,10 @@ async fn an_activity_retry_flags_its_first_batch_only() {
     }
 }
 
+/// An empty batch of an Activity retry withdraws the earlier attempt's Records.
 #[tokio::test]
 async fn an_empty_batch_of_a_retry_withdraws_the_earlier_attempt() {
-    for target in stores().await {
+    for target in stores_for(Needs::UNCHECKED).await {
         target.create(Owner::Workflow(None)).await;
         append(&target, &activity("r1", 1, 10), 1, &["x1"])
             .await
@@ -318,9 +343,10 @@ async fn an_empty_batch_of_a_retry_withdraws_the_earlier_attempt() {
     }
 }
 
+/// A retry run's first write withdraws the previous run and fences its Producers.
 #[tokio::test]
 async fn a_retry_run_withdraws_and_fences_the_previous_run() {
-    for target in stores().await {
+    for target in stores_for(Needs::UNCHECKED).await {
         target.create(Owner::Workflow(None)).await;
         let (r1, r2) = (Run::new("r1"), Run::new("r2"));
         target
@@ -351,9 +377,10 @@ async fn a_retry_run_withdraws_and_fences_the_previous_run() {
     }
 }
 
+/// An open Workflow Stream keeps the safety TTL, and its close gives it the Retention.
 #[tokio::test]
 async fn the_ttl_follows_the_owner_and_the_close() {
-    for target in stores().await {
+    for target in stores_for(Needs::RAW_KEYS).await {
         target.create(Owner::Workflow(None)).await;
         let run = Run::new("r1");
         target
@@ -381,9 +408,11 @@ async fn the_ttl_follows_the_owner_and_the_close() {
     }
 }
 
+/// A read hides Records past the Retention, and the next append trims them and keeps the
+/// newest trimmed offset.
 #[tokio::test]
 async fn an_append_trims_by_retention_and_keeps_the_watermark() {
-    for target in stores().await {
+    for target in stores_for(Needs::RAW_KEYS.and(Needs::SHORT_TIMES)).await {
         let none = Withdrawal::default();
         target
             .store
@@ -419,9 +448,10 @@ async fn an_append_trims_by_retention_and_keeps_the_watermark() {
     }
 }
 
+/// A wait for the next entry wakes on an append and ends at its deadline.
 #[tokio::test]
 async fn a_blocked_read_wakes_on_an_append_and_a_wait_for_replicas_ends() {
-    for target in stores().await {
+    for target in stores_for(Needs::RAW_KEYS).await {
         target.create(Owner::Client).await;
         let first = append(&target, &client(1), 1, &["a"]).await.unwrap();
         let newest = first.offsets.unwrap().1;
@@ -446,9 +476,10 @@ async fn a_blocked_read_wakes_on_an_append_and_a_wait_for_replicas_ends() {
     }
 }
 
+/// A sequence below one is refused.
 #[tokio::test]
 async fn a_sequence_below_one_is_refused() {
-    for target in stores().await {
+    for target in stores_for(Needs::CALLS).await {
         target.create(Owner::Client).await;
         for sequence in [0, -1] {
             let error = append(&target, &client(1), sequence, &["x"])
@@ -459,9 +490,10 @@ async fn a_sequence_below_one_is_refused() {
     }
 }
 
+/// A Workflow's create makes a Stream that an Activity created Workflow-owned.
 #[tokio::test]
 async fn a_workflow_create_takes_over_a_stream_an_activity_created() {
-    for target in stores().await {
+    for target in stores_for(Needs::RAW_KEYS).await {
         target.create(Owner::Client).await;
         target.create(Owner::Workflow(None)).await;
         assert_eq!(target.meta("own").await.as_deref(), Some("wf"));
@@ -473,9 +505,10 @@ async fn a_workflow_create_takes_over_a_stream_an_activity_created() {
     }
 }
 
+/// A Producer with a lower epoch can't close the Stream.
 #[tokio::test]
 async fn a_stale_producer_cant_close_the_stream() {
-    for target in stores().await {
+    for target in stores_for(Needs::CALLS).await {
         target.create(Owner::Client).await;
         append(&target, &client(2), 1, &["a"]).await.unwrap();
         assert_eq!(
@@ -486,9 +519,11 @@ async fn a_stale_producer_cant_close_the_stream() {
     }
 }
 
+/// Only the owner closes a Stream: its run chain for a Workflow-owned one, a client for a
+/// client's.
 #[tokio::test]
 async fn only_the_owner_closes_a_stream() {
-    for target in stores().await {
+    for target in stores_for(Needs::UNCHECKED.and(Needs::STORE_ANSWERS)).await {
         let run = Run::new("r1");
         let la = run.local_activity("k", 3, 1, 1);
         target.create(Owner::Client).await;
@@ -541,9 +576,10 @@ async fn only_the_owner_closes_a_stream() {
     }
 }
 
+/// An append whose entry ids would not fit an offset is refused before it writes.
 #[tokio::test]
 async fn an_append_whose_ids_would_not_fit_an_offset_is_refused_before_it_writes() {
-    for target in stores().await {
+    for target in stores_for(Needs::RAW_KEYS).await {
         target.create(Owner::Client).await;
         // An entry a minute ahead of the clock, with nearly the last 20-bit sequence.
         let ahead = std::time::SystemTime::now()
@@ -560,6 +596,7 @@ async fn an_append_whose_ids_would_not_fit_an_offset_is_refused_before_it_writes
     }
 }
 
+/// Every Store keeps the meta fields that the shared vectors name.
 #[tokio::test]
 async fn every_store_keeps_the_meta_fields_of_the_shared_vectors() {
     use temporalio_streams::ids::fields;
@@ -571,7 +608,7 @@ async fn every_store_keeps_the_meta_fields_of_the_shared_vectors() {
         .unwrap(),
     )
     .unwrap();
-    for target in stores().await {
+    for target in stores_for(Needs::RAW_KEYS).await {
         target.create(Owner::Workflow(None)).await;
         let producer = activity("run:1", 1, 10);
         append(&target, &producer, 1, &["a"]).await.unwrap();
@@ -592,9 +629,17 @@ async fn every_store_keeps_the_meta_fields_of_the_shared_vectors() {
     }
 }
 
+/// An auto close closes a quiet Stream on its next write, with a close Record that has no
+/// Producer and a `COMPLETED` status. Each append holds it off for one more period.
 #[tokio::test]
 async fn an_auto_close_closes_a_quiet_stream_on_its_next_write() {
-    for target in stores().await {
+    for target in stores_for(
+        Needs::RAW_KEYS
+            .and(Needs::SHORT_TIMES)
+            .and(Needs::STORE_ANSWERS),
+    )
+    .await
+    {
         let none = Withdrawal::default();
         let period = Some(Duration::from_millis(300));
         let stream = target.stream_ref();
@@ -683,9 +728,10 @@ async fn an_auto_close_closes_a_quiet_stream_on_its_next_write() {
     }
 }
 
+/// An auto close counts from the create, and each step that finds it due applies it once.
 #[tokio::test]
 async fn an_auto_close_counts_from_the_create_and_each_step_applies_it_once() {
-    for target in stores().await {
+    for target in stores_for(Needs::RAW_KEYS.and(Needs::SHORT_TIMES)).await {
         let none = Withdrawal::default();
         target
             .store
@@ -742,9 +788,10 @@ async fn an_auto_close_counts_from_the_create_and_each_step_applies_it_once() {
     }
 }
 
+/// An auto close period below 1 ms rounds up to 1 ms, and a huge one doesn't overflow.
 #[tokio::test]
 async fn an_auto_close_period_at_the_edges_neither_overflows_nor_rounds_to_zero() {
-    for target in stores().await {
+    for target in stores_for(Needs::STORE_ANSWERS).await {
         let none = Withdrawal::default();
         let created = target
             .store
@@ -760,7 +807,7 @@ async fn an_auto_close_period_at_the_edges_neither_overflows_nor_rounds_to_zero(
             .unwrap();
         assert_eq!(created.auto_close, Some(Duration::from_millis(1)));
     }
-    for target in stores().await {
+    for target in stores_for(Needs::STORE_ANSWERS).await {
         let none = Withdrawal::default();
         target
             .store
