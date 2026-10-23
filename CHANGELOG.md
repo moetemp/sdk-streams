@@ -184,3 +184,6 @@
   or the Standalone Activity's, so a caller routes the ref it gets on the native backend.
 - A native `wake_only` read may wait up to 7 days, the server's `stream.maxWakeWait` default,
   since a parked wake adds nothing to History. Other reads keep the 60 s cap.
+- A native error with the reason `seq_divergent` or `stream_not_owner` reads back to its reason.
+  The native tests write with named clients, since the server refuses an Activity Producer with
+  no task token.

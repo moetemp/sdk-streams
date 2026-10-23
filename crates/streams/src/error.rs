@@ -73,25 +73,28 @@ impl Reason {
 
     /// The reason of a token, for an error that the server or another runtime sends.
     pub fn from_token(token: &str) -> Option<Self> {
-        [
-            Reason::NotFound,
-            Reason::Expired,
-            Reason::Closed,
-            Reason::Fenced,
-            Reason::Sequence,
-            Reason::FormatTooNew,
-            Reason::AlreadyExists,
-            Reason::Offset,
-            Reason::TooLarge,
-            Reason::Invalid,
-            Reason::Storage,
-            Reason::UnknownWriter,
-            Reason::Unsupported,
-            Reason::Exhausted,
-        ]
-        .into_iter()
-        .find(|reason| reason.token() == token)
+        Self::ALL.into_iter().find(|reason| reason.token() == token)
     }
+
+    /// Every reason, so a token from the server reads back to its reason.
+    const ALL: [Reason; 16] = [
+        Reason::NotFound,
+        Reason::Expired,
+        Reason::Closed,
+        Reason::Fenced,
+        Reason::Sequence,
+        Reason::SeqDivergent,
+        Reason::NotOwner,
+        Reason::FormatTooNew,
+        Reason::AlreadyExists,
+        Reason::Offset,
+        Reason::TooLarge,
+        Reason::Invalid,
+        Reason::Storage,
+        Reason::UnknownWriter,
+        Reason::Unsupported,
+        Reason::Exhausted,
+    ];
 
     /// The status code of the reason, as in the proposal's Appendix A.
     pub fn code(self) -> Code {
@@ -159,6 +162,33 @@ impl StreamError {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn every_reason_reads_back_from_its_token() {
+        for reason in Reason::ALL {
+            assert_eq!(Reason::from_token(reason.token()), Some(reason));
+        }
+        // The match has no wildcard, so a new reason that isn't in `ALL` fails here.
+        let listed = |reason: Reason| match reason {
+            Reason::NotFound
+            | Reason::Expired
+            | Reason::Closed
+            | Reason::Fenced
+            | Reason::Sequence
+            | Reason::SeqDivergent
+            | Reason::NotOwner
+            | Reason::FormatTooNew
+            | Reason::AlreadyExists
+            | Reason::Offset
+            | Reason::TooLarge
+            | Reason::Invalid
+            | Reason::Storage
+            | Reason::UnknownWriter
+            | Reason::Unsupported
+            | Reason::Exhausted => Reason::ALL.contains(&reason),
+        };
+        assert!(Reason::ALL.into_iter().all(listed));
+    }
 
     #[test]
     fn an_error_carries_its_code_and_reason_to_lang() {

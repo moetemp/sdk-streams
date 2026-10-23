@@ -18,7 +18,7 @@ use temporalio_common::protos::temporal::api::common::v1::Payload;
 use temporalio_streams::{
     NativeStreamExtension, StreamError, StreamExtension,
     epoch::withdraws,
-    ids::{activity_producer_id, client_producer_id},
+    ids::{activity_producer_id, client_producer_id, named_client_producer_id},
     proto::{
         AppendRecord, AppendRecordsRequest, AppendRecordsResponse, CloseStreamRequest,
         CloseStreamResponse, CreateStreamRequest, CreateStreamResponse, DescribeStreamRequest,
@@ -71,6 +71,19 @@ fn client() -> Producer {
         id: client_producer_id("me", "native"),
         epoch: Some(ProducerEpoch {
             attempt: 1,
+            ..Default::default()
+        }),
+        run_id: String::new(),
+    }
+}
+
+/// A client Producer that the test names, at `attempt`.
+fn named(attempt: i32) -> Producer {
+    Producer {
+        kind: ProducerKind::Client as i32,
+        id: named_client_producer_id("native-test"),
+        epoch: Some(ProducerEpoch {
+            attempt,
             ..Default::default()
         }),
         run_id: String::new(),
@@ -214,9 +227,23 @@ async fn a_stream_on_the_server_dedupes_withdraws_reads_and_closes() {
     let error = case.append(1, &["old"]).await.unwrap_err();
     assert_eq!(reason(&error), "stream_sequence");
 
-    // The second Activity attempt withdraws the first one's Records.
-    case.write(activity(1), &["x"]).await;
-    let written = case.write(activity(2), &["y"]).await;
+    // An Activity writes only with its task token, so a made-up one is refused.
+    let refused = case
+        .call::<_, OpenWriterResponse>(
+            "OpenWriter",
+            OpenWriterRequest {
+                namespace: case.namespace.clone(),
+                stream: case.stream_ref(),
+                producer: Some(activity(2)),
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap_err();
+    assert_eq!(reason(&refused), "stream_not_owner");
+    // A named client's next epoch withdraws the earlier one's Records.
+    case.write(named(1), &["x"]).await;
+    let written = case.write(named(2), &["y"]).await;
     assert!(written.last_offset > first.last_offset);
     assert_eq!(
         case.visible().await,
@@ -390,14 +417,14 @@ async fn a_workflow_stream_is_found_by_its_owner_ref_on_every_call() {
         )
         .await
         .unwrap();
-    // An Activity writes with the same ref.
+    // A client writes with the same ref.
     let opened: OpenWriterResponse = case
         .call(
             "OpenWriter",
             OpenWriterRequest {
                 namespace: case.namespace.clone(),
                 stream: Some(owned.clone()),
-                producer: Some(activity(1)),
+                producer: Some(client()),
                 ..Default::default()
             },
         )
