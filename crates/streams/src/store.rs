@@ -326,6 +326,18 @@ pub trait Store: Send + Sync + 'static {
         Err(unsupported("close"))
     }
 
+    /// Reads up to `count` entries at or before `before`, newest first, for a read of the newest
+    /// Records.
+    async fn read_back(
+        &self,
+        _namespace: &str,
+        _stream_id: &str,
+        _before: i64,
+        _count: usize,
+    ) -> StreamResult<Vec<Entry>> {
+        Err(unsupported("last"))
+    }
+
     /// Closes the Stream if its auto close is due, for a read that found it due. Answers the
     /// offset of the close Record if the Stream is closed. Needs [Capabilities::AUTO_CLOSE].
     async fn auto_close(&self, _namespace: &str, _stream_id: &str) -> StreamResult<Option<i64>> {

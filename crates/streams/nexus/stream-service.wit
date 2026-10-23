@@ -270,6 +270,10 @@ interface stream-service {
     wait: option<duration>,
     /// @nexus.doc "How long to wait for an uncreated Stream. Empty fails at once. At most 60 s."
     create-wait: option<duration>,
+    /// @nexus.doc "Read the newest this many Records, oldest first. No from-offset. No wait."
+    last: option<s32>,
+    /// @nexus.doc "The most Record bytes in a page. A larger Record still comes alone."
+    max-bytes: option<s64>,
     /// @nexus.omit
     namespace: placeholder,
   }

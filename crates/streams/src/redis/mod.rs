@@ -314,6 +314,30 @@ impl RedisStore {
         read_reply(reply)
     }
 
+    /// Reads up to `count` entries at or before `before`, newest first, with `XREVRANGE`.
+    pub async fn read_back(
+        &self,
+        namespace: &str,
+        stream_id: &str,
+        before: i64,
+        count: usize,
+    ) -> StreamResult<Vec<Entry>> {
+        let keys = self.keys(namespace, stream_id);
+        let reply: Value = redis::cmd("XREVRANGE")
+            .arg(keys.log())
+            .arg(entry_id_of_offset(before))
+            .arg("-")
+            .arg("COUNT")
+            .arg(count)
+            .query_async(&mut self.shared.clone())
+            .await
+            .mapped()?;
+        let Value::Array(entries) = reply else {
+            return Err(bad_reply("read back", reply));
+        };
+        entries.into_iter().map(entry).collect()
+    }
+
     /// Waits until the log has an entry after `after`, or `deadline` passes. Answers whether an
     /// entry came. The wait blocks a connection of its own.
     pub async fn wait_after(
@@ -421,6 +445,16 @@ impl Store for RedisStore {
 
     async fn auto_close(&self, namespace: &str, stream_id: &str) -> StreamResult<Option<i64>> {
         RedisStore::auto_close(self, namespace, stream_id).await
+    }
+
+    async fn read_back(
+        &self,
+        namespace: &str,
+        stream_id: &str,
+        before: i64,
+        count: usize,
+    ) -> StreamResult<Vec<Entry>> {
+        RedisStore::read_back(self, namespace, stream_id, before, count).await
     }
 }
 

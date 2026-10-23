@@ -1109,3 +1109,72 @@ async fn a_close_record_gives_its_status_and_a_caller_cant_terminate() {
         assert_eq!(record.close_failure.as_ref().unwrap().message, "boom");
     }
 }
+
+#[tokio::test]
+async fn a_last_read_gives_the_newest_records_oldest_first_without_withdrawn_ones() {
+    for case in cases().await {
+        case.create(None).await.unwrap();
+        let last = |n: i32, topics: &[&str]| ReadRecordsRequest {
+            last: n,
+            topics: topics.iter().map(|t| t.to_string()).collect(),
+            ..Default::default()
+        };
+        assert!(case.read(last(5, &[])).await.unwrap().records.is_empty());
+        let records = vec![record("t", "c1"), record("u", "c2"), record("t", "c3")];
+        case.append(client(1), 1, records).await.unwrap();
+        case.append(activity(1, 10), 1, vec![record("t", "a1")])
+            .await
+            .unwrap();
+        // The retry's first batch withdraws a1, so a1 doesn't count.
+        case.append(activity(2, 20), 1, vec![record("t", "a2")])
+            .await
+            .unwrap();
+        assert_eq!(
+            texts(&case.read(last(3, &[])).await.unwrap()),
+            ["c2", "c3", "a2"]
+        );
+        let read = case.read(last(2, &["t"])).await.unwrap();
+        assert_eq!(texts(&read), ["c3", "a2"]);
+        assert!(!read.done);
+        let newest = case.describe().await.unwrap().last_offset;
+        assert_eq!(read.next_offset, newest + 1);
+        let error = case
+            .read(ReadRecordsRequest {
+                from_offset: 1,
+                ..last(1, &[])
+            })
+            .await
+            .unwrap_err();
+        assert_eq!(reason(&error), "stream_invalid");
+        case.close(client(1)).await.unwrap();
+        let read = case.read(last(1, &[])).await.unwrap();
+        assert_eq!(texts(&read), ["a2", "<close>"]);
+        assert!(read.done);
+    }
+}
+
+#[tokio::test]
+async fn a_page_keeps_under_max_bytes_and_a_larger_record_comes_alone() {
+    for case in cases().await {
+        case.create(None).await.unwrap();
+        let big = "x".repeat(1000);
+        let records = vec![
+            record("t", "a"),
+            record("t", "b"),
+            record("t", &big),
+            record("t", "c"),
+        ];
+        case.append(client(1), 1, records).await.unwrap();
+        let capped = |from_offset| ReadRecordsRequest {
+            from_offset,
+            max_bytes: 200,
+            ..Default::default()
+        };
+        let first = case.read(capped(0)).await.unwrap();
+        assert_eq!(texts(&first), ["a", "b"]);
+        let second = case.read(capped(first.next_offset)).await.unwrap();
+        assert_eq!(texts(&second), [big]);
+        let third = case.read(capped(second.next_offset)).await.unwrap();
+        assert_eq!(texts(&third), ["c"]);
+    }
+}

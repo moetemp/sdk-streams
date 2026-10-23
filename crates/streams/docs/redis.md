@@ -87,7 +87,8 @@ otherwise. Each append drops the Records older than the Retention, and a read hi
 ## Access
 
 A Producer needs `+evalsha` and `+script|load` on `~<prefix>:{<namespace>:*`. A Reader needs
-`+evalsha_ro` or `+evalsha`, `+xread` and the read keys. A cluster also needs `+cluster|slots`.
+`+evalsha_ro` or `+evalsha`, `+xread` and the read keys, and `+xrevrange` for a read of the last
+Records. A cluster also needs `+cluster|slots`.
 See the known limits for a Reader of a Stream with an auto close.
 
 ## Known limits

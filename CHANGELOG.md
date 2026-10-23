@@ -120,3 +120,11 @@
   failure, and a caller may set `CANCELED`. A caller's `TERMINATED` or `TIMED_OUT` fails with
   `stream_invalid`, since only the owner's end on the server sets them. An auto close is
   `COMPLETED`, so its Record is `08 03 48 01`. The result and the failure stay.
+- `ReadRecordsRequest.last` reads the newest Records that pass the filter, oldest first, with the
+  close Record at the end of a closed Stream. A Record that a newer `Superseded` item withdraws
+  doesn't count. It never waits, and it takes no `from_offset` or `wake_only`. Redis reads it
+  with `XREVRANGE` through the new `Store::read_back`.
+- `ReadRecordsRequest.max_bytes` caps the bytes of a page's items. A larger entry still comes
+  alone, so a read always moves on.
+- The Redis and memory Stores read no `to_offset` or `wake_only`. A read with one fails with
+  `stream_unsupported`, since only the native backend serves them.

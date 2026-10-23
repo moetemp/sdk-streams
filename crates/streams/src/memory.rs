@@ -830,6 +830,32 @@ impl Store for MemoryStore {
         id.map(|id| offset_of_entry_id(&id)).transpose()
     }
 
+    async fn read_back(
+        &self,
+        namespace: &str,
+        stream_id: &str,
+        before: i64,
+        count: usize,
+    ) -> StreamResult<Vec<Entry>> {
+        let before = parse_id(&entry_id_of_offset(before)).unwrap_or((0, 0));
+        self.with(namespace, stream_id, |keys, _| {
+            let Some(log) = keys.log.as_ref() else {
+                return Ok(vec![]);
+            };
+            log.range(..=before)
+                .rev()
+                .take(count)
+                .map(|(id, fields)| {
+                    Ok(Entry {
+                        offset: offset_of_entry_id(&id_text(*id))?,
+                        record: fields.record.clone(),
+                        supersession: fields.supersession.clone(),
+                    })
+                })
+                .collect()
+        })
+    }
+
     async fn wait_after(
         &self,
         namespace: &str,
