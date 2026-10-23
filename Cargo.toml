@@ -20,12 +20,7 @@ tonic-prost-build = "0.14.6"
 # since a lang's `[patch]` key must match it byte for byte.
 [workspace.dependencies.temporalio-common]
 git = "https://github.com/moetemp/sdk-rust"
-rev = "32ba79d6207385417ef5c5219183e43e7a01f069"
-default-features = false
-
-[workspace.dependencies.temporalio-sdk-core]
-git = "https://github.com/moetemp/sdk-rust"
-rev = "32ba79d6207385417ef5c5219183e43e7a01f069"
+rev = "b565c433547496f2c14a911549c288a1076e72b6"
 default-features = false
 
 [workspace.lints.rust]

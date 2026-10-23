@@ -128,3 +128,7 @@
   alone, so a read always moves on.
 - The Redis and memory Stores read no `to_offset` or `wake_only`. A read with one fails with
   `stream_unsupported`, since only the native backend serves them.
+- The runtime is a plain object with no Core trait. A bridge builds it per client and calls
+  `StreamExtension::call` with a method name and proto bytes. An error has `code()` and
+  `details()`, the encoded `StreamErrorDetails`. The crate no longer depends on
+  `temporalio-sdk-core`, and it pins `temporalio-common` at sdk-rust Brook c7 `b565c433`.

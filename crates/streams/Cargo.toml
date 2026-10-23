@@ -15,8 +15,8 @@ categories = ["development-tools"]
 default = ["tls-ring"]
 # The TLS providers of the sdk-rust crates. A FIPS build takes `tls-aws-lc` with no default
 # features, so no crate in the build pulls `ring`.
-tls-ring = ["temporalio-sdk-core/tls-ring", "temporalio-common/tls-ring"]
-tls-aws-lc = ["temporalio-sdk-core/tls-aws-lc", "temporalio-common/tls-aws-lc"]
+tls-ring = ["temporalio-common/tls-ring"]
+tls-aws-lc = ["temporalio-common/tls-aws-lc"]
 # A FIPS build: `tls-aws-lc`, and `aws-lc-rs` in FIPS mode, so the shared rustls provider links
 # `aws-lc-fips-sys`.
 fips = ["tls-aws-lc", "dep:aws-lc-rs"]
@@ -40,7 +40,6 @@ redis = { version = "1.7", default-features = false, features = [
 ] }
 sha2 = "0.10"
 temporalio-common = { workspace = true }
-temporalio-sdk-core = { workspace = true }
 thiserror = { workspace = true }
 tonic = { workspace = true }
 tokio = { version = "1.47", default-features = false, features = ["rt", "sync", "time"] }

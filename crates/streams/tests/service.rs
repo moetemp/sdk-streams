@@ -9,9 +9,8 @@ use std::{
     time::{Duration, Instant},
 };
 use temporalio_common::protos::temporal::api::{common::v1::Payload, failure::v1::Failure};
-use temporalio_sdk_core::{ExtensionError, WorkerExtension};
 use temporalio_streams::{
-    MemoryStreamExtension, RedisStreamExtension,
+    MemoryStreamExtension, RedisStreamExtension, StreamError,
     epoch::withdraws,
     ids::{activity_producer_id, client_producer_id},
     proto::{
@@ -59,15 +58,13 @@ async fn call<Req: Message, Resp: Message + Default>(
     ext: &RedisStreamExtension,
     method: &str,
     request: Req,
-) -> Result<Resp, ExtensionError> {
-    let bytes = ext
-        .call_async(method.to_string(), request.encode_to_vec())
-        .await?;
+) -> Result<Resp, StreamError> {
+    let bytes = ext.call(method, &request.encode_to_vec()).await?;
     Ok(Resp::decode(bytes.as_slice()).unwrap())
 }
 
-fn reason(error: &ExtensionError) -> String {
-    StreamErrorDetails::decode(error.details.as_slice())
+fn reason(error: &StreamError) -> String {
+    StreamErrorDetails::decode(error.details().as_slice())
         .unwrap()
         .reason
 }
@@ -129,7 +126,7 @@ impl Case {
     async fn create(
         &self,
         retention: Option<prost_types::Duration>,
-    ) -> Result<CreateStreamResponse, ExtensionError> {
+    ) -> Result<CreateStreamResponse, StreamError> {
         call(
             &self.ext,
             "CreateStream",
@@ -146,7 +143,7 @@ impl Case {
     async fn create_auto_close(
         &self,
         auto_close: Option<prost_types::Duration>,
-    ) -> Result<CreateStreamResponse, ExtensionError> {
+    ) -> Result<CreateStreamResponse, StreamError> {
         call(
             &self.ext,
             "CreateStream",
@@ -165,7 +162,7 @@ impl Case {
         producer: Producer,
         sequence: i64,
         records: Vec<AppendRecord>,
-    ) -> Result<AppendRecordsResponse, ExtensionError> {
+    ) -> Result<AppendRecordsResponse, StreamError> {
         call(
             &self.ext,
             "AppendRecords",
@@ -181,10 +178,7 @@ impl Case {
         .await
     }
 
-    async fn read(
-        &self,
-        request: ReadRecordsRequest,
-    ) -> Result<ReadRecordsResponse, ExtensionError> {
+    async fn read(&self, request: ReadRecordsRequest) -> Result<ReadRecordsResponse, StreamError> {
         call(
             &self.ext,
             "ReadRecords",
@@ -197,7 +191,7 @@ impl Case {
         .await
     }
 
-    async fn describe(&self) -> Result<DescribeStreamResponse, ExtensionError> {
+    async fn describe(&self) -> Result<DescribeStreamResponse, StreamError> {
         call(
             &self.ext,
             "DescribeStream",
@@ -209,7 +203,7 @@ impl Case {
         .await
     }
 
-    async fn close(&self, producer: Producer) -> Result<CloseStreamResponse, ExtensionError> {
+    async fn close(&self, producer: Producer) -> Result<CloseStreamResponse, StreamError> {
         call(
             &self.ext,
             "CloseStream",
@@ -253,7 +247,7 @@ async fn a_create_is_idempotent_for_one_retention() {
         assert_eq!(created.status, StreamStatus::Open as i32);
         assert!(!case.create(None).await.unwrap().created);
         let error = case.create(millis(1000)).await.unwrap_err();
-        assert_eq!(error.code, Code::AlreadyExists);
+        assert_eq!(error.code(), Code::AlreadyExists);
         assert_eq!(reason(&error), "stream_already_exists");
     }
 }
@@ -271,7 +265,7 @@ async fn a_producer_must_match_its_kind_and_not_be_a_workflow() {
             .await
             .unwrap_err();
         assert_eq!(
-            (error.code, reason(&error).as_str()),
+            (error.code(), reason(&error).as_str()),
             (Code::InvalidArgument, "stream_invalid")
         );
         let workflow = Producer {
@@ -281,7 +275,7 @@ async fn a_producer_must_match_its_kind_and_not_be_a_workflow() {
             epoch: None,
         };
         let error = case.append(workflow, 1, vec![]).await.unwrap_err();
-        assert_eq!(error.code, Code::InvalidArgument);
+        assert_eq!(error.code(), Code::InvalidArgument);
     }
 }
 
@@ -331,7 +325,7 @@ async fn a_read_is_inclusive_from_its_offset_and_get_offset_reads_only_new_recor
             .await
             .unwrap_err();
         assert_eq!(
-            (error.code, reason(&error).as_str()),
+            (error.code(), reason(&error).as_str()),
             (Code::InvalidArgument, "stream_offset")
         );
     }
@@ -373,7 +367,7 @@ async fn a_read_waits_for_the_create_only_as_long_as_create_wait() {
     for case in cases().await {
         let error = case.read(ReadRecordsRequest::default()).await.unwrap_err();
         assert_eq!(
-            (error.code, reason(&error).as_str()),
+            (error.code(), reason(&error).as_str()),
             (Code::NotFound, "stream_not_found")
         );
         let started = Instant::now();
@@ -384,7 +378,7 @@ async fn a_read_waits_for_the_create_only_as_long_as_create_wait() {
             })
             .await
             .unwrap_err();
-        assert_eq!(error.code, Code::NotFound);
+        assert_eq!(error.code(), Code::NotFound);
         assert!(started.elapsed() >= Duration::from_millis(200));
         let ext = case.ext.clone();
         let (namespace, stream) = (case.namespace.clone(), case.stream.clone());
@@ -492,7 +486,7 @@ async fn a_close_ends_every_read_with_its_record() {
             .await
             .unwrap_err();
         assert_eq!(
-            (error.code, reason(&error).as_str()),
+            (error.code(), reason(&error).as_str()),
             (Code::FailedPrecondition, "stream_closed")
         );
         let created = case.create(None).await.unwrap();
@@ -525,7 +519,7 @@ async fn a_read_from_a_trimmed_offset_fails_as_expired() {
             .await
             .unwrap_err();
         assert_eq!(
-            (error.code, reason(&error).as_str()),
+            (error.code(), reason(&error).as_str()),
             (Code::NotFound, "stream_expired")
         );
         let from_start = case.read(ReadRecordsRequest::default()).await.unwrap();
@@ -536,16 +530,8 @@ async fn a_read_from_a_trimmed_offset_fails_as_expired() {
 #[tokio::test]
 async fn an_unknown_method_is_unimplemented() {
     for case in cases().await {
-        let error = case
-            .ext
-            .call_async("Nope".to_string(), vec![])
-            .await
-            .unwrap_err();
-        assert_eq!(error.code, Code::Unimplemented);
-        assert_eq!(
-            case.ext.call("Nope", &[]).unwrap_err().code,
-            Code::Unimplemented
-        );
+        let error = case.ext.call("Nope", &[]).await.unwrap_err();
+        assert_eq!(error.code(), Code::Unimplemented);
     }
 }
 
@@ -1091,7 +1077,7 @@ async fn a_close_record_gives_its_status_and_a_caller_cant_terminate() {
                     .await
                     .unwrap_err();
             assert_eq!(
-                (error.code, reason(&error).as_str()),
+                (error.code(), reason(&error).as_str()),
                 (Code::InvalidArgument, "stream_invalid")
             );
         }

@@ -1,7 +1,8 @@
-//! The Worker extension that lang's bridge hands to Core and calls by method name.
+//! The Stream runtime as a plain object, which lang's bridge builds per client and calls by
+//! method name. Core has no hook for it.
 
 use crate::{
-    StreamError, StreamResult,
+    Reason, StreamError, StreamResult,
     memory::MemoryStore,
     metrics::Metrics,
     proto::{
@@ -18,10 +19,9 @@ use crate::{
 use prost::Message;
 use std::{sync::Arc, time::Duration};
 use temporalio_common::telemetry::metrics::TemporalMeter;
-use temporalio_sdk_core::{ExtensionError, WorkerExtension};
 use tokio::sync::OnceCell;
 
-/// The name of the extension, for logs and for a bridge that selects an extension by name.
+/// The name of the Redis runtime, for logs and for a bridge that selects a runtime by name.
 pub const EXTENSION_NAME: &str = "temporalio-streams-redis";
 
 /// What the extension needs besides the Store options.
@@ -96,11 +96,11 @@ impl Shared {
     }
 }
 
-/// The Stream runtime as a Worker extension, on Redis or, for tests, on the memory Store.
+/// The Stream runtime on Redis or, for tests, on the memory Store.
 ///
 /// On Redis it connects on its first call that needs Redis, so a bridge can build it with no
-/// runtime, and a Workflow that never publishes never needs Redis. One extension serves every
-/// Worker and client of a plugin.
+/// runtime, and a Workflow that never publishes never needs Redis. A bridge builds one for each
+/// client of a plugin, and that client's Workers share it.
 pub struct StreamExtension {
     shared: Arc<Shared>,
 }
@@ -158,17 +158,19 @@ impl StreamExtension {
         Ok(Self::new(ExtensionOptions::from_config(config)?, meter))
     }
 
-    /// The options the extension runs with.
+    /// The options the runtime runs with.
     pub fn options(&self) -> &ExtensionOptions {
         &self.shared.options
     }
 
-    /// Runs one asynchronous method on encoded input.
-    pub async fn dispatch_async(
-        &self,
-        method: &str,
-        input: &[u8],
-    ) -> Result<Vec<u8>, ExtensionError> {
+    /// A name that identifies the runtime in logs.
+    pub fn name(&self) -> &str {
+        self.shared.name
+    }
+
+    /// Runs one method on encoded input and answers the encoded output. The bridge raises an
+    /// error with [StreamError::code] and [StreamError::details].
+    pub async fn call(&self, method: &str, input: &[u8]) -> StreamResult<Vec<u8>> {
         let service = self.shared.service().await?;
         let output = match method {
             "CreateStream" => service.create_stream(decode(input)?).await?.encode_to_vec(),
@@ -219,7 +221,12 @@ impl StreamExtension {
                 let last_offset = self.shared.writers.close(request.writer_id).await?;
                 CloseWriterResponse { last_offset }.encode_to_vec()
             }
-            _ => return Err(ExtensionError::unknown_method(method)),
+            _ => {
+                return Err(StreamError::new(
+                    Reason::Unsupported,
+                    format!("Unknown method {method}"),
+                ));
+            }
         };
         Ok(output)
     }
@@ -283,17 +290,6 @@ impl MemoryStreamExtension {
 
 pub(crate) fn decode<M: Message + Default>(input: &[u8]) -> StreamResult<M> {
     M::decode(input).map_err(|error| StreamError::invalid(format!("The request is bad: {error}")))
-}
-
-#[async_trait::async_trait]
-impl WorkerExtension for StreamExtension {
-    fn name(&self) -> &str {
-        self.shared.name
-    }
-
-    async fn call_async(&self, method: String, input: Vec<u8>) -> Result<Vec<u8>, ExtensionError> {
-        self.dispatch_async(&method, &input).await
-    }
 }
 
 #[cfg(test)]
