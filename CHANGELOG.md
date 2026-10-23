@@ -106,3 +106,8 @@
   `testdata/digests.json` pins the digest for the server and every SDK.
 - `Store::create`, `Store::append` and `Store::close` take the Stream's whole `StreamRef`, so a
   Store can check the owner fields. Redis and memory key on its id.
+- Only the owner closes a Stream. A Workflow-owned Stream closes from a Local Activity or a
+  Workflow Producer, and a ref that names another run chain is refused. A Stream that a client
+  created closes only from a client. Others fail with `FAILED_PRECONDITION` and the reason
+  `stream_not_owner`. A Workflow Producer may close, for the worker's close after the run's final
+  completion.

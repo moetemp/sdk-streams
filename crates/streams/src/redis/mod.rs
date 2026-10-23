@@ -125,17 +125,19 @@ impl RedisStore {
         StreamKeys::new(&self.prefix, namespace, stream_id)
     }
 
-    /// Creates a Stream, or finds it. A retry run's create withdraws its previous run.
+    /// Creates a Stream, or finds it. A retry run's create withdraws its previous run. A
+    /// Workflow-owned Stream keeps the run chain that its ref names, for the owner check of a
+    /// close.
     pub async fn create(
         &self,
         namespace: &str,
-        stream_id: &str,
+        stream: &StreamRef,
         retention: Option<Duration>,
         auto_close: Option<Duration>,
         owner: Owner,
         withdrawal: &Withdrawal<'_>,
     ) -> StreamResult<Created> {
-        let keys = self.keys(namespace, stream_id);
+        let keys = self.keys(namespace, &stream.id);
         let retention = retention.filter(|r| !r.is_zero()).unwrap_or(self.retention);
         let reply: Value = scripts::CREATE_SCRIPT
             .key(keys.meta())
@@ -157,6 +159,7 @@ impl RedisStore {
                     .map(|period| millis(period).max(1).to_string())
                     .unwrap_or_default(),
             )
+            .arg(encode_run(&stream.workflow_id))
             .invoke_async(&mut self.shared.clone())
             .await
             .mapped()?;
@@ -253,15 +256,16 @@ impl RedisStore {
         })
     }
 
-    /// Closes a Stream with an encoded close Record.
+    /// Closes a Stream with an encoded close Record, if the Producer's kind and the ref's run
+    /// chain are the owner's.
     pub async fn close(
         &self,
         namespace: &str,
-        stream_id: &str,
+        stream: &StreamRef,
         producer: &Producer,
         record: &[u8],
     ) -> StreamResult<Closed> {
-        let keys = self.keys(namespace, stream_id);
+        let keys = self.keys(namespace, &stream.id);
         let epoch = producer.epoch.unwrap_or_default();
         let reply: Value = scripts::CLOSE_SCRIPT
             .key(keys.meta())
@@ -273,6 +277,7 @@ impl RedisStore {
             .arg(epoch_key(&epoch))
             .arg(millis(TOMBSTONE))
             .arg(record)
+            .arg(encode_run(&stream.workflow_id))
             .invoke_async(&mut self.shared.clone())
             .await
             .mapped()?;
@@ -370,7 +375,7 @@ impl Store for RedisStore {
         withdrawal: &Withdrawal<'_>,
     ) -> StreamResult<Created> {
         RedisStore::create(
-            self, namespace, &stream.id, retention, auto_close, owner, withdrawal,
+            self, namespace, stream, retention, auto_close, owner, withdrawal,
         )
         .await
     }
@@ -391,7 +396,7 @@ impl Store for RedisStore {
         producer: &Producer,
         record: &[u8],
     ) -> StreamResult<Closed> {
-        RedisStore::close(self, namespace, &stream.id, producer, record).await
+        RedisStore::close(self, namespace, stream, producer, record).await
     }
 
     async fn read(

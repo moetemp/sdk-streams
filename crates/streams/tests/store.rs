@@ -10,8 +10,8 @@ use std::time::Duration;
 use support::{Run, Target, digest, record, records_of, stores, supersession};
 use temporalio_streams::{
     Reason,
-    ids::{activity_producer_id, client_producer_id},
-    proto::{Producer, ProducerEpoch, ProducerKind},
+    ids::{activity_producer_id, client_producer_id, workflow_producer_id},
+    proto::{Producer, ProducerEpoch, ProducerKind, StreamRef},
     store::{Batch, Capabilities, CreateOutcome, Owner, Withdrawal},
 };
 
@@ -482,6 +482,61 @@ async fn a_stale_producer_cant_close_the_stream() {
             Reason::Fenced
         );
         target.close(&client(2)).await.unwrap();
+    }
+}
+
+#[tokio::test]
+async fn only_the_owner_closes_a_stream() {
+    for target in stores().await {
+        let run = Run::new("r1");
+        let la = run.local_activity("k", 3, 1, 1);
+        target.create(Owner::Client).await;
+        for producer in [&la, &activity("r1", 1, 10)] {
+            let refused = target.close(producer).await.unwrap_err();
+            assert_eq!(refused.reason, Reason::NotOwner);
+        }
+        target.close(&client(1)).await.unwrap();
+
+        let owned = |workflow_id: &str| StreamRef {
+            id: format!("{}-owned", target.stream),
+            workflow_id: workflow_id.to_string(),
+            ..Default::default()
+        };
+        target
+            .store
+            .create(
+                &target.namespace,
+                &owned("agent"),
+                None,
+                None,
+                Owner::Workflow,
+                &Withdrawal::default(),
+            )
+            .await
+            .unwrap();
+        for (stream, producer) in [
+            (owned("agent"), client(1)),
+            (owned("agent"), activity("r1", 1, 10)),
+            (owned("another-agent"), la.clone()),
+        ] {
+            let refused = target.close_at(&stream, &producer).await.unwrap_err();
+            assert_eq!(refused.reason, Reason::NotOwner);
+        }
+        assert!(!target.close_at(&owned("agent"), &la).await.unwrap().already);
+        // The run itself closes from the worker after its final completion.
+        let workflow = Producer {
+            kind: ProducerKind::Workflow as i32,
+            id: workflow_producer_id("r1"),
+            run_id: "r1".to_string(),
+            epoch: None,
+        };
+        assert!(
+            target
+                .close_at(&owned("agent"), &workflow)
+                .await
+                .unwrap()
+                .already
+        );
     }
 }
 

@@ -20,6 +20,7 @@ slot. `CreateStream` writes `:meta`, and the first entry makes `:log`.
 | `v` | The format version, 1 |
 | `ret` | The Retention, in ms |
 | `own` | `wf` for a Workflow-owned Stream, `client` otherwise |
+| `oc` | The encoded Workflow id of the owner's run chain, from the create's ref |
 | `exp` | When the Stream stops taking writes, in ms since 1970 |
 | `closed`, `close_id` | Set by the close, with the entry id of the close Record |
 | `newest` | The entry id of the newest entry |
@@ -27,7 +28,7 @@ slot. `CreateStream` writes `:meta`, and the first entry makes `:log`.
 | `ac` | The auto close period in ms, absent when the Stream has none |
 | `la` | When the create or the newest append with Records ran, in ms since 1970, with `ac` only |
 | `e\|<kind>\|<producer id>` | The newest epoch key of the Producer, the fence |
-| `d\|<kind>\|<producer id>` | `<epoch key>\|<sequence>\|<first id>\|<last id>\|<digest>` of the last batch |
+| `d\|<kind>\|<producer id>` | `<epoch key>\|<sequence>\|<first id>\|<last id>\|<digest>`, last batch |
 | `h\|<kind>\|<producer id>` | The newest epoch key that still has Records here |
 | `oa\|<run>` | The run's Local Activity task keys here that may not have completed |
 | `ow\|<run>` | The task keys of the run whose Local Activity Records an orphan item withdrew |
@@ -69,6 +70,13 @@ is refused with `stream_closed`, and a close answers that the Stream was already
 read script writes nothing, so a read or a describe that finds the close due runs the auto close
 step, then reads again. A long-polling read wakes when the period passes.
 
+## Close
+
+Only the owner closes a Stream. A Workflow-owned Stream closes from its run chain, as a Local
+Activity or as the run itself, and a close whose ref names another chain than `oc` is refused.
+Any other Stream closes only from a client. The script refuses others with `stream_not_owner`
+before it writes. An auto close has no Producer and is not checked.
+
 ## TTLs
 
 The log key expires at `exp`, and the meta key 30 days later, as the Tombstone. Each write sets
@@ -94,3 +102,6 @@ See the known limits for a Reader of a Stream with an auto close.
   an error from that step.
 - A read or a describe served by a replica that is behind can report a Stream open just after
   its close.
+- Redis can't tie a run to its run chain. A run of another chain that holds the owner's ref, such
+  as a child Workflow with its parent's Stream, can still close it. The native server checks the
+  run.

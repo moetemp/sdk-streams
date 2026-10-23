@@ -14,6 +14,7 @@ pub(crate) fn stream_error(error: &RedisError) -> StreamError {
         Some("STREAM_FENCED") => Reason::Fenced,
         Some("STREAM_SEQUENCE") => Reason::Sequence,
         Some("STREAM_SEQ_DIVERGENT") => Reason::SeqDivergent,
+        Some("STREAM_NOT_OWNER") => Reason::NotOwner,
         Some("STREAM_FORMAT_TOO_NEW") => Reason::FormatTooNew,
         Some("STREAM_INVALID") => Reason::Invalid,
         Some("STREAM_STORAGE") => Reason::Storage,
@@ -58,6 +59,7 @@ mod tests {
             ("STREAM_FENCED", Reason::Fenced),
             ("STREAM_SEQUENCE", Reason::Sequence),
             ("STREAM_SEQ_DIVERGENT", Reason::SeqDivergent),
+            ("STREAM_NOT_OWNER", Reason::NotOwner),
             ("STREAM_FORMAT_TOO_NEW", Reason::FormatTooNew),
             ("STREAM_INVALID", Reason::Invalid),
         ] {

@@ -26,6 +26,8 @@ pub enum Reason {
     Sequence,
     /// The batch has the `sequence` of the last one of its epoch, and other content.
     SeqDivergent,
+    /// The Stream's owner doesn't allow this Producer to close it.
+    NotOwner,
     /// A newer format version wrote the Stream.
     FormatTooNew,
     /// The Stream exists with another Retention.
@@ -54,6 +56,7 @@ impl Reason {
             Reason::Fenced => "stream_fenced",
             Reason::Sequence => "stream_sequence",
             Reason::SeqDivergent => "seq_divergent",
+            Reason::NotOwner => "stream_not_owner",
             Reason::FormatTooNew => "stream_format_too_new",
             Reason::AlreadyExists => "stream_already_exists",
             Reason::Offset => "stream_offset",
@@ -73,6 +76,7 @@ impl Reason {
             | Reason::Fenced
             | Reason::Sequence
             | Reason::SeqDivergent
+            | Reason::NotOwner
             | Reason::FormatTooNew => Code::FailedPrecondition,
             Reason::AlreadyExists => Code::AlreadyExists,
             Reason::Offset | Reason::TooLarge | Reason::Invalid => Code::InvalidArgument,

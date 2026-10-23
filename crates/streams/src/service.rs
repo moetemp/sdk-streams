@@ -108,6 +108,14 @@ fn outside_producer(producer: Option<&Producer>) -> StreamResult<&Producer> {
     Ok(producer)
 }
 
+/// Checks the Producer of a close. The run itself closes its Stream from the worker after the
+/// server accepted its final completion, so a Workflow Producer may close.
+fn close_producer(producer: Option<&Producer>) -> StreamResult<&Producer> {
+    let producer = producer.ok_or_else(|| StreamError::invalid("The request has no Producer"))?;
+    check_producer(producer)?;
+    Ok(producer)
+}
+
 impl StreamService {
     pub(crate) async fn create_stream(
         &self,
@@ -261,7 +269,7 @@ impl StreamService {
     ) -> StreamResult<CloseStreamResponse> {
         stream_id(request.stream.as_ref())?;
         let stream = request.stream.clone().unwrap_or_default();
-        let producer = outside_producer(request.producer.as_ref())?;
+        let producer = close_producer(request.producer.as_ref())?;
         self.store.capabilities().require(Capabilities::CLOSE)?;
         let record = close_record(producer, request.result, request.failure);
         self.store

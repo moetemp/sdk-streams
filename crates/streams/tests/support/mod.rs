@@ -403,6 +403,15 @@ impl Target {
     }
 
     pub(crate) async fn close(&self, producer: &Producer) -> StreamResult<Closed> {
+        self.close_at(&self.stream_ref(), producer).await
+    }
+
+    /// Closes the Stream that `stream` names, with the owner fields it has.
+    pub(crate) async fn close_at(
+        &self,
+        stream: &StreamRef,
+        producer: &Producer,
+    ) -> StreamResult<Closed> {
         let record = StreamRecord {
             kind: StreamRecordKind::Close as i32,
             producer: Some(producer.clone()),
@@ -410,7 +419,7 @@ impl Target {
         }
         .encode_to_vec();
         self.store
-            .close(&self.namespace, &self.stream_ref(), producer, &record)
+            .close(&self.namespace, stream, producer, &record)
             .await
     }
 }
