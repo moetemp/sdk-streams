@@ -60,7 +60,13 @@ fn the_wit_declares_the_stream_handle_with_its_methods() {
 fn the_writer_wit_is_client_only_and_names_each_writer_call() {
     assert!(WRITER_WIT.contains("/// @nexus.client-only\n"));
     assert!(!WRITER_WIT.contains("@nexus.endpoint"));
-    for operation in ["OpenWriter", "WriteRecords", "CloseWriter", "CloseWriters"] {
+    for operation in [
+        "OpenWriter",
+        "WriteRecords",
+        "CloseWriter",
+        "FreeWriter",
+        "CloseWriters",
+    ] {
         assert!(
             WRITER_WIT.contains(&format!("@nexus.operation name=\"{operation}\"")),
             "{operation}"

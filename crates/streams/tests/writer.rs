@@ -10,11 +10,13 @@ use std::{
     time::{Duration, SystemTime, UNIX_EPOCH},
 };
 use temporalio_common::protos::temporal::api::common::v1::Payload;
-use temporalio_sdk_core::{ExtensionError, WorkerExtension};
 use temporalio_streams::{
     MemoryStreamExtension, RedisStreamExtension, StreamError, StreamResult,
     epoch::withdraws,
-    ids::{activity_producer_id, client_producer_id, local_activity_producer_id},
+    ids::{
+        activity_producer_id, client_producer_id, local_activity_producer_id,
+        named_client_producer_id,
+    },
     memory::MemoryStore,
     proto::{
         AppendRecord, CloseStreamRequest, CloseWriterRequest, CloseWriterResponse,
@@ -106,8 +108,8 @@ fn records(texts: &[&str]) -> Vec<AppendRecord> {
         .collect()
 }
 
-fn reason(error: &ExtensionError) -> String {
-    StreamErrorDetails::decode(error.details.as_slice())
+fn reason(error: &StreamError) -> String {
+    StreamErrorDetails::decode(error.details().as_slice())
         .unwrap()
         .reason
 }
@@ -124,11 +126,8 @@ impl Case {
         &self,
         method: &str,
         request: Req,
-    ) -> Result<Resp, ExtensionError> {
-        let bytes = self
-            .ext
-            .call_async(method.to_string(), request.encode_to_vec())
-            .await?;
+    ) -> Result<Resp, StreamError> {
+        let bytes = self.ext.call(method, &request.encode_to_vec()).await?;
         Ok(Resp::decode(bytes.as_slice()).unwrap())
     }
 
@@ -148,7 +147,7 @@ impl Case {
     }
 
     /// An awaited publish: the Records are in the Store when it returns.
-    async fn write(&self, writer_id: u64, texts: &[&str]) -> Result<(i64, i64), ExtensionError> {
+    async fn write(&self, writer_id: u64, texts: &[&str]) -> Result<(i64, i64), StreamError> {
         let written: WriteRecordsResponse = self
             .call(
                 "WriteRecords",
@@ -250,7 +249,7 @@ async fn a_failed_write_fails_every_later_write_and_the_close() {
             case.call("CloseStream", close).await.unwrap();
         let error = case.write(writer, &["late"]).await.unwrap_err();
         assert_eq!(
-            (error.code, reason(&error).as_str()),
+            (error.code(), reason(&error).as_str()),
             (Code::FailedPrecondition, "stream_closed")
         );
         assert_eq!(
@@ -287,7 +286,7 @@ async fn a_closed_writer_is_gone() {
         assert!(closed.last_offset > 0);
         let error = case.write(writer, &["x"]).await.unwrap_err();
         assert_eq!(
-            (error.code, reason(&error).as_str()),
+            (error.code(), reason(&error).as_str()),
             (Code::NotFound, "stream_unknown_writer")
         );
     }
@@ -305,7 +304,7 @@ async fn a_write_splits_big_records_by_bytes_and_refuses_an_oversize_one() {
         let huge = "y".repeat(1_700_000);
         let error = case.write(writer, &[&huge]).await.unwrap_err();
         assert_eq!(
-            (error.code, reason(&error).as_str()),
+            (error.code(), reason(&error).as_str()),
             (Code::InvalidArgument, "stream_too_large")
         );
         // A refusal before the Store leaves the writer usable.
@@ -326,6 +325,49 @@ async fn a_reopen_of_a_closed_writer_goes_on_with_its_sequence() {
         assert_ne!(again, writer);
         case.write(again, &["2"]).await.unwrap();
         assert_eq!(case.visible().await, ["1", "2"]);
+    }
+}
+
+#[tokio::test]
+async fn the_handles_of_one_producer_share_a_writer_until_the_last_one_lets_go() {
+    for case in cases().await {
+        let a = case.open(client(), |_| {}).await;
+        let b = case.open(client(), |_| {}).await;
+        assert_eq!(a, b);
+        case.write(a, &["1"]).await.unwrap();
+        let _: CloseWriterResponse = case
+            .call("CloseWriter", CloseWriterRequest { writer_id: a })
+            .await
+            .unwrap();
+        // The other handle still writes, on the same sequence.
+        case.write(b, &["2"]).await.unwrap();
+        case.ext.free_writer(b).unwrap();
+        let error = case.write(b, &["3"]).await.unwrap_err();
+        assert_eq!(reason(&error), "stream_unknown_writer");
+        assert_eq!(case.visible().await, ["1", "2"]);
+    }
+}
+
+#[tokio::test]
+async fn a_named_client_with_a_higher_epoch_fences_its_earlier_self() {
+    for case in cases().await {
+        let named = |attempt| Producer {
+            kind: ProducerKind::Client as i32,
+            id: named_client_producer_id("ingest-1"),
+            epoch: Some(ProducerEpoch {
+                attempt,
+                ..Default::default()
+            }),
+            run_id: String::new(),
+        };
+        let old = case.open(named(1), |_| {}).await;
+        case.write(old, &["old"]).await.unwrap();
+        let new = case.open(named(2), |_| {}).await;
+        case.write(new, &["new"]).await.unwrap();
+        let error = case.write(old, &["late"]).await.unwrap_err();
+        assert_eq!(reason(&error), "stream_fenced");
+        // A new epoch withdraws what the earlier one wrote, as an Activity retry does.
+        assert_eq!(case.visible().await, ["new"]);
     }
 }
 
@@ -352,13 +394,9 @@ async fn closing_every_writer_drops_them_all() {
 #[tokio::test]
 async fn the_removed_buffered_calls_are_unknown() {
     for case in cases().await {
-        let error = case.ext.call("Publish", &[]).unwrap_err();
+        let error = case.ext.call("Publish", &[]).await.unwrap_err();
         assert!(error.message.contains("Publish"), "{error:?}");
-        let error = case
-            .ext
-            .call_async("FlushWriter".to_string(), vec![])
-            .await
-            .unwrap_err();
+        let error = case.ext.call("FlushWriter", &[]).await.unwrap_err();
         assert!(error.message.contains("FlushWriter"), "{error:?}");
     }
 }

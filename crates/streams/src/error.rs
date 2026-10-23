@@ -1,8 +1,7 @@
-//! The one error every call fails with, and its form on the extension boundary.
+//! The one error every call fails with, and its form for lang.
 
 use crate::proto::StreamErrorDetails;
 use prost::Message;
-use temporalio_sdk_core::ExtensionError;
 use tonic::Code;
 
 /// The result of every fallible call in the crate.
@@ -24,6 +23,10 @@ pub enum Reason {
     Fenced,
     /// The batch has a lower `sequence` than the last one of its epoch.
     Sequence,
+    /// The batch has the `sequence` of the last one of its epoch, and other content.
+    SeqDivergent,
+    /// The Stream's owner doesn't allow this Producer to close it.
+    NotOwner,
     /// A newer format version wrote the Stream.
     FormatTooNew,
     /// The Stream exists with another Retention.
@@ -54,6 +57,8 @@ impl Reason {
             Reason::Closed => "stream_closed",
             Reason::Fenced => "stream_fenced",
             Reason::Sequence => "stream_sequence",
+            Reason::SeqDivergent => "seq_divergent",
+            Reason::NotOwner => "stream_not_owner",
             Reason::FormatTooNew => "stream_format_too_new",
             Reason::AlreadyExists => "stream_already_exists",
             Reason::Offset => "stream_offset",
@@ -92,9 +97,12 @@ impl Reason {
     pub fn code(self) -> Code {
         match self {
             Reason::NotFound | Reason::Expired | Reason::UnknownWriter => Code::NotFound,
-            Reason::Closed | Reason::Fenced | Reason::Sequence | Reason::FormatTooNew => {
-                Code::FailedPrecondition
-            }
+            Reason::Closed
+            | Reason::Fenced
+            | Reason::Sequence
+            | Reason::SeqDivergent
+            | Reason::NotOwner
+            | Reason::FormatTooNew => Code::FailedPrecondition,
             Reason::AlreadyExists => Code::AlreadyExists,
             Reason::Offset | Reason::TooLarge | Reason::Invalid => Code::InvalidArgument,
             Reason::Storage => Code::Unavailable,
@@ -132,15 +140,19 @@ impl StreamError {
     pub fn storage(message: impl Into<String>) -> Self {
         Self::new(Reason::Storage, message)
     }
-}
 
-impl From<StreamError> for ExtensionError {
-    fn from(error: StreamError) -> Self {
-        let details = StreamErrorDetails {
-            reason: error.reason.token().to_string(),
-        };
-        ExtensionError::new(error.reason.code(), error.message)
-            .with_details(details.encode_to_vec())
+    /// The status code that lang raises the error with.
+    pub fn code(&self) -> Code {
+        self.reason.code()
+    }
+
+    /// The encoded [StreamErrorDetails], which lang reads the reason token from, as from the
+    /// details of a gRPC status.
+    pub fn details(&self) -> Vec<u8> {
+        StreamErrorDetails {
+            reason: self.reason.token().to_string(),
+        }
+        .encode_to_vec()
     }
 }
 
@@ -150,11 +162,9 @@ mod tests {
 
     #[test]
     fn an_error_carries_its_code_and_reason_to_lang() {
-        let error: ExtensionError =
-            StreamError::new(Reason::FormatTooNew, "format 2 is newer than 1").into();
-        assert_eq!(error.code, Code::FailedPrecondition);
-        assert_eq!(error.message, "format 2 is newer than 1");
-        let details = StreamErrorDetails::decode(error.details.as_slice()).unwrap();
+        let error = StreamError::new(Reason::FormatTooNew, "format 2 is newer than 1");
+        assert_eq!(error.code(), Code::FailedPrecondition);
+        let details = StreamErrorDetails::decode(error.details().as_slice()).unwrap();
         assert_eq!(details.reason, "stream_format_too_new");
     }
 }

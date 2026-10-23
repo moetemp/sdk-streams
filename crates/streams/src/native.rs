@@ -1,7 +1,7 @@
 //! The native Store: the server's `temporal.api.streamservice.v1.StreamService`, called on the
-//! Worker's client connection. The server keeps the same rules as the Lua scripts, so the crate's
-//! Workflow buffer, its writers and its checks work on it unchanged. The server answers whole
-//! reads and describes, so the service forwards those.
+//! connection of the client that the bridge builds the runtime for. The server keeps the same
+//! rules as the Lua scripts, so the crate's writers and its checks work on it unchanged. The
+//! server answers whole reads and describes, so the service forwards those.
 
 use crate::{
     MAX_WAIT, Reason, StreamError, StreamResult,
@@ -17,7 +17,6 @@ use crate::{
     },
 };
 use bytes::Bytes;
-use parking_lot::RwLock;
 use prost::Message;
 use std::{
     sync::atomic::{AtomicU64, Ordering},
@@ -42,9 +41,10 @@ const CLOSE: &str = "/temporal.api.streamservice.v1.StreamService/CloseStream";
 const SERVER_RETENTION: Duration = Duration::from_secs(7 * 24 * 60 * 60);
 
 /// A Store on the server's Stream service.
-#[derive(Default)]
 pub struct ServiceStore {
-    connection: RwLock<Option<Connection>>,
+    /// The client's connection. Its clones share their headers, so an API key rotation on the
+    /// client reaches every call.
+    connection: Connection,
     /// The Retention of a create that gives none, or the server's default.
     retention: Option<Duration>,
 }
@@ -52,8 +52,8 @@ pub struct ServiceStore {
 impl std::fmt::Debug for ServiceStore {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("ServiceStore")
-            .field("attached", &self.connection.read().is_some())
-            .finish()
+            .field("retention", &self.retention)
+            .finish_non_exhaustive()
     }
 }
 
@@ -69,22 +69,13 @@ struct RpcStatus {
 }
 
 impl ServiceStore {
-    /// A Store with no connection yet. [ServiceStore::attach] gives it one.
-    pub fn new() -> Self {
-        Self::default()
-    }
-
-    /// A Store whose creates with no Retention take `retention`, as a Redis Store's do.
-    pub fn with_retention(retention: Option<Duration>) -> Self {
+    /// A Store on a client's connection. A create with no Retention takes `retention`, as a
+    /// Redis Store's does, or the server's default.
+    pub fn new(connection: Connection, retention: Option<Duration>) -> Self {
         Self {
+            connection,
             retention,
-            ..Self::default()
         }
-    }
-
-    /// Uses `connection` for every later call, for example the Worker's after a rotation.
-    pub fn attach(&self, connection: Connection) {
-        *self.connection.write() = Some(connection);
     }
 
     async fn call<Req: Message, Resp: Message + Default>(
@@ -94,11 +85,6 @@ impl ServiceStore {
         request: Req,
         timeout: Option<Duration>,
     ) -> StreamResult<Resp> {
-        let Some(connection) = self.connection.read().clone() else {
-            return Err(StreamError::storage(
-                "The native Stream backend has no connection. The Worker or the client attaches it",
-            ));
-        };
         let mut call = tonic::Request::new(Bytes::from(request.encode_to_vec()));
         if let Ok(value) = namespace.parse() {
             call.metadata_mut().insert("temporal-namespace", value);
@@ -106,7 +92,8 @@ impl ServiceStore {
         if let Some(timeout) = timeout {
             call.set_timeout(timeout);
         }
-        let answer = connection
+        let answer = self
+            .connection
             .raw_unary(method, call)
             .await
             .map_err(from_status)?;
@@ -225,6 +212,7 @@ impl Store for ServiceStore {
             owner: run.map(|run| run.producer.clone()),
             close_with_run: run.is_some_and(|run| run.close_with_run),
             r#ref: Some(stream.clone()),
+            ..Default::default()
         };
         self.create_request(request, retention).await
     }
@@ -470,12 +458,7 @@ impl ServiceStore {
         links: Vec<Link>,
     ) -> StreamResult<Resp> {
         let message_type = format!("{SERVICE_PACKAGE}.{operation}Request");
-        let identity = self
-            .connection
-            .read()
-            .as_ref()
-            .map(|connection| connection.identity().to_string())
-            .unwrap_or_default();
+        let identity = self.connection.identity().to_string();
         let call = StartNexusOperationRequest {
             namespace: namespace.clone(),
             identity,

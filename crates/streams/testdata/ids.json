@@ -56,6 +56,10 @@
       "identity": "1@host",
       "process_key": "p-1",
       "id": "client:1%40host:p-1"
+    },
+    "named_client": {
+      "name": "ingest:eu/1",
+      "id": "client:ingest%3Aeu%2F1"
     }
   }
 }

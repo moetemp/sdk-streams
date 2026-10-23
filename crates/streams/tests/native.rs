@@ -15,9 +15,8 @@ use std::{
 };
 use temporalio_client::{Connection, ConnectionOptions, Url};
 use temporalio_common::protos::temporal::api::common::v1::Payload;
-use temporalio_sdk_core::{ExtensionError, WorkerExtension};
 use temporalio_streams::{
-    NativeStreamExtension, StreamExtension,
+    NativeStreamExtension, StreamError, StreamExtension,
     epoch::withdraws,
     ids::{activity_producer_id, client_producer_id},
     proto::{
@@ -43,8 +42,7 @@ async fn case() -> Option<Case> {
         .identity("streams-native-test")
         .build();
     let connection = Connection::connect(options).await.unwrap();
-    let ext = NativeStreamExtension::create("native", None);
-    ext.attach(connection);
+    let ext = NativeStreamExtension::create("native", connection, None);
     let now = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .unwrap()
@@ -95,8 +93,8 @@ fn activity(attempt: i32) -> Producer {
     }
 }
 
-fn reason(error: &ExtensionError) -> String {
-    StreamErrorDetails::decode(error.details.as_slice())
+fn reason(error: &StreamError) -> String {
+    StreamErrorDetails::decode(error.details().as_slice())
         .unwrap()
         .reason
 }
@@ -113,11 +111,8 @@ impl Case {
         &self,
         method: &str,
         request: Req,
-    ) -> Result<Resp, ExtensionError> {
-        let bytes = self
-            .ext
-            .call_async(method.to_string(), request.encode_to_vec())
-            .await?;
+    ) -> Result<Resp, StreamError> {
+        let bytes = self.ext.call(method, &request.encode_to_vec()).await?;
         Ok(Resp::decode(bytes.as_slice()).unwrap())
     }
 
@@ -125,7 +120,7 @@ impl Case {
         &self,
         sequence: i64,
         texts: &[&str],
-    ) -> Result<AppendRecordsResponse, ExtensionError> {
+    ) -> Result<AppendRecordsResponse, StreamError> {
         let request = AppendRecordsRequest {
             namespace: self.namespace.clone(),
             stream: self.stream_ref(),
@@ -310,8 +305,9 @@ async fn a_create_with_no_retention_takes_the_config_default() {
     let options = ConnectionOptions::new(Url::parse(&url).unwrap())
         .identity("streams-native-test")
         .build();
-    case.ext = NativeStreamExtension::from_config_bytes(&config.encode_to_vec(), None).unwrap();
-    case.ext.attach(Connection::connect(options).await.unwrap());
+    let connection = Connection::connect(options).await.unwrap();
+    case.ext = NativeStreamExtension::from_config_bytes(&config.encode_to_vec(), connection, None)
+        .unwrap();
     let _: CreateStreamResponse = case
         .call(
             "CreateStream",

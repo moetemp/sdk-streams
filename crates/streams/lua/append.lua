@@ -2,8 +2,8 @@
 --
 -- ARGV: format version, kind, Producer id, encoded run id, epoch key, sequence, encoded
 -- withdrawn run, Supersession bytes, safety TTL ms, Tombstone ms, task key, completed task key
--- (`-` when the write gives no task facts), failed task ids, task Supersession bytes, then one
--- Record per argument.
+-- (`-` when the write gives no task facts), failed task ids, task Supersession bytes, the batch
+-- digest, then one Record per argument.
 --
 -- Answers {'ok' or 'resend', first id, last id, '1' when flagged}.
 local meta, log = KEYS[1], KEYS[2]
@@ -12,7 +12,8 @@ local run, epoch, sequence = ARGV[4], ARGV[5], tonumber(ARGV[6])
 local withdrawn_run, supersession = ARGV[7], ARGV[8]
 local safety, tombstone = tonumber(ARGV[9]), tonumber(ARGV[10])
 local task, completed, failed, task_supersession = ARGV[11], ARGV[12], ARGV[13], ARGV[14]
-local records = #ARGV - 14
+local digest = ARGV[15]
+local records = #ARGV - 15
 -- A Local Activity write with its run's task facts withdraws the run's orphaned Local Activity
 -- Records: those of tasks that never completed.
 local orphans = kind == '2' and completed ~= '-' and run ~= ''
@@ -30,11 +31,16 @@ local suffix = '|' .. kind .. '|' .. producer
 -- The dedupe key goes before the close status, so a resend gets its Positions after a close.
 local last = redis.call('HGET', meta, 'd' .. suffix)
 if last then
-  local last_epoch, last_sequence, first_id, last_id =
-    string.match(last, '^([^|]*)|(%d+)|([^|]*)|([^|]*)$')
+  -- An entry written before the digest has none, and takes any resend.
+  local last_epoch, last_sequence, first_id, last_id, last_digest =
+    string.match(last, '^([^|]*)|(%d+)|([^|]*)|([^|]*)|?([^|]*)$')
   if last_epoch == epoch then
     last_sequence = tonumber(last_sequence)
     if sequence == last_sequence then
+      if last_digest ~= '' and last_digest ~= digest then
+        return refuse('SEQ_DIVERGENT', 'sequence ' .. sequence ..
+          ' has other content than the batch the Store has')
+      end
       return {'resend', first_id, last_id, ''}
     end
     if sequence < last_sequence then
@@ -89,9 +95,9 @@ if records == 0 and flagged then
     first_id = last_id
   end
 end
-for i = 15, #ARGV do
+for i = 16, #ARGV do
   local fields = {'r', ARGV[i]}
-  if i == 15 and flagged then
+  if i == 16 and flagged then
     fields = {'s', supersession, 'r', ARGV[i]}
   end
   last_id = add(log, fields)
@@ -106,7 +112,7 @@ end
 
 redis.call('HSET', meta, 'e' .. suffix, epoch)
 redis.call('HSET', meta, 'd' .. suffix,
-  epoch .. '|' .. sequence .. '|' .. first_id .. '|' .. last_id)
+  epoch .. '|' .. sequence .. '|' .. first_id .. '|' .. last_id .. '|' .. digest)
 if records > 0 then
   redis.call('HSET', meta, 'h' .. suffix, epoch)
 elseif flagged then

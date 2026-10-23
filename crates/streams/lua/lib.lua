@@ -28,6 +28,25 @@ local function check_live(meta, version, now)
   return nil
 end
 
+-- Nil when the Producer kind may close the Stream, or the refusal. A Workflow-owned Stream closes
+-- only from its run chain, as a Workflow (2 is a Local Activity, 1 the run itself), and a ref that
+-- names another chain is refused. Any other Stream closes only from a client (4). Redis can't tie
+-- a run to its chain, so a run of another chain that holds this chain's ref still passes.
+local function check_owner(meta, kind, chain)
+  if redis.call('HGET', meta, 'own') == 'wf' then
+    if kind ~= '1' and kind ~= '2' then
+      return refuse('NOT_OWNER', 'only the owner run chain closes a Workflow-owned Stream')
+    end
+    local owner_chain = redis.call('HGET', meta, 'oc')
+    if owner_chain and chain ~= '' and chain ~= owner_chain then
+      return refuse('NOT_OWNER', 'the ref names another run chain than the owner')
+    end
+  elseif kind ~= '4' then
+    return refuse('NOT_OWNER', 'only a client closes a Stream that a client created')
+  end
+  return nil
+end
+
 -- Sets the time the Stream stays after this write: the safety TTL for an open Workflow-owned
 -- Stream, the Retention otherwise. The meta stays 30 days longer as the Tombstone.
 local function refresh(meta, log, now, safety, tombstone)
@@ -157,9 +176,10 @@ local function add(log, fields)
   return redis.call('XADD', log, '*', unpack(fields))
 end
 
--- The close Record of an auto close: an encoded StreamRecord with only kind = CLOSE (3). It has
--- no Producer, result or failure, so every script can write it with no argument.
-local AUTO_CLOSE_RECORD = '\8\3'
+-- The close Record of an auto close: an encoded StreamRecord with kind = CLOSE (3) and
+-- close_status = COMPLETED (field 9, 1). It has no Producer, result or failure, so every script
+-- can write it with no argument.
+local AUTO_CLOSE_RECORD = '\8\3\72\1'
 
 -- Closes an open Stream whose auto close period passed since its last append, so the call that
 -- finds it late acts as if the close came on time. Answers true when the Stream is closed after

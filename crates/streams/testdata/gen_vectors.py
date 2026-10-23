@@ -6,6 +6,7 @@ code against it. Each SDK runs the same JSON files. Run it from this directory:
     python3 gen_vectors.py
 """
 
+import hashlib
 import json
 from urllib.parse import quote
 
@@ -99,6 +100,7 @@ def ids():
             "process_key": "p-1",
             "id": "client:" + join("1@host", "p-1"),
         },
+        "named_client": {"name": "ingest:eu/1", "id": "client:" + join("ingest:eu/1")},
     }
     return {"streams": cases, "producers": producers}
 
@@ -147,6 +149,56 @@ def fields():
         "run_wrote": f"run|{part(run)}",
         "withdrawn_run": f"wr|{part(run)}",
     }
+
+
+def digest(records):
+    """The content digest of a batch, which a dedupe entry keeps."""
+    out = hashlib.sha256()
+
+    def part(data):
+        out.update(len(data).to_bytes(8, "big"))
+        out.update(data)
+
+    for record in records:
+        part(record["topic"].encode())
+        metadata = record.get("metadata", {})
+        metadata = sorted((key.encode(), bytes.fromhex(value)) for key, value in metadata.items())
+        out.update(len(metadata).to_bytes(8, "big"))
+        for key, value in metadata:
+            part(key)
+            part(value)
+        part(bytes.fromhex(record.get("data", "")))
+    return out.hexdigest()
+
+
+def digests():
+    """Batches as hex bytes, so the server and every SDK compute the same digest."""
+    cases = [
+        {"name": "empty batch", "records": []},
+        {"name": "one record, no body", "records": [{"topic": ""}]},
+        {"name": "one record", "records": [{"topic": "t", "data": b"hello".hex()}]},
+        {
+            "name": "metadata in key order",
+            "records": [
+                {
+                    "topic": "turns",
+                    "metadata": {"encoding": b"json/plain".hex(), "a": "00ff"},
+                    "data": b'{"x":1}'.hex(),
+                }
+            ],
+        },
+        {
+            "name": "two records",
+            "records": [{"topic": "a", "data": "01"}, {"topic": "", "data": "0203"}],
+        },
+        # The lengths keep these two apart, though their bytes run together the same.
+        {"name": "topic and data split one way", "records": [{"topic": "ab", "data": "63"}]},
+        {"name": "topic and data split another way", "records": [{"topic": "a", "data": "6263"}]},
+    ]
+    for case in cases:
+        case["digest"] = digest(case["records"])
+    assert cases[-1]["digest"] != cases[-2]["digest"]
+    return cases
 
 
 def withdraws(supersession, record):
@@ -285,6 +337,7 @@ def main():
         ("epochs.json", epochs()),
         ("fields.json", fields()),
         ("withdrawals.json", withdrawal_examples()),
+        ("digests.json", digests()),
     ]:
         with open(name, "w") as out:
             json.dump(value, out, indent=2, ensure_ascii=False)
