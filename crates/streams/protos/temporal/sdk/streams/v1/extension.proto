@@ -1,8 +1,8 @@
 syntax = "proto3";
 
-// The messages of the crate's own extension calls, next to the five Stream service operations.
-// Lang sends them through the bridge's generic extension call, by the method name in each
-// comment. Field numbers are part of the contract with every SDK.
+// The messages of the crate's own calls, next to the five Stream service operations. Lang sends
+// them through the bridge's call on the runtime object, by the method name in each comment. Field
+// numbers are part of the contract with every SDK.
 package temporal.sdk.streams.v1;
 
 import "google/protobuf/duration.proto";
