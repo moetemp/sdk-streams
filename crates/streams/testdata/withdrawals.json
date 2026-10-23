@@ -748,5 +748,25 @@
       }
     },
     "withdraws": false
+  },
+  {
+    "name": "a client's newer epoch keeps its earlier Records",
+    "supersession": {
+      "producer_kind": "client",
+      "producer_id": "client:ingest",
+      "epoch": {
+        "attempt": 2
+      }
+    },
+    "record": {
+      "producer": {
+        "kind": "client",
+        "id": "client:ingest",
+        "epoch": {
+          "attempt": 1
+        }
+      }
+    },
+    "withdraws": false
   }
 ]

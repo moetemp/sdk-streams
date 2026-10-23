@@ -156,3 +156,46 @@
   alone, so a read always moves on.
 - The Redis and memory Stores read no `to_offset` or `wake_only`. A read with one fails with
   `stream_unsupported`, since only the native backend serves them.
+- The runtime is a plain object with no Core trait. A bridge builds it per client and calls
+  `StreamExtension::call` with a method name and proto bytes. An error has `code()` and
+  `details()`, the encoded `StreamErrorDetails`. The crate no longer depends on
+  `temporalio-sdk-core`, and it pins `temporalio-common` at sdk-rust Brook c7 `b565c433`.
+- The handles of one Producer epoch on one Stream share one writer. Each `OpenWriter` adds a
+  handle, and each `CloseWriter` or the new `FreeWriter` releases one. `FreeWriter` and
+  `StreamExtension::free_writer` release with no wait, for a handle that lang drops. The last
+  handle drops the writer, so a process keeps no writer that no handle uses.
+- Every writer in a process takes its batch `sequence` from one counter, so a writer opened again
+  after its close goes on above its earlier batches. The map of closed writers' sequences is
+  gone, and it no longer grows for the life of the process.
+- `ids::named_client_producer_id` makes `client:<name>`, a client Producer id that the caller
+  keeps across restarts. With the caller's epoch in `attempt`, a new incarnation fences the
+  earlier one and withdraws its Records, as an Activity retry does.
+- The native runtime takes its client's connection when the bridge builds it:
+  `NativeStreamExtension::from_config_bytes`, `NativeStreamExtension::create`,
+  `StreamExtension::for_backend` and `ServiceStore::new` take a `Connection`. `attach` and
+  `attach_connection` are gone, so one runtime never calls on another client's connection.
+- The native Store sends the Activity task token on append, close and create, so the server
+  checks the Producer against the Activity's current attempt. `OpenWriterRequest.task_token`
+  (10) gives a writer's token, `Batch::task_token` carries it, and `Store::close` takes it.
+  `Owner::Activity` is a Standalone Activity's create of its own Stream, with its token and the
+  Activity owner fields of its ref. Redis and memory refuse it with `stream_unsupported`.
+- The native Store sends the close Record's status as `CloseStreamRequest.status`.
+- A create answers the Stream's ref with the owner fields of the create's ref, the Workflow's
+  or the Standalone Activity's, so a caller routes the ref it gets on the native backend.
+- A native `wake_only` read may wait up to 7 days, the server's `stream.maxWakeWait` default,
+  since a parked wake adds nothing to History. Other reads keep the 60 s cap.
+- A native error with the reason `seq_divergent` or `stream_not_owner` reads back to its reason.
+  The native tests write with named clients, since the server refuses an Activity Producer with
+  no task token.
+  earlier one.
+- A client Producer's newer epoch fences its earlier epochs but writes no `Superseded` item and
+  withdraws nothing, in the Redis script, the memory Store and the reader rule. The withdrawal
+  rule stays for Workflow, Local Activity and Activity Producers. `testdata/withdrawals.json` has
+  the case.
+- A Workflow read (`WorkflowReadRecords`) with `last` fails with `stream_invalid` on every
+  backend, since a replay must read the same range.
+- A Standalone Activity's create of its own Stream sends its owner Producer
+  (`sa:<activity id>:<activity run id>` at the token's attempt) together with its task token, as
+  the server checks both. `Owner::Activity` carries both. A create with a task token and no
+  Standalone Activity owner, or no Activity ref, fails with `stream_invalid`, and it needs no
+  safety TTL.

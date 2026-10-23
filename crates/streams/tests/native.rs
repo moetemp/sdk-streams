@@ -15,9 +15,8 @@ use std::{
 };
 use temporalio_client::{Connection, ConnectionOptions, Url};
 use temporalio_common::protos::temporal::api::common::v1::Payload;
-use temporalio_sdk_core::{ExtensionError, WorkerExtension};
 use temporalio_streams::{
-    NativeStreamExtension, StreamExtension,
+    NativeStreamExtension, StreamError, StreamExtension,
     epoch::withdraws,
     ids::{activity_producer_id, client_producer_id},
     proto::{
@@ -43,8 +42,7 @@ async fn case() -> Option<Case> {
         .identity("streams-native-test")
         .build();
     let connection = Connection::connect(options).await.unwrap();
-    let ext = NativeStreamExtension::create("native", None);
-    ext.attach(connection);
+    let ext = NativeStreamExtension::create("native", connection, None);
     let now = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .unwrap()
@@ -79,6 +77,21 @@ fn client() -> Producer {
     }
 }
 
+/// A Local Activity call of a made-up run, at `attempt`.
+fn local_activity(attempt: i32) -> Producer {
+    Producer {
+        kind: ProducerKind::LocalActivity as i32,
+        id: temporalio_streams::ids::local_activity_producer_id("r1", "call-1"),
+        epoch: Some(ProducerEpoch {
+            task_started_event_id: 3,
+            task_attempt: 1,
+            attempt,
+            ..Default::default()
+        }),
+        run_id: "r1".to_string(),
+    }
+}
+
 fn activity(attempt: i32) -> Producer {
     Producer {
         kind: ProducerKind::Activity as i32,
@@ -95,8 +108,8 @@ fn activity(attempt: i32) -> Producer {
     }
 }
 
-fn reason(error: &ExtensionError) -> String {
-    StreamErrorDetails::decode(error.details.as_slice())
+fn reason(error: &StreamError) -> String {
+    StreamErrorDetails::decode(error.details().as_slice())
         .unwrap()
         .reason
 }
@@ -113,11 +126,8 @@ impl Case {
         &self,
         method: &str,
         request: Req,
-    ) -> Result<Resp, ExtensionError> {
-        let bytes = self
-            .ext
-            .call_async(method.to_string(), request.encode_to_vec())
-            .await?;
+    ) -> Result<Resp, StreamError> {
+        let bytes = self.ext.call(method, &request.encode_to_vec()).await?;
         Ok(Resp::decode(bytes.as_slice()).unwrap())
     }
 
@@ -125,7 +135,7 @@ impl Case {
         &self,
         sequence: i64,
         texts: &[&str],
-    ) -> Result<AppendRecordsResponse, ExtensionError> {
+    ) -> Result<AppendRecordsResponse, StreamError> {
         let request = AppendRecordsRequest {
             namespace: self.namespace.clone(),
             stream: self.stream_ref(),
@@ -219,9 +229,24 @@ async fn a_stream_on_the_server_dedupes_withdraws_reads_and_closes() {
     let error = case.append(1, &["old"]).await.unwrap_err();
     assert_eq!(reason(&error), "stream_sequence");
 
-    // The second Activity attempt withdraws the first one's Records.
-    case.write(activity(1), &["x"]).await;
-    let written = case.write(activity(2), &["y"]).await;
+    // An Activity writes only with its task token, so a made-up one is refused.
+    let refused = case
+        .call::<_, OpenWriterResponse>(
+            "OpenWriter",
+            OpenWriterRequest {
+                namespace: case.namespace.clone(),
+                stream: case.stream_ref(),
+                producer: Some(activity(2)),
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap_err();
+    assert_eq!(reason(&refused), "stream_not_owner");
+    // A Local Activity's next attempt withdraws the earlier one's Records. On a standalone
+    // Stream the server takes the run as sent.
+    case.write(local_activity(1), &["x"]).await;
+    let written = case.write(local_activity(2), &["y"]).await;
     assert!(written.last_offset > first.last_offset);
     assert_eq!(
         case.visible().await,
@@ -310,8 +335,9 @@ async fn a_create_with_no_retention_takes_the_config_default() {
     let options = ConnectionOptions::new(Url::parse(&url).unwrap())
         .identity("streams-native-test")
         .build();
-    case.ext = NativeStreamExtension::from_config_bytes(&config.encode_to_vec(), None).unwrap();
-    case.ext.attach(Connection::connect(options).await.unwrap());
+    let connection = Connection::connect(options).await.unwrap();
+    case.ext = NativeStreamExtension::from_config_bytes(&config.encode_to_vec(), connection, None)
+        .unwrap();
     let _: CreateStreamResponse = case
         .call(
             "CreateStream",
@@ -394,14 +420,14 @@ async fn a_workflow_stream_is_found_by_its_owner_ref_on_every_call() {
         )
         .await
         .unwrap();
-    // An Activity writes with the same ref.
+    // A client writes with the same ref.
     let opened: OpenWriterResponse = case
         .call(
             "OpenWriter",
             OpenWriterRequest {
                 namespace: case.namespace.clone(),
                 stream: Some(owned.clone()),
-                producer: Some(activity(1)),
+                producer: Some(client()),
                 ..Default::default()
             },
         )

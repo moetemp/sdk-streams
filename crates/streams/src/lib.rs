@@ -3,9 +3,9 @@
 //! The Stream runtime of Temporal SDKs.
 //!
 //! The crate serves the Stream service of the Brook API proposal on the customer's Redis, or on
-//! the server's Stream service through [native::ServiceStore]. Lang
-//! reaches it through the bridge's generic extension calls, with an operation name and proto
-//! bytes. A Workflow makes each call from a Local Activity.
+//! the server's Stream service through [native::ServiceStore]. Lang's bridge builds the runtime
+//! per client and calls it with an operation name and proto bytes. Core has no hook for it. A
+//! Workflow makes each call from a Local Activity.
 
 pub mod digest;
 pub mod epoch;

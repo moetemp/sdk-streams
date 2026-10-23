@@ -100,6 +100,7 @@ def ids():
             "process_key": "p-1",
             "id": "client:" + join("1@host", "p-1"),
         },
+        "named_client": {"name": "ingest:eu/1", "id": "client:" + join("ingest:eu/1")},
     }
     return {"streams": cases, "producers": producers}
 
@@ -205,6 +206,9 @@ def withdraws(supersession, record):
     producer = record["producer"]
     if supersession.get("withdraw_run") and producer.get("run_id") == supersession["withdraw_run"]:
         return True
+    # A client's newer epoch only fences. Its earlier Records are real messages.
+    if supersession["producer_kind"] == "client":
+        return False
     old, new = producer.get("epoch", {}), supersession.get("epoch", {})
     if supersession["producer_kind"] != "workflow":
         return (
@@ -326,6 +330,10 @@ def withdrawal_examples():
     case("an Activity retry withdraws attempt 1", s, act, True)
     other = dict(act, id="act:" + join(r1, "b", "s"))
     case("an Activity retry keeps another Activity", s, other, False)
+    # A client's newer epoch fences its earlier one and withdraws nothing.
+    named = {"kind": "client", "id": "client:" + join("ingest"), "epoch": {"attempt": 1}}
+    s = {"producer_kind": "client", "producer_id": named["id"], "epoch": {"attempt": 2}}
+    case("a client's newer epoch keeps its earlier Records", s, named, False)
     return cases
 
 

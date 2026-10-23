@@ -147,6 +147,7 @@ impl RedisStore {
             .arg(match owner {
                 Owner::Workflow(_) => "wf",
                 Owner::Client => "client",
+                Owner::Activity { .. } => return Err(crate::memory::activity_owner()),
             })
             .arg(millis(self.safety_ttl))
             .arg(millis(TOMBSTONE))
@@ -418,6 +419,7 @@ impl Store for RedisStore {
         namespace: &str,
         stream: &StreamRef,
         producer: &Producer,
+        _task_token: &[u8],
         record: &[u8],
     ) -> StreamResult<Closed> {
         RedisStore::close(self, namespace, stream, producer, record).await

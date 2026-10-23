@@ -3,20 +3,25 @@
 Internal and experimental.
 
 `temporalio-streams` is the Stream runtime for Temporal SDKs. It serves the Stream service of the
-Brook API proposal on the customer's Redis. The SDKs link this crate into their bridges. Lang
-calls it through the bridge's generic extension calls. A Workflow writes through a Local Activity
-per call, on the same calls. Temporal Core holds no stream code.
+Brook API proposal on the customer's Redis, or on the server's Stream service, which Jetty calls
+the native backend. The SDKs link this crate into their bridges. A bridge
+builds the runtime per client, as a plain object, and calls `StreamExtension::call` with a method
+name and proto bytes. A Workflow writes through a Local Activity per call, on the same calls.
+Temporal Core holds no stream code and no hook for it.
 
 ## Stage pins
 
-The crate depends on `temporalio-common` and `temporalio-sdk-core` from one sdk-rust commit. That
-commit must equal the `sdk-core` submodule commit of the sdk-python stage that links the crate.
+The crate depends on `temporalio-common`, and on Jetty `temporalio-client` too, from one sdk-rust
+commit. That commit must equal the `sdk-core` submodule commit of the sdk-python stage that links
+the crate.
 
 | Stage | sdk-streams branch | sdk-rust branch |
 |---|---|---|
 | Brook v3 | `moe/brook/v3/s1-protos-and-ids` and up | `moe/brook/v3/c4-local-activity-workflow-task` `3a9203ac` |
-| Brook v4 | `moe/brook/v4/s20-orphan-local-activities` and up | `moe/brook/v4/c6-local-activity-task-history` `32ba79d6` |
-| Jetty v2 | `moe/jetty/v2/k1-service-store` and up | `moe/jetty/v2/c8-no-workflow-task-hooks` `66a7c85c` |
+| Brook v4 | `moe/brook/v4/s20-orphan-local-activities` to `s21` | `moe/brook/v4/c6-local-activity-task-history` `32ba79d6` |
+| Brook v4 | `moe/brook/v4/s22-client-objects` and up | `moe/brook/v4/c7-no-worker-extension` `b565c433` |
+| Jetty v2 | `moe/jetty/v2/k1-service-store` | `moe/jetty/v2/c8-no-workflow-task-hooks` `66a7c85c` |
+| Jetty v2 | `moe/jetty/v2/k2-store-takeovers` and up | `moe/jetty/v2/c9-no-worker-extension` `04312dfd` |
 
 ## Linking from a lang bridge
 
@@ -33,18 +38,21 @@ default-features = false
 
 [patch."https://github.com/moetemp/sdk-rust"]
 temporalio-common = { path = "./sdk-core/crates/common" }
-temporalio-sdk-core = { path = "./sdk-core/crates/sdk-core" }
+temporalio-client = { path = "./sdk-core/crates/client" }
 ```
 
-The crate features `tls-ring` and `tls-aws-lc` forward to the sdk-rust crates. A FIPS build takes
+The crate features `tls-ring` and `tls-aws-lc` forward to `temporalio-common` and
+`temporalio-client`. A FIPS build takes
 `fips` with no default features. It turns on `tls-aws-lc` and the FIPS build of `aws-lc-rs`, which
 needs CMake and Go.
 
 ## Protos and shared vectors
 
-- `protos/temporal/api/streamservice/v1/stream_service.proto` is the draft Stream service of the
-  API proposal. sdk-rust doesn't have it, so the crate generates it. Lang generates the same file.
-- `protos/temporal/sdk/streams/v1/extension.proto` has the crate's own extension calls.
+- `protos/temporal/api/streamservice/v1/stream_service.proto` is the Stream service, a byte for
+  byte copy of the api fork's file. sdk-rust doesn't have it, so the crate generates it. Lang
+  generates the same file.
+- `protos/temporal/sdk/streams/v1/extension.proto` has the crate's own calls, such as the writer
+  calls.
 - `nexus/stream-service.wit` is the Stream service as a System Nexus service, backed by the
   proto above. Each SDK copies it and generates its bindings with nexgen. A test keeps every
   line at most 100 columns.
@@ -56,8 +64,9 @@ needs CMake and Go.
   `scripts/sync-api-protos.sh` refreshes it from the pinned sdk-rust commit, and CI fails when the
   copy differs.
 - `testdata/*.json` are the shared vectors: Stream ids, Producer ids, Redis keys and meta fields,
-  offsets, epoch keys and the withdrawal rule. `testdata/gen_vectors.py` writes them from a
-  second implementation. Each SDK runs the same files.
+  offsets, epoch keys, the withdrawal rule and the batch digest of a dedupe entry.
+  `testdata/gen_vectors.py` writes them from a second implementation. Each SDK and the server run
+  the same files.
 
 ## Building and testing
 

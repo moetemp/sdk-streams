@@ -107,6 +107,12 @@ pub fn client_producer_id(identity: &str, process_key: &str) -> String {
     format!("client:{}", join(&[identity, process_key]))
 }
 
+/// The Producer id that a client names itself, `client:<name>`. The caller keeps the name and
+/// raises the epoch across restarts, so a new incarnation fences the one before it.
+pub fn named_client_producer_id(name: &str) -> String {
+    format!("client:{}", join(&[name]))
+}
+
 /// The id prefix of a Producer kind.
 pub(crate) fn kind_prefix(kind: ProducerKind) -> Option<&'static str> {
     match kind {
@@ -135,7 +141,10 @@ pub fn check_producer(producer: &Producer) -> StreamResult<()> {
     let parts: Vec<_> = rest.split(':').collect();
     let expected = match kind {
         ProducerKind::Workflow => 1,
-        ProducerKind::LocalActivity | ProducerKind::StandaloneActivity | ProducerKind::Client => 2,
+        ProducerKind::LocalActivity | ProducerKind::StandaloneActivity => 2,
+        // A named client has one part, and a process's client two.
+        ProducerKind::Client if parts.len() == 1 => 1,
+        ProducerKind::Client => 2,
         ProducerKind::Activity => 3,
         ProducerKind::Unspecified => unreachable!("refused above"),
     };

@@ -85,11 +85,12 @@ pub fn timestamp(time: SystemTime) -> Timestamp {
 
 /// Whether a `Superseded` item withdraws an earlier Record.
 ///
-/// For an Activity, a Local Activity or a client, it withdraws that Producer's Records with a
-/// lower epoch. For a Workflow task t with the previous completed task c, it withdraws the
-/// Records of the run and of its Local Activities whose task is in `failed_tasks` or strictly
-/// between c and t, and those at c or at t with a lower epoch. A retry run withdraws every
-/// Record whose Producer has the previous run.
+/// For an Activity or a Local Activity, it withdraws that Producer's Records with a lower epoch.
+/// For a Workflow task t with the previous completed task c, it withdraws the Records of the run
+/// and of its Local Activities whose task is in `failed_tasks` or strictly between c and t, and
+/// those at c or at t with a lower epoch. A retry run withdraws every Record whose Producer has
+/// the previous run. A client's newer epoch fences the earlier ones but withdraws nothing, since
+/// a restarted client's earlier Records are real messages, not a failed attempt's.
 pub fn withdraws(supersession: &Supersession, record: &StreamRecord) -> bool {
     let Some(producer) = record.producer.as_ref() else {
         return false;
@@ -98,6 +99,9 @@ pub fn withdraws(supersession: &Supersession, record: &StreamRecord) -> bool {
         return true;
     }
     let kind = ProducerKind::try_from(supersession.producer_kind).unwrap_or_default();
+    if kind == ProducerKind::Client {
+        return false;
+    }
     let (Some(epoch), Some(old)) = (supersession.epoch.as_ref(), producer.epoch.as_ref()) else {
         return false;
     };

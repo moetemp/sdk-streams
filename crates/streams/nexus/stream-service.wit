@@ -39,11 +39,10 @@ interface stream-service {
     first-execution-run-id: option<string>,
     /// @nexus.doc "Registered backend name, empty for the default. The Store never reads it."
     backend: option<string>,
-    // A Standalone Activity's owner fields. Native only. Brook's Stores don't read them.
-    /// @nexus.omit
-    activity-id: placeholder,
-    /// @nexus.omit
-    activity-run-id: placeholder,
+    /// @nexus.doc "The owning Standalone Activity. Native only. The Store never reads it."
+    activity-id: option<string>,
+    /// @nexus.doc "The run id of the owning Standalone Activity. Empty when activity-id is."
+    activity-run-id: option<string>,
   }
 
   /// @nexus.proto "temporal.api.streamservice.v1.ProducerKind"
@@ -188,7 +187,7 @@ interface stream-service {
     %ref: option<stream-ref>,
     /// @nexus.omit
     namespace: placeholder,
-    // Native only. Brook's Stores don't read it.
+    // A Standalone Activity's create of its own Stream. The Activity transport sets it.
     /// @nexus.omit
     task-token: placeholder,
   }
@@ -223,7 +222,7 @@ interface stream-service {
     defer-withdrawal: option<bool>,
     /// @nexus.omit
     namespace: placeholder,
-    // An Activity's task token on the native backend. The Activity transport sets it.
+    // An Activity's write on the native backend. The Activity transport sets it.
     /// @nexus.omit
     task-token: placeholder,
   }
@@ -253,7 +252,7 @@ interface stream-service {
     withdraw-run: option<string>,
     /// @nexus.omit
     namespace: placeholder,
-    // An Activity's task token on the native backend. The Activity transport sets it.
+    // An Activity's close on the native backend. The Activity transport sets it.
     /// @nexus.omit
     task-token: placeholder,
   }
@@ -294,7 +293,7 @@ interface stream-service {
     max-bytes: option<s64>,
     /// @nexus.omit
     namespace: placeholder,
-    // Native only. Brook's Stores refuse to-offset and wake-only.
+    // Native reads these. Redis and memory refuse to-offset and wake-only.
     /// @nexus.omit
     to-offset: placeholder,
     /// @nexus.omit

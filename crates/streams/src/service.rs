@@ -138,8 +138,23 @@ impl StreamService {
                 .require(Capabilities::AUTO_CLOSE)?;
         }
         // A Workflow's call that runs outside Workflow code, such as a Local Activity, names the
-        // owning run, so the Stream keeps the safety TTL of a Workflow-owned one.
+        // owning run, so the Stream keeps the safety TTL of a Workflow-owned one. A Standalone
+        // Activity creates its own Stream as its Producer, with its task token.
         let owner = match &request.owner {
+            Some(producer) if !request.task_token.is_empty() => {
+                check_producer(producer)?;
+                if producer.kind != ProducerKind::StandaloneActivity as i32
+                    || stream.activity_id.is_empty()
+                {
+                    return Err(StreamError::invalid(
+                        "A create with a task token is a Standalone Activity's, with its ref",
+                    ));
+                }
+                Owner::Activity {
+                    producer,
+                    task_token: &request.task_token,
+                }
+            }
             Some(producer) => {
                 self.store
                     .capabilities()
@@ -148,6 +163,11 @@ impl StreamService {
                     producer,
                     close_with_run: request.close_with_run,
                 }))
+            }
+            None if !request.task_token.is_empty() => {
+                return Err(StreamError::invalid(
+                    "A create with a task token needs the Standalone Activity as its owner",
+                ));
             }
             None => Owner::Client,
         };
@@ -194,11 +214,12 @@ impl StreamService {
                 ));
             }
         };
+        // The answer keeps the owner fields, since the server finds a Workflow's or an
+        // Activity's Stream by them.
         Ok(CreateStreamResponse {
             stream: Some(StreamRef {
-                id: request.stream_id,
                 backend: self.backend.clone(),
-                ..Default::default()
+                ..stream
             }),
             created: created.outcome == CreateOutcome::Created,
             status: status as i32,
@@ -238,6 +259,7 @@ impl StreamService {
             sequence: request.sequence,
             records: &records,
             digest: &digest,
+            task_token: &request.task_token,
             withdrawal: Withdrawal {
                 withdraw_run: &request.withdraw_run,
                 supersession: &bytes,
@@ -278,7 +300,13 @@ impl StreamService {
         let status = caller_status(request.status, request.failure.is_some())?;
         let record = close_record(producer, request.result, request.failure, status);
         self.store
-            .close(&request.namespace, &stream, producer, &record)
+            .close(
+                &request.namespace,
+                &stream,
+                producer,
+                &request.task_token,
+                &record,
+            )
             .await?;
         Ok(CloseStreamResponse {})
     }
@@ -354,6 +382,12 @@ impl StreamService {
         request: ReadRecordsRequest,
         reader: Option<&ReaderRun>,
     ) -> StreamResult<ReadRecordsResponse> {
+        // A replay must read the same range, which the newest Records are not.
+        if reader.is_some() && request.last != 0 {
+            return Err(StreamError::invalid(
+                "Workflow code reads from an offset, not the last Records",
+            ));
+        }
         if let Some(remote) = self.store.remote_reads() {
             return remote.read_records(request, reader).await;
         }

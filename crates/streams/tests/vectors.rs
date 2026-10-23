@@ -108,6 +108,10 @@ fn producer_ids_match() {
         ids::client_producer_id(field("client", "identity"), field("client", "process_key")),
         id("client")
     );
+    assert_eq!(
+        ids::named_client_producer_id(field("named_client", "name")),
+        id("named_client")
+    );
 }
 
 #[test]

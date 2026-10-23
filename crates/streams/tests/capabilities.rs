@@ -8,9 +8,8 @@ use std::{
     sync::Arc,
     time::{Duration, SystemTime, UNIX_EPOCH},
 };
-use temporalio_sdk_core::{ExtensionError, WorkerExtension};
 use temporalio_streams::{
-    MemoryStreamExtension, StreamExtension, StreamResult,
+    MemoryStreamExtension, StreamError, StreamExtension, StreamResult,
     ids::{client_producer_id, default_stream_id},
     memory::MemoryStore,
     proto::{
@@ -95,9 +94,12 @@ impl Store for Masked {
         namespace: &str,
         stream: &StreamRef,
         producer: &Producer,
+        task_token: &[u8],
         record: &[u8],
     ) -> StreamResult<Closed> {
-        self.inner.close(namespace, stream, producer, record).await
+        self.inner
+            .close(namespace, stream, producer, task_token, record)
+            .await
     }
 
     async fn auto_close(&self, namespace: &str, stream_id: &str) -> StreamResult<Option<i64>> {
@@ -149,9 +151,9 @@ fn client() -> Producer {
 }
 
 /// The capability an error names, after it checked the code and the reason.
-fn refused_capability(error: &ExtensionError) -> String {
-    assert_eq!(error.code, Code::Unimplemented, "{error:?}");
-    let details = StreamErrorDetails::decode(error.details.as_slice()).unwrap();
+fn refused_capability(error: &StreamError) -> String {
+    assert_eq!(error.code(), Code::Unimplemented, "{error:?}");
+    let details = StreamErrorDetails::decode(error.details().as_slice()).unwrap();
     assert_eq!(details.reason, "stream_unsupported");
     error
         .message
@@ -169,14 +171,8 @@ impl Case {
         })
     }
 
-    async fn call<Req: Message>(
-        &self,
-        method: &str,
-        request: Req,
-    ) -> Result<Vec<u8>, ExtensionError> {
-        self.ext
-            .call_async(method.to_string(), request.encode_to_vec())
-            .await
+    async fn call<Req: Message>(&self, method: &str, request: Req) -> Result<Vec<u8>, StreamError> {
+        self.ext.call(method, &request.encode_to_vec()).await
     }
 
     async fn create(&self) {
@@ -199,7 +195,7 @@ impl Case {
     }
 
     /// A create from a Workflow's call outside Workflow code, which names the owning run.
-    async fn create_owned(&self, withdraw_run: &str) -> Result<Vec<u8>, ExtensionError> {
+    async fn create_owned(&self, withdraw_run: &str) -> Result<Vec<u8>, StreamError> {
         let request = CreateStreamRequest {
             namespace: NAMESPACE.to_string(),
             stream_id: self.stream.clone(),

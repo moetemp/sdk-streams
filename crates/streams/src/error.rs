@@ -1,8 +1,7 @@
-//! The one error every call fails with, and its form on the extension boundary.
+//! The one error every call fails with, and its form for lang.
 
 use crate::proto::StreamErrorDetails;
 use prost::Message;
-use temporalio_sdk_core::ExtensionError;
 use tonic::Code;
 
 /// The result of every fallible call in the crate.
@@ -74,27 +73,28 @@ impl Reason {
 
     /// The reason of a token, for an error that the server or another runtime sends.
     pub fn from_token(token: &str) -> Option<Self> {
-        [
-            Reason::NotFound,
-            Reason::Expired,
-            Reason::Closed,
-            Reason::Fenced,
-            Reason::Sequence,
-            Reason::SeqDivergent,
-            Reason::NotOwner,
-            Reason::FormatTooNew,
-            Reason::AlreadyExists,
-            Reason::Offset,
-            Reason::TooLarge,
-            Reason::Invalid,
-            Reason::Storage,
-            Reason::UnknownWriter,
-            Reason::Unsupported,
-            Reason::Exhausted,
-        ]
-        .into_iter()
-        .find(|reason| reason.token() == token)
+        Self::ALL.into_iter().find(|reason| reason.token() == token)
     }
+
+    /// Every reason, so a token from the server reads back to its reason.
+    const ALL: [Reason; 16] = [
+        Reason::NotFound,
+        Reason::Expired,
+        Reason::Closed,
+        Reason::Fenced,
+        Reason::Sequence,
+        Reason::SeqDivergent,
+        Reason::NotOwner,
+        Reason::FormatTooNew,
+        Reason::AlreadyExists,
+        Reason::Offset,
+        Reason::TooLarge,
+        Reason::Invalid,
+        Reason::Storage,
+        Reason::UnknownWriter,
+        Reason::Unsupported,
+        Reason::Exhausted,
+    ];
 
     /// The status code of the reason, as in the proposal's Appendix A.
     pub fn code(self) -> Code {
@@ -143,15 +143,19 @@ impl StreamError {
     pub fn storage(message: impl Into<String>) -> Self {
         Self::new(Reason::Storage, message)
     }
-}
 
-impl From<StreamError> for ExtensionError {
-    fn from(error: StreamError) -> Self {
-        let details = StreamErrorDetails {
-            reason: error.reason.token().to_string(),
-        };
-        ExtensionError::new(error.reason.code(), error.message)
-            .with_details(details.encode_to_vec())
+    /// The status code that lang raises the error with.
+    pub fn code(&self) -> Code {
+        self.reason.code()
+    }
+
+    /// The encoded [StreamErrorDetails], which lang reads the reason token from, as from the
+    /// details of a gRPC status.
+    pub fn details(&self) -> Vec<u8> {
+        StreamErrorDetails {
+            reason: self.reason.token().to_string(),
+        }
+        .encode_to_vec()
     }
 }
 
@@ -160,12 +164,37 @@ mod tests {
     use super::*;
 
     #[test]
+    fn every_reason_reads_back_from_its_token() {
+        for reason in Reason::ALL {
+            assert_eq!(Reason::from_token(reason.token()), Some(reason));
+        }
+        // The match has no wildcard, so a new reason that isn't in `ALL` fails here.
+        let listed = |reason: Reason| match reason {
+            Reason::NotFound
+            | Reason::Expired
+            | Reason::Closed
+            | Reason::Fenced
+            | Reason::Sequence
+            | Reason::SeqDivergent
+            | Reason::NotOwner
+            | Reason::FormatTooNew
+            | Reason::AlreadyExists
+            | Reason::Offset
+            | Reason::TooLarge
+            | Reason::Invalid
+            | Reason::Storage
+            | Reason::UnknownWriter
+            | Reason::Unsupported
+            | Reason::Exhausted => Reason::ALL.contains(&reason),
+        };
+        assert!(Reason::ALL.into_iter().all(listed));
+    }
+
+    #[test]
     fn an_error_carries_its_code_and_reason_to_lang() {
-        let error: ExtensionError =
-            StreamError::new(Reason::FormatTooNew, "format 2 is newer than 1").into();
-        assert_eq!(error.code, Code::FailedPrecondition);
-        assert_eq!(error.message, "format 2 is newer than 1");
-        let details = StreamErrorDetails::decode(error.details.as_slice()).unwrap();
+        let error = StreamError::new(Reason::FormatTooNew, "format 2 is newer than 1");
+        assert_eq!(error.code(), Code::FailedPrecondition);
+        let details = StreamErrorDetails::decode(error.details().as_slice()).unwrap();
         assert_eq!(details.reason, "stream_format_too_new");
     }
 }
