@@ -1277,3 +1277,25 @@ async fn only_the_native_backend_keeps_a_stream_that_a_standalone_activity_owns(
         );
     }
 }
+
+/// Workflow code can't read the last Records, since a replay must read the same range.
+#[tokio::test]
+async fn workflow_code_reads_from_an_offset_not_the_last_records() {
+    for case in cases_for(Needs::CALLS).await {
+        case.create(None).await.unwrap();
+        let request = temporalio_streams::proto::WorkflowReadRecordsRequest {
+            workflow_id: "wf-1".to_string(),
+            run_id: "r-1".to_string(),
+            read: Some(ReadRecordsRequest {
+                namespace: case.namespace.clone(),
+                stream: case.stream(),
+                last: 3,
+                ..Default::default()
+            }),
+        };
+        let error = call::<_, ReadRecordsResponse>(&case.ext, "WorkflowReadRecords", request)
+            .await
+            .unwrap_err();
+        assert_eq!(reason(&error), "stream_invalid");
+    }
+}

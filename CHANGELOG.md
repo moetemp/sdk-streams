@@ -192,3 +192,5 @@
   withdraws nothing, in the Redis script, the memory Store and the reader rule. The withdrawal
   rule stays for Workflow, Local Activity and Activity Producers. `testdata/withdrawals.json` has
   the case.
+- A Workflow read (`WorkflowReadRecords`) with `last` fails with `stream_invalid` on every
+  backend, since a replay must read the same range.

@@ -371,6 +371,12 @@ impl StreamService {
         request: ReadRecordsRequest,
         reader: Option<&ReaderRun>,
     ) -> StreamResult<ReadRecordsResponse> {
+        // A replay must read the same range, which the newest Records are not.
+        if reader.is_some() && request.last != 0 {
+            return Err(StreamError::invalid(
+                "Workflow code reads from an offset, not the last Records",
+            ));
+        }
         if let Some(remote) = self.store.remote_reads() {
             return remote.read_records(request, reader).await;
         }

@@ -18,7 +18,7 @@ use temporalio_common::protos::temporal::api::common::v1::Payload;
 use temporalio_streams::{
     NativeStreamExtension, StreamError, StreamExtension,
     epoch::withdraws,
-    ids::{activity_producer_id, client_producer_id, named_client_producer_id},
+    ids::{activity_producer_id, client_producer_id},
     proto::{
         AppendRecord, AppendRecordsRequest, AppendRecordsResponse, CloseStreamRequest,
         CloseStreamResponse, CreateStreamRequest, CreateStreamResponse, DescribeStreamRequest,
@@ -77,16 +77,18 @@ fn client() -> Producer {
     }
 }
 
-/// A client Producer that the test names, at `attempt`.
-fn named(attempt: i32) -> Producer {
+/// A Local Activity call of a made-up run, at `attempt`.
+fn local_activity(attempt: i32) -> Producer {
     Producer {
-        kind: ProducerKind::Client as i32,
-        id: named_client_producer_id("native-test"),
+        kind: ProducerKind::LocalActivity as i32,
+        id: temporalio_streams::ids::local_activity_producer_id("r1", "call-1"),
         epoch: Some(ProducerEpoch {
+            task_started_event_id: 3,
+            task_attempt: 1,
             attempt,
             ..Default::default()
         }),
-        run_id: String::new(),
+        run_id: "r1".to_string(),
     }
 }
 
@@ -241,9 +243,10 @@ async fn a_stream_on_the_server_dedupes_withdraws_reads_and_closes() {
         .await
         .unwrap_err();
     assert_eq!(reason(&refused), "stream_not_owner");
-    // A named client's next epoch withdraws the earlier one's Records.
-    case.write(named(1), &["x"]).await;
-    let written = case.write(named(2), &["y"]).await;
+    // A Local Activity's next attempt withdraws the earlier one's Records. On a standalone
+    // Stream the server takes the run as sent.
+    case.write(local_activity(1), &["x"]).await;
+    let written = case.write(local_activity(2), &["y"]).await;
     assert!(written.last_offset > first.last_offset);
     assert_eq!(
         case.visible().await,
