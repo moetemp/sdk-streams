@@ -111,3 +111,8 @@
   created closes only from a client. Others fail with `FAILED_PRECONDITION` and the reason
   `stream_not_owner`. A Workflow Producer may close, for the worker's close after the run's final
   completion.
+- Took the api a3 Stream service protos: the Activity owner fields of `StreamRef`, `CloseStatus`
+  and `StreamRecord.close_status`, `task_token` on create, append and close,
+  `CloseStreamRequest.status`, `ReadRecordsRequest.last`, `max_bytes` and `floor_from`, and
+  `ReadRecordsResponse.continue_as_new_suggested`. The Stream service proto equals the api's
+  copy byte for byte.

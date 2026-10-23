@@ -393,9 +393,8 @@ impl StreamService {
             let now = Instant::now();
             if deadline <= now {
                 return Ok(ReadRecordsResponse {
-                    records: vec![],
                     next_offset: cursor,
-                    done: false,
+                    ..Default::default()
                 });
             }
             // The wait ends when the auto close comes due, so the read gives its close Record.
@@ -460,6 +459,7 @@ impl StreamService {
                 records,
                 next_offset: from,
                 done: true,
+                ..Default::default()
             };
             return Ok((Some(page), from));
         }
@@ -523,6 +523,7 @@ impl StreamService {
             records,
             next_offset: next,
             done,
+            ..Default::default()
         };
         Ok((Some(page), next))
     }
