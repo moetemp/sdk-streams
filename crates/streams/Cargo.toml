@@ -47,6 +47,7 @@ redis = { version = "1.7", default-features = false, features = [
     "streams",
     "tokio-rustls-comp",
 ] }
+sha2 = "0.10"
 temporalio-client = { workspace = true }
 temporalio-common = { workspace = true }
 temporalio-sdk-core = { workspace = true }

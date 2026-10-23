@@ -128,3 +128,31 @@
   Workflow-kind `Superseded` item that the reader rule already applies (S110). A late write of a
   withdrawn task is fenced. A rerun in a later task still supersedes by epoch. `OpenWriter` takes
   the same task facts, and each batch of the writer sends them.
+- A dedupe entry keeps the batch's content digest, SHA-256 over its Topics and payloads with the
+  metadata in key order. A resend with the last `sequence` and other content fails with
+  `FAILED_PRECONDITION` and the reason `seq_divergent`, instead of answering the stored offsets.
+  `testdata/digests.json` pins the digest for the server and every SDK.
+- `Store::create`, `Store::append` and `Store::close` take the Stream's whole `StreamRef`, so a
+  Store can check the owner fields. Redis and memory key on its id.
+- Only the owner closes a Stream. A Workflow-owned Stream closes from a Local Activity or a
+  Workflow Producer, and a ref that names another run chain is refused. A Stream that a client
+  created closes only from a client. Others fail with `FAILED_PRECONDITION` and the reason
+  `stream_not_owner`. A Workflow Producer may close, for the worker's close after the run's final
+  completion.
+- Took the api a3 Stream service protos: the Activity owner fields of `StreamRef`, `CloseStatus`
+  and `StreamRecord.close_status`, `task_token` on create, append and close,
+  `CloseStreamRequest.status`, `ReadRecordsRequest.last`, `max_bytes` and `floor_from`, and
+  `ReadRecordsResponse.continue_as_new_suggested`. The Stream service proto equals the api's
+  copy byte for byte.
+- A close Record has `close_status`. A close with no status is `COMPLETED`, or `FAILED` with a
+  failure, and a caller may set `CANCELED`. A caller's `TERMINATED` or `TIMED_OUT` fails with
+  `stream_invalid`, since only the owner's end on the server sets them. An auto close is
+  `COMPLETED`, so its Record is `08 03 48 01`. The result and the failure stay.
+- `ReadRecordsRequest.last` reads the newest Records that pass the filter, oldest first, with the
+  close Record at the end of a closed Stream. A Record that a newer `Superseded` item withdraws
+  doesn't count. It never waits, and it takes no `from_offset` or `wake_only`. Redis reads it
+  with `XREVRANGE` through the new `Store::read_back`.
+- `ReadRecordsRequest.max_bytes` caps the bytes of a page's items. A larger entry still comes
+  alone, so a read always moves on.
+- The Redis and memory Stores read no `to_offset` or `wake_only`. A read with one fails with
+  `stream_unsupported`, since only the native backend serves them.

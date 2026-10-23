@@ -225,6 +225,7 @@ impl Store for ServiceStore {
             owner: run.map(|run| run.producer.clone()),
             close_with_run: run.is_some_and(|run| run.close_with_run),
             r#ref: Some(stream.clone()),
+            ..Default::default()
         };
         self.create_request(request, retention).await
     }

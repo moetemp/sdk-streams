@@ -179,8 +179,9 @@ pub mod fields {
         format!("e|{kind}|{producer_id}")
     }
 
-    /// The last batch of a Producer's newest epoch, `<epoch key>|<sequence>|<first>|<last>`, the
-    /// dedupe key and the Positions it got.
+    /// The last batch of a Producer's newest epoch,
+    /// `<epoch key>|<sequence>|<first>|<last>|<digest>`, the dedupe key, the Positions it got and
+    /// the content digest that a resend must match.
     pub fn dedupe(kind: i32, producer_id: &str) -> String {
         format!("d|{kind}|{producer_id}")
     }

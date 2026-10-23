@@ -7,11 +7,11 @@ mod support;
 use prost::Message;
 use prost_types::Timestamp;
 use std::time::Duration;
-use support::{Run, Target, record, records_of, stores, supersession};
+use support::{Run, Target, digest, record, records_of, stores, supersession};
 use temporalio_streams::{
     Reason,
-    ids::{activity_producer_id, client_producer_id},
-    proto::{Producer, ProducerEpoch, ProducerKind},
+    ids::{activity_producer_id, client_producer_id, workflow_producer_id},
+    proto::{Producer, ProducerEpoch, ProducerKind, StreamRef},
     store::{Batch, Capabilities, CreateOutcome, Owner, Withdrawal},
 };
 
@@ -62,6 +62,7 @@ async fn append(
                 producer,
                 sequence,
                 records: &records,
+                digest: &digest(texts),
                 withdrawal,
             },
         )
@@ -144,6 +145,26 @@ async fn a_resend_gets_its_first_positions_and_a_lower_sequence_is_refused() {
         );
         let texts = target.texts().await;
         assert_eq!(texts, ["p1", "p2", "q1", "p3"]);
+    }
+}
+
+#[tokio::test]
+async fn a_resend_with_other_content_fails_as_divergent() {
+    for target in stores().await {
+        target.create(Owner::Client).await;
+        let p = client(1);
+        let first = append(&target, &p, 1, &["p1"]).await.unwrap();
+        let divergent = append(&target, &p, 1, &["other"]).await.unwrap_err();
+        assert_eq!(divergent.reason, Reason::SeqDivergent);
+        assert_eq!(target.texts().await, ["p1"]);
+        // A dedupe entry written before the digest has none, so it takes any resend.
+        let field = temporalio_streams::ids::fields::dedupe(ProducerKind::Client as i32, &p.id);
+        let entry = target.meta(&field).await.unwrap();
+        target
+            .set_meta(&field, &entry[..entry.rfind('|').unwrap()])
+            .await;
+        let resend = append(&target, &p, 1, &["other"]).await.unwrap();
+        assert_eq!((resend.resend, resend.offsets), (true, first.offsets));
     }
 }
 
@@ -465,6 +486,61 @@ async fn a_stale_producer_cant_close_the_stream() {
 }
 
 #[tokio::test]
+async fn only_the_owner_closes_a_stream() {
+    for target in stores().await {
+        let run = Run::new("r1");
+        let la = run.local_activity("k", 3, 1, 1);
+        target.create(Owner::Client).await;
+        for producer in [&la, &activity("r1", 1, 10)] {
+            let refused = target.close(producer).await.unwrap_err();
+            assert_eq!(refused.reason, Reason::NotOwner);
+        }
+        target.close(&client(1)).await.unwrap();
+
+        let owned = |workflow_id: &str| StreamRef {
+            id: format!("{}-owned", target.stream),
+            workflow_id: workflow_id.to_string(),
+            ..Default::default()
+        };
+        target
+            .store
+            .create(
+                &target.namespace,
+                &owned("agent"),
+                None,
+                None,
+                Owner::Workflow(None),
+                &Withdrawal::default(),
+            )
+            .await
+            .unwrap();
+        for (stream, producer) in [
+            (owned("agent"), client(1)),
+            (owned("agent"), activity("r1", 1, 10)),
+            (owned("another-agent"), la.clone()),
+        ] {
+            let refused = target.close_at(&stream, &producer).await.unwrap_err();
+            assert_eq!(refused.reason, Reason::NotOwner);
+        }
+        assert!(!target.close_at(&owned("agent"), &la).await.unwrap().already);
+        // The run itself closes from the worker after its final completion.
+        let workflow = Producer {
+            kind: ProducerKind::Workflow as i32,
+            id: workflow_producer_id("r1"),
+            run_id: "r1".to_string(),
+            epoch: None,
+        };
+        assert!(
+            target
+                .close_at(&owned("agent"), &workflow)
+                .await
+                .unwrap()
+                .already
+        );
+    }
+}
+
+#[tokio::test]
 async fn an_append_whose_ids_would_not_fit_an_offset_is_refused_before_it_writes() {
     for target in stores().await {
         target.create(Owner::Client).await;
@@ -594,6 +670,10 @@ async fn an_auto_close_closes_a_quiet_stream_on_its_next_write() {
         );
         assert!(record.producer.is_none());
         assert!(record.close_result.is_none() && record.close_failure.is_none());
+        assert_eq!(
+            record.close_status,
+            temporalio_streams::proto::CloseStatus::Completed as i32
+        );
         assert_eq!(target.texts().await, ["a", "b", "c"]);
         let closed = target.close(&p).await.unwrap();
         assert!(closed.already);

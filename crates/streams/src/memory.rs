@@ -21,7 +21,7 @@ use std::{
 use tokio::{sync::Notify, time::Instant};
 
 /// The close Record of an auto close, as `AUTO_CLOSE_RECORD` in `lib.lua`.
-const AUTO_CLOSE_RECORD: &[u8] = b"\x08\x03";
+const AUTO_CLOSE_RECORD: &[u8] = b"\x08\x03\x48\x01";
 
 /// The most sequence numbers of one millisecond, as an offset packs them in 20 bits.
 const SEQ_LIMIT: u64 = 1 << crate::offset::SEQ_BITS;
@@ -149,6 +149,33 @@ impl Keys {
             .is_some_and(|exp| exp <= now)
         {
             return Err(refuse(Reason::Expired, "the Stream expired"));
+        }
+        Ok(())
+    }
+
+    /// The `check_owner` step of a close, as in `lib.lua`.
+    fn check_owner(&self, kind: i32, chain: &str) -> StreamResult<()> {
+        if self.get("own").map(String::as_str) == Some("wf") {
+            if kind != ProducerKind::Workflow as i32 && kind != ProducerKind::LocalActivity as i32 {
+                return Err(refuse(
+                    Reason::NotOwner,
+                    "only the owner run chain closes a Workflow-owned Stream",
+                ));
+            }
+            if self
+                .get("oc")
+                .is_some_and(|owner| !chain.is_empty() && chain != owner)
+            {
+                return Err(refuse(
+                    Reason::NotOwner,
+                    "the ref names another run chain than the owner",
+                ));
+            }
+        } else if kind != ProducerKind::Client as i32 {
+            return Err(refuse(
+                Reason::NotOwner,
+                "only a client closes a Stream that a client created",
+            ));
         }
         Ok(())
     }
@@ -408,11 +435,15 @@ impl Store for MemoryStore {
         };
         let (safety, tombstone) = (millis(self.safety_ttl), millis(TOMBSTONE));
         let withdrawn_run = encode_run(withdrawal.withdraw_run);
+        let chain = encode_run(&stream.workflow_id);
         let created = self.with(namespace, stream_id, |keys, now| {
             let Some(stored) = keys.get("ret").cloned() else {
                 keys.set("v", FORMAT_VERSION.to_string());
                 keys.set("ret", retention.to_string());
                 keys.set("own", owner);
+                if owner == "wf" && !chain.is_empty() {
+                    keys.set("oc", chain.clone());
+                }
                 if !period.is_empty() {
                     keys.set("ac", period.clone());
                     keys.set("la", now.to_string());
@@ -440,6 +471,9 @@ impl Store for MemoryStore {
             };
             if owner == "wf" && keys.get("own").map(String::as_str) != Some("wf") {
                 keys.set("own", "wf");
+                if !chain.is_empty() {
+                    keys.set("oc", chain.clone());
+                }
                 keys.refresh(now, safety, tombstone);
             }
             let mut flagged = false;
@@ -506,9 +540,20 @@ impl Store for MemoryStore {
             keys.check_live(now)?;
             if let Some(last) = keys.get(&format!("d{suffix}")) {
                 let parts: Vec<&str> = last.split('|').collect();
-                if parts.len() == 4 && parts[0] == epoch {
+                if (4..=5).contains(&parts.len()) && parts[0] == epoch {
                     let last_sequence: i64 = parts[1].parse().unwrap_or(0);
                     if sequence == last_sequence {
+                        // An entry written before the digest has none, and takes any resend.
+                        let last_digest = parts.get(4).copied().unwrap_or_default();
+                        if !last_digest.is_empty() && last_digest != batch.digest {
+                            return Err(refuse(
+                                Reason::SeqDivergent,
+                                &format!(
+                                    "sequence {sequence} has other content than the batch the \
+                                     Store has"
+                                ),
+                            ));
+                        }
                         return Ok((true, parts[2].to_string(), parts[3].to_string(), false));
                     }
                     if sequence < last_sequence {
@@ -606,7 +651,7 @@ impl Store for MemoryStore {
             keys.set(&format!("e{suffix}"), epoch.clone());
             keys.set(
                 &format!("d{suffix}"),
-                format!("{epoch}|{sequence}|{first}|{last}"),
+                format!("{epoch}|{sequence}|{first}|{last}|{}", batch.digest),
             );
             if records > 0 {
                 keys.set(&format!("h{suffix}"), epoch.clone());
@@ -670,8 +715,10 @@ impl Store for MemoryStore {
         let run = encode_run(&producer.run_id);
         let suffix = format!("|{}|{}", producer.kind, producer.id);
         let tombstone = millis(TOMBSTONE);
+        let chain = encode_run(&stream.workflow_id);
         let closed = self.with(namespace, stream_id, |keys, now| {
             keys.check_live(now)?;
+            keys.check_owner(producer.kind, &chain)?;
             if keys.auto_close(now, tombstone) {
                 let id = keys.get("close_id").cloned().unwrap_or_default();
                 return Ok((id, true));
@@ -781,6 +828,32 @@ impl Store for MemoryStore {
             self.appended.notify_waiters();
         }
         id.map(|id| offset_of_entry_id(&id)).transpose()
+    }
+
+    async fn read_back(
+        &self,
+        namespace: &str,
+        stream_id: &str,
+        before: i64,
+        count: usize,
+    ) -> StreamResult<Vec<Entry>> {
+        let before = parse_id(&entry_id_of_offset(before)).unwrap_or((0, 0));
+        self.with(namespace, stream_id, |keys, _| {
+            let Some(log) = keys.log.as_ref() else {
+                return Ok(vec![]);
+            };
+            log.range(..=before)
+                .rev()
+                .take(count)
+                .map(|(id, fields)| {
+                    Ok(Entry {
+                        offset: offset_of_entry_id(&id_text(*id))?,
+                        record: fields.record.clone(),
+                        supersession: fields.supersession.clone(),
+                    })
+                })
+                .collect()
+        })
     }
 
     async fn wait_after(
