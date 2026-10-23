@@ -353,13 +353,18 @@ impl RemoteReads for ServiceStore {
             .collect();
         // The server answers about 1 s before the call's deadline, so the deadline leaves room
         // past the read's own wait.
+        let cap = if request.wake_only {
+            MAX_WAKE_WAIT
+        } else {
+            MAX_WAIT
+        };
         let wait = [request.wait, request.create_wait]
             .iter()
             .flatten()
             .map(|d| Duration::new(d.seconds.max(0) as u64, d.nanos.max(0) as u32))
             .max()
             .unwrap_or_default()
-            .min(MAX_WAIT);
+            .min(cap);
         self.nexus(
             "ReadRecords",
             request.namespace.clone(),
@@ -444,6 +449,10 @@ struct OperationFailure {
 
 /// The time a read's deadline leaves past its wait.
 const READ_MARGIN: Duration = Duration::from_secs(5);
+
+/// The longest wait of a `wake_only` read, the server's `stream.maxWakeWait` default. A parked
+/// wake adds nothing to History, so it may wait for days, unlike a read with Records.
+pub const MAX_WAKE_WAIT: Duration = Duration::from_secs(7 * 24 * 60 * 60);
 
 const START_NEXUS: &str = "/temporal.api.workflowservice.v1.WorkflowService/StartNexusOperation";
 const SYSTEM_ENDPOINT: &str = "__temporal_system";

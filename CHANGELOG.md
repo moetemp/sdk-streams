@@ -180,3 +180,7 @@
   `Owner::Activity` is a Standalone Activity's create of its own Stream, with its token and the
   Activity owner fields of its ref. Redis and memory refuse it with `stream_unsupported`.
 - The native Store sends the close Record's status as `CloseStreamRequest.status`.
+- A create answers the Stream's ref with the owner fields of the create's ref, the Workflow's
+  or the Standalone Activity's, so a caller routes the ref it gets on the native backend.
+- A native `wake_only` read may wait up to 7 days, the server's `stream.maxWakeWait` default,
+  since a parked wake adds nothing to History. Other reads keep the 60 s cap.

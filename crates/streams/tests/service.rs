@@ -763,6 +763,28 @@ async fn a_create_answer_names_the_backend_and_the_store_never_reads_it() {
     for case in cases().await {
         let created = case.create(None).await.unwrap();
         assert_eq!(created.stream.unwrap().backend, "");
+        // The answer keeps the owner fields of the create's ref, which the server routes by.
+        let id = format!("{}-owned", case.stream);
+        let owned = CreateStreamRequest {
+            namespace: case.namespace.clone(),
+            stream_id: id.clone(),
+            r#ref: Some(StreamRef {
+                id,
+                workflow_id: "wf-1".to_string(),
+                first_execution_run_id: "r-1".to_string(),
+                ..Default::default()
+            }),
+            ..Default::default()
+        };
+        let created: CreateStreamResponse = call(&case.ext, "CreateStream", owned).await.unwrap();
+        let stream = created.stream.unwrap();
+        assert_eq!(
+            (
+                stream.workflow_id.as_str(),
+                stream.first_execution_run_id.as_str()
+            ),
+            ("wf-1", "r-1")
+        );
     }
 }
 

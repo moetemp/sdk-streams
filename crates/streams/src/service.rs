@@ -203,11 +203,12 @@ impl StreamService {
                 ));
             }
         };
+        // The answer keeps the owner fields, since the server finds a Workflow's or an
+        // Activity's Stream by them.
         Ok(CreateStreamResponse {
             stream: Some(StreamRef {
-                id: request.stream_id,
                 backend: self.backend.clone(),
-                ..Default::default()
+                ..stream
             }),
             created: created.outcome == CreateOutcome::Created,
             status: status as i32,
