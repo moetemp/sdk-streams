@@ -3,6 +3,8 @@
 
 use crate::{
     Reason, StreamError, StreamResult,
+    digest::batch_digest,
+    epoch::withdraws,
     ids::check_producer,
     ids::check_stream_id,
     metrics::Metrics,
@@ -12,7 +14,7 @@ use crate::{
         Producer, ProducerKind, ReadRecordsRequest, ReadRecordsResponse, ReadStart, StreamRecord,
         StreamRecordKind, StreamRef, StreamStatus, Supersession, WorkflowTaskEpoch,
     },
-    record::{close_record, data_records, supersession},
+    record::{caller_status, close_record, data_records, supersession},
     store::{
         Batch, Capabilities, CreateOutcome, FORMAT_VERSION, Owner, Store, StreamState, TaskFacts,
         Withdrawal,
@@ -107,12 +109,28 @@ fn outside_producer(producer: Option<&Producer>) -> StreamResult<&Producer> {
     Ok(producer)
 }
 
+/// Checks the Producer of a close. The run itself closes its Stream from the worker after the
+/// server accepted its final completion, so a Workflow Producer may close.
+fn close_producer(producer: Option<&Producer>) -> StreamResult<&Producer> {
+    let producer = producer.ok_or_else(|| StreamError::invalid("The request has no Producer"))?;
+    check_producer(producer)?;
+    Ok(producer)
+}
+
 impl StreamService {
     pub(crate) async fn create_stream(
         &self,
         request: CreateStreamRequest,
     ) -> StreamResult<CreateStreamResponse> {
         check_stream_id(&request.stream_id)?;
+        let stream = request
+            .r#ref
+            .clone()
+            .filter(|stream| stream.id == request.stream_id)
+            .unwrap_or_else(|| StreamRef {
+                id: request.stream_id.clone(),
+                ..Default::default()
+            });
         let auto_close = duration(request.auto_close);
         if auto_close.is_some() {
             self.store
@@ -149,7 +167,7 @@ impl StreamService {
             .store
             .create(
                 &request.namespace,
-                &request.stream_id,
+                &stream,
                 duration(request.retention),
                 auto_close,
                 owner,
@@ -188,7 +206,8 @@ impl StreamService {
         &self,
         request: AppendRecordsRequest,
     ) -> StreamResult<AppendRecordsResponse> {
-        let id = stream_id(request.stream.as_ref())?;
+        stream_id(request.stream.as_ref())?;
+        let stream = request.stream.clone().unwrap_or_default();
         let producer = outside_producer(request.producer.as_ref())?;
         if request.sequence < 1 {
             return Err(StreamError::invalid("The sequence must be 1 or more"));
@@ -200,6 +219,7 @@ impl StreamService {
         if !request.withdraw_run.is_empty() {
             self.store.capabilities().require(Capabilities::RUN_FENCE)?;
         }
+        let digest = batch_digest(&request.records);
         let records = data_records(producer, request.records)?;
         let bytes = supersession(producer, &request.withdraw_run);
         // A Local Activity gives its run's task facts, so the batch withdraws the run's
@@ -214,6 +234,7 @@ impl StreamService {
             producer,
             sequence: request.sequence,
             records: &records,
+            digest: &digest,
             withdrawal: Withdrawal {
                 withdraw_run: &request.withdraw_run,
                 supersession: &bytes,
@@ -224,7 +245,7 @@ impl StreamService {
                 }),
             },
         };
-        let appended = self.store.append(&request.namespace, id, &batch).await;
+        let appended = self.store.append(&request.namespace, &stream, &batch).await;
         let appended = self.count(appended)?;
         let (first_offset, last_offset) = appended.offsets.unwrap_or_default();
         Ok(AppendRecordsResponse {
@@ -247,12 +268,14 @@ impl StreamService {
         &self,
         request: CloseStreamRequest,
     ) -> StreamResult<CloseStreamResponse> {
-        let id = stream_id(request.stream.as_ref())?;
-        let producer = outside_producer(request.producer.as_ref())?;
+        stream_id(request.stream.as_ref())?;
+        let stream = request.stream.clone().unwrap_or_default();
+        let producer = close_producer(request.producer.as_ref())?;
         self.store.capabilities().require(Capabilities::CLOSE)?;
-        let record = close_record(producer, request.result, request.failure);
+        let status = caller_status(request.status, request.failure.is_some())?;
+        let record = close_record(producer, request.result, request.failure, status);
         self.store
-            .close(&request.namespace, id, producer, &record)
+            .close(&request.namespace, &stream, producer, &record)
             .await?;
         Ok(CloseStreamResponse {})
     }
@@ -321,6 +344,24 @@ impl StreamService {
         if request.from_offset < 0 {
             return Err(StreamError::new(Reason::Offset, "The offset is below zero"));
         }
+        let max_bytes = max_bytes(request.max_bytes)?;
+        if request.last < 0 {
+            return Err(StreamError::invalid("last must be 0 or more"));
+        }
+        if request.last > 0 {
+            if request.wake_only || request.from_offset > 0 {
+                return Err(StreamError::invalid(
+                    "A read of the last Records takes no from_offset and no wake_only",
+                ));
+            }
+            return self.read_last(request, max_bytes).await;
+        }
+        if request.wake_only || request.to_offset != 0 {
+            return Err(StreamError::new(
+                Reason::Unsupported,
+                "The Store reads no to_offset or wake_only, which the native backend serves",
+            ));
+        }
         let max = match request.max_records {
             n if n <= 0 => MAX_RECORDS,
             n => (n as usize).min(MAX_RECORDS),
@@ -363,7 +404,7 @@ impl StreamService {
         loop {
             check_expiry(&state, cursor)?;
             let (page, scanned) = self
-                .page(namespace, &id, &state, cursor, max, &topics)
+                .page(namespace, &id, &state, cursor, (max, max_bytes), &topics)
                 .await?;
             if let Some(page) = page {
                 return Ok(page);
@@ -372,9 +413,8 @@ impl StreamService {
             let now = Instant::now();
             if deadline <= now {
                 return Ok(ReadRecordsResponse {
-                    records: vec![],
                     next_offset: cursor,
-                    done: false,
+                    ..Default::default()
                 });
             }
             // The wait ends when the auto close comes due, so the read gives its close Record.
@@ -390,6 +430,93 @@ impl StreamService {
             woke?;
             state = self.state(namespace, &id).await?;
         }
+    }
+
+    /// The newest `last` Records that pass the filter, oldest first, and the close Record at the
+    /// end when the Stream is closed. A Record that a newer `Superseded` item withdraws doesn't
+    /// count. It never waits for new Records.
+    async fn read_last(
+        &self,
+        request: ReadRecordsRequest,
+        max_bytes: usize,
+    ) -> StreamResult<ReadRecordsResponse> {
+        let id = stream_id(request.stream.as_ref())?.to_string();
+        let namespace = request.namespace.as_str();
+        let count = (request.last as usize).min(MAX_RECORDS);
+        let create_wait = duration(request.create_wait)
+            .unwrap_or_default()
+            .min(MAX_WAIT);
+        let state = self
+            .created(namespace, &id, Instant::now() + create_wait)
+            .await?;
+        let state = self.after_auto_close(namespace, &id, state).await?;
+        if state.version > FORMAT_VERSION {
+            return Err(StreamError::new(
+                Reason::FormatTooNew,
+                format!("format {} is newer than {FORMAT_VERSION}", state.version),
+            ));
+        }
+        check_expiry(&state, 0)?;
+        let topics = TopicFilter {
+            topics: request.topics,
+            prefixes: request.topic_prefixes,
+        };
+        let retained = state.retained_from();
+        let (mut picked, mut close) = (vec![], None);
+        let mut withdrawals: Vec<Supersession> = vec![];
+        let (mut bytes, mut scanned) = (0, 0);
+        let mut before = state.newest;
+        'scan: while before >= retained && picked.len() < count && scanned < MAX_SCAN {
+            let entries = self
+                .store
+                .read_back(namespace, &id, before, count.clamp(16, MAX_RECORDS))
+                .await?;
+            if entries.is_empty() {
+                break;
+            }
+            scanned += entries.len();
+            for entry in entries {
+                if entry.offset < retained {
+                    break 'scan;
+                }
+                before = entry.offset - 1;
+                // An entry's `Superseded` item withdraws earlier Records, not the entry's own.
+                if let Some(record) = entry.record {
+                    let record = decode(&record, entry.offset)?;
+                    let size = record.encoded_len();
+                    // The close Record ends the page and is not in the byte cap.
+                    if record.kind == StreamRecordKind::Close as i32 {
+                        close = Some(record);
+                    } else if topics.passes(&record.topic)
+                        && !withdrawals.iter().any(|s| withdraws(s, &record))
+                    {
+                        // One larger Record still comes alone, so the read always gives one.
+                        if !picked.is_empty() && bytes + size > max_bytes {
+                            break 'scan;
+                        }
+                        bytes += size;
+                        picked.push(record);
+                        if picked.len() == count {
+                            break 'scan;
+                        }
+                    }
+                }
+                if let Some(supersession) = entry.supersession {
+                    withdrawals.push(
+                        Supersession::decode(supersession.as_slice())
+                            .map_err(|error| StreamError::storage(error.to_string()))?,
+                    );
+                }
+            }
+        }
+        picked.reverse();
+        picked.extend(close);
+        Ok(ReadRecordsResponse {
+            records: picked,
+            next_offset: state.newest + 1,
+            done: state.closed_at.is_some(),
+            ..Default::default()
+        })
     }
 
     /// The state of a Stream, after waiting up to `until` for its create.
@@ -416,14 +543,15 @@ impl StreamService {
     }
 
     /// The Records from `from`, or `None` when there is none yet, with the offset after the last
-    /// entry it scanned. A page that ends in the close Record is done.
+    /// entry it scanned. A page that ends in the close Record is done. `(max, max_bytes)` caps
+    /// the items and their bytes.
     async fn page(
         &self,
         namespace: &str,
         id: &str,
         state: &StreamState,
         from: i64,
-        max: usize,
+        (max, max_bytes): (usize, usize),
         topics: &TopicFilter,
     ) -> StreamResult<(Option<ReadRecordsResponse>, i64)> {
         // A read past the close gives the close Record again, so every read ends with it.
@@ -439,6 +567,7 @@ impl StreamService {
                 records,
                 next_offset: from,
                 done: true,
+                ..Default::default()
             };
             return Ok((Some(page), from));
         }
@@ -448,10 +577,11 @@ impl StreamService {
         let mut start = if from > 0 { from } else { retained };
         let mut records = vec![];
         let mut next = from;
-        let mut done = false;
+        let (mut done, mut full) = (false, false);
+        let mut bytes = 0;
         // A Topic filter can skip many entries, so one page scans a bounded number of them.
         let mut scanned = 0;
-        while records.len() < max && !done && scanned < MAX_SCAN {
+        while records.len() < max && !done && !full && scanned < MAX_SCAN {
             let (_, entries) = self.store.read(namespace, id, start, max).await?;
             if entries.is_empty() {
                 break;
@@ -466,31 +596,37 @@ impl StreamService {
                     start = next;
                     continue;
                 }
-                next = entry.offset + 1;
-                start = next;
+                let mut items = vec![];
                 if let Some(bytes) = entry.supersession {
                     let supersession = Supersession::decode(bytes.as_slice())
                         .map_err(|error| StreamError::storage(error.to_string()))?;
-                    records.push(StreamRecord {
+                    items.push(StreamRecord {
                         kind: StreamRecordKind::Superseded as i32,
                         offset: entry.offset,
                         supersession: Some(supersession),
                         ..Default::default()
                     });
                 }
-                let Some(bytes) = entry.record else {
-                    continue;
-                };
-                let record = decode(&bytes, entry.offset)?;
-                if record.kind == StreamRecordKind::Close as i32 {
-                    records.push(record);
-                    done = true;
+                if let Some(bytes) = entry.record {
+                    let record = decode(&bytes, entry.offset)?;
+                    done = record.kind == StreamRecordKind::Close as i32;
+                    if done || topics.passes(&record.topic) {
+                        items.push(record);
+                    }
+                }
+                // One larger entry still comes alone, so the read always moves on. The next read
+                // starts at an entry that didn't fit.
+                let size: usize = items.iter().map(Message::encoded_len).sum();
+                if !records.is_empty() && bytes + size > max_bytes {
+                    (done, full) = (false, true);
+                    next = entry.offset;
                     break;
                 }
-                if topics.passes(&record.topic) {
-                    records.push(record);
-                }
-                if records.len() >= max {
+                bytes += size;
+                records.extend(items);
+                next = entry.offset + 1;
+                start = next;
+                if done || records.len() >= max {
                     break;
                 }
             }
@@ -502,6 +638,7 @@ impl StreamService {
             records,
             next_offset: next,
             done,
+            ..Default::default()
         };
         Ok((Some(page), next))
     }
@@ -540,6 +677,15 @@ fn check_expiry(state: &StreamState, from: i64) -> StreamResult<()> {
         return Err(expired());
     }
     Ok(())
+}
+
+/// The byte cap of a page, from a request's `max_bytes`. Zero is no cap.
+fn max_bytes(value: i64) -> StreamResult<usize> {
+    match value {
+        0 => Ok(usize::MAX),
+        n if n < 0 => Err(StreamError::invalid("max_bytes must be 0 or more")),
+        n => Ok(usize::try_from(n).unwrap_or(usize::MAX)),
+    }
 }
 
 fn expired() -> StreamError {

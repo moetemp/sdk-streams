@@ -3,7 +3,7 @@
 
 use crate::{
     Reason, StreamError, StreamResult,
-    proto::{Producer, WorkflowTaskEpoch},
+    proto::{Producer, StreamRef, WorkflowTaskEpoch},
 };
 use std::time::Duration;
 use tokio::time::Instant;
@@ -88,6 +88,8 @@ pub struct Batch<'a> {
     pub sequence: i64,
     /// The encoded Records.
     pub records: &'a [Vec<u8>],
+    /// The [crate::digest::batch_digest] of the batch, which the dedupe entry keeps.
+    pub digest: &'a str,
     /// What the batch withdraws.
     pub withdrawal: Withdrawal<'a>,
 }
@@ -271,12 +273,14 @@ pub trait Store: Send + Sync + 'static {
     /// The Retention of a Stream that its create gives none.
     fn default_retention(&self) -> Duration;
 
-    /// Creates a Stream, or finds it. A retry run's create withdraws its previous run. An
-    /// `auto_close` needs [Capabilities::AUTO_CLOSE].
+    /// Creates a Stream, or finds it. The calls that write take the Stream's whole ref, since
+    /// the server finds a Workflow's Stream by its owner fields. Redis and memory key on the id.
+    /// A retry run's create withdraws its previous run. An `auto_close` needs
+    /// [Capabilities::AUTO_CLOSE].
     async fn create(
         &self,
         namespace: &str,
-        stream_id: &str,
+        stream: &StreamRef,
         retention: Option<Duration>,
         auto_close: Option<Duration>,
         owner: Owner,
@@ -287,7 +291,7 @@ pub trait Store: Send + Sync + 'static {
     async fn append(
         &self,
         namespace: &str,
-        stream_id: &str,
+        stream: &StreamRef,
         batch: &Batch<'_>,
     ) -> StreamResult<Appended>;
 
@@ -315,11 +319,23 @@ pub trait Store: Send + Sync + 'static {
     async fn close(
         &self,
         _namespace: &str,
-        _stream_id: &str,
+        _stream: &StreamRef,
         _producer: &Producer,
         _record: &[u8],
     ) -> StreamResult<Closed> {
         Err(unsupported("close"))
+    }
+
+    /// Reads up to `count` entries at or before `before`, newest first, for a read of the newest
+    /// Records.
+    async fn read_back(
+        &self,
+        _namespace: &str,
+        _stream_id: &str,
+        _before: i64,
+        _count: usize,
+    ) -> StreamResult<Vec<Entry>> {
+        Err(unsupported("last"))
     }
 
     /// Closes the Stream if its auto close is due, for a read that found it due. Answers the

@@ -14,7 +14,7 @@ use crate::{
     epoch::{epoch_key, task_key, task_of},
     ids::{StreamKeys, encode_part},
     offset::{entry_id_of_offset, offset_of_entry_id},
-    proto::{Producer, ProducerKind},
+    proto::{Producer, ProducerKind, StreamRef},
     store::{Capabilities, Store},
 };
 use conn::{BlockingPool, Shared};
@@ -125,17 +125,19 @@ impl RedisStore {
         StreamKeys::new(&self.prefix, namespace, stream_id)
     }
 
-    /// Creates a Stream, or finds it. A retry run's create withdraws its previous run.
+    /// Creates a Stream, or finds it. A retry run's create withdraws its previous run. A
+    /// Workflow-owned Stream keeps the run chain that its ref names, for the owner check of a
+    /// close.
     pub async fn create(
         &self,
         namespace: &str,
-        stream_id: &str,
+        stream: &StreamRef,
         retention: Option<Duration>,
         auto_close: Option<Duration>,
         owner: Owner,
         withdrawal: &Withdrawal<'_>,
     ) -> StreamResult<Created> {
-        let keys = self.keys(namespace, stream_id);
+        let keys = self.keys(namespace, &stream.id);
         let retention = retention.filter(|r| !r.is_zero()).unwrap_or(self.retention);
         let reply: Value = scripts::CREATE_SCRIPT
             .key(keys.meta())
@@ -157,6 +159,7 @@ impl RedisStore {
                     .map(|period| millis(period).max(1).to_string())
                     .unwrap_or_default(),
             )
+            .arg(encode_run(&stream.workflow_id))
             .invoke_async(&mut self.shared.clone())
             .await
             .mapped()?;
@@ -232,7 +235,8 @@ impl RedisStore {
             .arg(local_activity_task(producer))
             .arg(completed_arg(withdrawal))
             .arg(failed_list(withdrawal))
-            .arg(withdrawal.tasks.map_or(&[][..], |tasks| tasks.supersession));
+            .arg(withdrawal.tasks.map_or(&[][..], |tasks| tasks.supersession))
+            .arg(batch.digest);
         for record in batch.records {
             invocation.arg(record.as_slice());
         }
@@ -252,15 +256,16 @@ impl RedisStore {
         })
     }
 
-    /// Closes a Stream with an encoded close Record.
+    /// Closes a Stream with an encoded close Record, if the Producer's kind and the ref's run
+    /// chain are the owner's.
     pub async fn close(
         &self,
         namespace: &str,
-        stream_id: &str,
+        stream: &StreamRef,
         producer: &Producer,
         record: &[u8],
     ) -> StreamResult<Closed> {
-        let keys = self.keys(namespace, stream_id);
+        let keys = self.keys(namespace, &stream.id);
         let epoch = producer.epoch.unwrap_or_default();
         let reply: Value = scripts::CLOSE_SCRIPT
             .key(keys.meta())
@@ -272,6 +277,7 @@ impl RedisStore {
             .arg(epoch_key(&epoch))
             .arg(millis(TOMBSTONE))
             .arg(record)
+            .arg(encode_run(&stream.workflow_id))
             .invoke_async(&mut self.shared.clone())
             .await
             .mapped()?;
@@ -306,6 +312,30 @@ impl RedisStore {
             .await
             .mapped()?;
         read_reply(reply)
+    }
+
+    /// Reads up to `count` entries at or before `before`, newest first, with `XREVRANGE`.
+    pub async fn read_back(
+        &self,
+        namespace: &str,
+        stream_id: &str,
+        before: i64,
+        count: usize,
+    ) -> StreamResult<Vec<Entry>> {
+        let keys = self.keys(namespace, stream_id);
+        let reply: Value = redis::cmd("XREVRANGE")
+            .arg(keys.log())
+            .arg(entry_id_of_offset(before))
+            .arg("-")
+            .arg("COUNT")
+            .arg(count)
+            .query_async(&mut self.shared.clone())
+            .await
+            .mapped()?;
+        let Value::Array(entries) = reply else {
+            return Err(bad_reply("read back", reply));
+        };
+        entries.into_iter().map(entry).collect()
     }
 
     /// Waits until the log has an entry after `after`, or `deadline` passes. Answers whether an
@@ -362,14 +392,14 @@ impl Store for RedisStore {
     async fn create(
         &self,
         namespace: &str,
-        stream_id: &str,
+        stream: &StreamRef,
         retention: Option<Duration>,
         auto_close: Option<Duration>,
         owner: Owner,
         withdrawal: &Withdrawal<'_>,
     ) -> StreamResult<Created> {
         RedisStore::create(
-            self, namespace, stream_id, retention, auto_close, owner, withdrawal,
+            self, namespace, stream, retention, auto_close, owner, withdrawal,
         )
         .await
     }
@@ -377,20 +407,20 @@ impl Store for RedisStore {
     async fn append(
         &self,
         namespace: &str,
-        stream_id: &str,
+        stream: &StreamRef,
         batch: &Batch<'_>,
     ) -> StreamResult<Appended> {
-        RedisStore::append(self, namespace, stream_id, batch).await
+        RedisStore::append(self, namespace, &stream.id, batch).await
     }
 
     async fn close(
         &self,
         namespace: &str,
-        stream_id: &str,
+        stream: &StreamRef,
         producer: &Producer,
         record: &[u8],
     ) -> StreamResult<Closed> {
-        RedisStore::close(self, namespace, stream_id, producer, record).await
+        RedisStore::close(self, namespace, stream, producer, record).await
     }
 
     async fn read(
@@ -415,6 +445,16 @@ impl Store for RedisStore {
 
     async fn auto_close(&self, namespace: &str, stream_id: &str) -> StreamResult<Option<i64>> {
         RedisStore::auto_close(self, namespace, stream_id).await
+    }
+
+    async fn read_back(
+        &self,
+        namespace: &str,
+        stream_id: &str,
+        before: i64,
+        count: usize,
+    ) -> StreamResult<Vec<Entry>> {
+        RedisStore::read_back(self, namespace, stream_id, before, count).await
     }
 }
 

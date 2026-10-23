@@ -6,6 +6,7 @@
 //! reaches it through the bridge's generic extension calls, with an operation name and proto
 //! bytes. A Workflow makes each call from a Local Activity.
 
+pub mod digest;
 pub mod epoch;
 mod error;
 mod extension;
@@ -34,4 +35,6 @@ pub use service::{MAX_RECORDS, MAX_WAIT};
 /// The protos lang and the crate exchange.
 pub mod proto {
     pub use crate::protos::temporal::{api::streamservice::v1::*, sdk::streams::v1::*};
+    // Both packages have the message. The extension's is the one in extension errors.
+    pub use crate::protos::temporal::sdk::streams::v1::StreamErrorDetails;
 }

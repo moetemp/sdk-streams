@@ -14,12 +14,13 @@ use std::sync::{
 };
 use temporalio_streams::{
     ExtensionOptions, MemoryStreamExtension, StreamExtension, StreamResult,
+    digest::batch_digest,
     epoch::withdraws,
     ids::{StreamKeys, local_activity_producer_id},
     memory::MemoryStore,
     proto::{
-        Producer, ProducerEpoch, ProducerKind, RedisStreamConfig, StreamRecord, StreamRecordKind,
-        Supersession,
+        AppendRecord, Producer, ProducerEpoch, ProducerKind, RedisStreamConfig, StreamRecord,
+        StreamRecordKind, StreamRef, Supersession,
     },
     redis::{RedisStore, RedisStoreOptions},
     store::{Appended, Batch, Closed, Entry, Owner, Store, Withdrawal},
@@ -157,6 +158,23 @@ pub(crate) fn record(producer: &Producer, text: &str) -> Vec<u8> {
     .encode_to_vec()
 }
 
+/// The digest of the batch that [record] makes of each text.
+pub(crate) fn digest(texts: &[&str]) -> String {
+    let records: Vec<_> = texts
+        .iter()
+        .map(|text| AppendRecord {
+            topic: "t".to_string(),
+            body: Some(
+                temporalio_common::protos::temporal::api::common::v1::Payload {
+                    data: text.as_bytes().to_vec(),
+                    ..Default::default()
+                },
+            ),
+        })
+        .collect();
+    batch_digest(&records)
+}
+
 pub(crate) fn supersession(producer: &Producer, withdrawal: &Withdrawal<'_>) -> Vec<u8> {
     Supersession {
         producer_kind: producer.kind,
@@ -181,6 +199,13 @@ pub(crate) fn records_of(entries: &[Entry]) -> Vec<String> {
 }
 
 impl Target {
+    pub(crate) fn stream_ref(&self) -> StreamRef {
+        StreamRef {
+            id: self.stream.clone(),
+            ..Default::default()
+        }
+    }
+
     pub(crate) fn keys(&self) -> StreamKeys {
         StreamKeys::new("streams-test", &self.namespace, &self.stream)
     }
@@ -189,7 +214,7 @@ impl Target {
         self.store
             .create(
                 &self.namespace,
-                &self.stream,
+                &self.stream_ref(),
                 None,
                 None,
                 owner,
@@ -365,11 +390,12 @@ impl Target {
         self.store
             .append(
                 &self.namespace,
-                &self.stream,
+                &self.stream_ref(),
                 &Batch {
                     producer,
                     sequence,
                     records: &records,
+                    digest: &digest(texts),
                     withdrawal,
                 },
             )
@@ -377,6 +403,15 @@ impl Target {
     }
 
     pub(crate) async fn close(&self, producer: &Producer) -> StreamResult<Closed> {
+        self.close_at(&self.stream_ref(), producer).await
+    }
+
+    /// Closes the Stream that `stream` names, with the owner fields it has.
+    pub(crate) async fn close_at(
+        &self,
+        stream: &StreamRef,
+        producer: &Producer,
+    ) -> StreamResult<Closed> {
         let record = StreamRecord {
             kind: StreamRecordKind::Close as i32,
             producer: Some(producer.clone()),
@@ -384,7 +419,7 @@ impl Target {
         }
         .encode_to_vec();
         self.store
-            .close(&self.namespace, &self.stream, producer, &record)
+            .close(&self.namespace, stream, producer, &record)
             .await
     }
 }

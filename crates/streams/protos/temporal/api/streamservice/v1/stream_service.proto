@@ -1,6 +1,3 @@
-// Draft for the Brook API proposal. It backs crates/streams/nexus/stream-service.wit.
-// For the draft, every message and enum is in one package. A real change would split them
-// into temporal/api/stream/v1, temporal/api/enums/v1 and temporal/api/streamservice/v1.
 syntax = "proto3";
 
 package temporal.api.streamservice.v1;
@@ -11,6 +8,10 @@ option java_multiple_files = true;
 option java_outer_classname = "StreamServiceProto";
 option ruby_package = "Temporalio::Api::StreamService::V1";
 option csharp_namespace = "Temporalio.Api.StreamService.V1";
+
+// The messages of the Stream service. Field for field the protos of the Brook Stream crate,
+// so a Store and the server answer the same five operations with the same messages. Every
+// message and enum is in this one package for now.
 
 import "google/protobuf/duration.proto";
 import "google/protobuf/timestamp.proto";
@@ -28,6 +29,10 @@ message StreamRef {
     // it, so every process routes a ref it receives. Empty is the default backend. The Store
     // never reads it.
     string backend = 4;
+    // The Standalone Activity that owns the Stream. Set on the Activity's ref, so a call routes to
+    // the Activity's shard and finds the Stream in the Activity. The Store never reads these.
+    string activity_id = 5;
+    string activity_run_id = 6;
 }
 
 enum ProducerKind {
@@ -98,6 +103,18 @@ message Supersession {
     string run_id = 7;
 }
 
+// How a Stream closed, so a reader tells a terminated or timed out owner from a failed one
+// without parsing the failure.
+enum CloseStatus {
+    CLOSE_STATUS_UNSPECIFIED = 0;
+    CLOSE_STATUS_COMPLETED = 1;
+    CLOSE_STATUS_FAILED = 2;
+    CLOSE_STATUS_CANCELED = 3;
+    // TERMINATED and TIMED_OUT come only from the owner's end, never from a caller.
+    CLOSE_STATUS_TERMINATED = 4;
+    CLOSE_STATUS_TIMED_OUT = 5;
+}
+
 // An offset is the Redis entry id packed as ms << 20 | seq. It is ordered and unique in one
 // Stream, and it is sparse: offsets have gaps, so they don't count Records. Zero is never an
 // offset. A read names its Stream, so the read checks the offset against that Stream.
@@ -110,6 +127,8 @@ message StreamRecord {
     Supersession supersession = 6;
     temporal.api.common.v1.Payload close_result = 7;
     temporal.api.failure.v1.Failure close_failure = 8;
+    // CLOSE only. The result or the failure stays next to it.
+    CloseStatus close_status = 9;
 }
 
 // Idempotent for one id, one Retention and one auto_close. ALREADY_EXISTS for another
@@ -135,6 +154,9 @@ message CreateStreamRequest {
     // The ref of the Stream. A Workflow-owned Stream sets workflow_id and
     // first_execution_run_id, which name the owner's run chain.
     StreamRef ref = 8;
+    // A Standalone Activity's create of its own Stream. The server checks that the token is the
+    // Activity's current attempt, so a caller can't put a Stream into an Activity it isn't.
+    bytes task_token = 9;
 }
 
 enum StreamStatus {
@@ -160,12 +182,17 @@ message AppendRecordsRequest {
     // The batch number in this epoch. With the Producer and epoch it is the dedupe key.
     int64 sequence = 4;
     repeated AppendRecord records = 5;
-    // Local Activity only. The run's last completed Workflow Task and its failed or timed out
-    // Workflow Tasks, so the batch withdraws the run's orphaned Local Activity Records.
+    // Workflow only. The failed tasks are those since this run's last flush to this Stream.
     WorkflowTaskEpoch previous_completed_task = 6;
     repeated int64 failed_tasks = 7;
     // Workflow only. A retry run's first batch: the previous run, whose Records it withdraws.
     string withdraw_run = 8;
+    // Workflow only. The batch before a Local Activity, whose task facts come later with the
+    // task's completion. It withdraws no task and keeps no facts. withdraw_run still applies.
+    bool defer_withdrawal = 9;
+    // An Activity's write on the native backend. The server checks the Producer against the
+    // Activity's current attempt, so nobody else writes as that Activity.
+    bytes task_token = 10;
 }
 
 message AppendRecordsResponse {
@@ -182,6 +209,12 @@ message CloseStreamRequest {
     // Workflow only.
     WorkflowTaskEpoch previous_completed_task = 6;
     repeated int64 failed_tasks = 7;
+    // Workflow only. A retry run's close: the previous run, whose Records it withdraws.
+    string withdraw_run = 8;
+    // Empty is COMPLETED with no failure and FAILED with one. A caller sets CANCELED itself.
+    CloseStatus status = 9;
+    // An Activity's close on the native backend, checked as on the append.
+    bytes task_token = 10;
 }
 
 message CloseStreamResponse {
@@ -211,6 +244,22 @@ message ReadRecordsRequest {
     // Also read the Topics that start with one of these. A Record passes when its Topic is in
     // topics or starts with a prefix. Both empty reads every Topic.
     repeated string topic_prefixes = 10;
+    // The exclusive end of the read. The read scans no entry at or after it, the close Record
+    // included, so a replay reads the same range. Zero means no end.
+    int64 to_offset = 11;
+    // Park as a normal read, then answer with no Records and next_offset = from_offset, when a
+    // Record that passes the filter exists, when the Stream closes (done), or when wait ends.
+    // Its wait may be days, since a parked read adds nothing to History while it waits.
+    bool wake_only = 12;
+    // Read the newest `last` Records that pass the filter, oldest first. It needs no from_offset
+    // and no start. Not with wake_only, and not in Workflow code, where replay needs a fixed range.
+    int32 last = 13;
+    // The most Record bytes in one page, so a page fits the caller's limit, such as a History
+    // marker. A larger Record still comes alone, so the read always moves on. Zero is no cap.
+    int64 max_bytes = 14;
+    // The lowest offset this run read on replay. A reset run copies the reads of the old run into
+    // its History, so its floor must cover them too, not only its first live page.
+    int64 floor_from = 15;
 }
 
 message ReadRecordsResponse {
@@ -218,6 +267,9 @@ message ReadRecordsResponse {
     // The from_offset of the next read: the newest offset read + 1.
     int64 next_offset = 2;
     bool done = 3;
+    // This reader's floor keeps more than half of the Stream's byte cap. The writer fails when the
+    // cap fills, and only the reader's continue-as-new frees it.
+    bool continue_as_new_suggested = 4;
 }
 
 message DescribeStreamRequest {
@@ -232,4 +284,13 @@ message DescribeStreamResponse {
     google.protobuf.Duration retention = 3;
     // The auto_close of the create. Empty when the Stream has none.
     google.protobuf.Duration auto_close = 4;
+}
+
+// The details of a failed Stream call, in the gRPC status details and in the details of the
+// application failure of a Nexus operation.
+message StreamErrorDetails {
+    // A token such as `stream_closed`, `stream_fenced` or `stream_format_too_new`.
+    // `seq_divergent` is a resend with the sequence of the last batch and other content.
+    // `stream_not_owner` is a close or a Producer that the Stream's owner doesn't allow.
+    string reason = 1;
 }
