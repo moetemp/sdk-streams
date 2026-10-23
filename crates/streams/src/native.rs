@@ -198,10 +198,13 @@ impl Store for ServiceStore {
         owner: Owner<'_>,
         withdrawal: &Withdrawal<'_>,
     ) -> StreamResult<Created> {
-        let (run, task_token) = match owner {
-            Owner::Workflow(run) => (run, &[][..]),
-            Owner::Client => (None, &[][..]),
-            Owner::Activity(token) => (None, token),
+        let (run, activity, task_token) = match owner {
+            Owner::Workflow(run) => (run, None, &[][..]),
+            Owner::Client => (None, None, &[][..]),
+            Owner::Activity {
+                producer,
+                task_token,
+            } => (None, Some(producer), task_token),
         };
         let retention = retention.or(self.retention);
         let request = CreateStreamRequest {
@@ -210,7 +213,7 @@ impl Store for ServiceStore {
             retention: retention.map(proto_duration),
             withdraw_run: withdrawal.withdraw_run.to_string(),
             auto_close: auto_close.map(proto_duration),
-            owner: run.map(|run| run.producer.clone()),
+            owner: run.map(|run| run.producer).or(activity).cloned(),
             close_with_run: run.is_some_and(|run| run.close_with_run),
             r#ref: Some(stream.clone()),
             task_token: task_token.to_vec(),

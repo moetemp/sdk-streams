@@ -194,3 +194,8 @@
   the case.
 - A Workflow read (`WorkflowReadRecords`) with `last` fails with `stream_invalid` on every
   backend, since a replay must read the same range.
+- A Standalone Activity's create of its own Stream sends its owner Producer
+  (`sa:<activity id>:<activity run id>` at the token's attempt) together with its task token, as
+  the server checks both. `Owner::Activity` carries both. A create with a task token and no
+  Standalone Activity owner, or no Activity ref, fails with `stream_invalid`, and it needs no
+  safety TTL.

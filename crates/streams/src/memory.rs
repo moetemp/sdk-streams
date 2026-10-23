@@ -440,7 +440,7 @@ impl Store for MemoryStore {
         let owner = match owner {
             Owner::Workflow(_) => "wf",
             Owner::Client => "client",
-            Owner::Activity(_) => return Err(activity_owner()),
+            Owner::Activity { .. } => return Err(activity_owner()),
         };
         let (safety, tombstone) = (millis(self.safety_ttl), millis(TOMBSTONE));
         let withdrawn_run = encode_run(withdrawal.withdraw_run);

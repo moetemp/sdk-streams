@@ -138,8 +138,23 @@ impl StreamService {
                 .require(Capabilities::AUTO_CLOSE)?;
         }
         // A Workflow's call that runs outside Workflow code, such as a Local Activity, names the
-        // owning run, so the Stream keeps the safety TTL of a Workflow-owned one.
+        // owning run, so the Stream keeps the safety TTL of a Workflow-owned one. A Standalone
+        // Activity creates its own Stream as its Producer, with its task token.
         let owner = match &request.owner {
+            Some(producer) if !request.task_token.is_empty() => {
+                check_producer(producer)?;
+                if producer.kind != ProducerKind::StandaloneActivity as i32
+                    || stream.activity_id.is_empty()
+                {
+                    return Err(StreamError::invalid(
+                        "A create with a task token is a Standalone Activity's, with its ref",
+                    ));
+                }
+                Owner::Activity {
+                    producer,
+                    task_token: &request.task_token,
+                }
+            }
             Some(producer) => {
                 self.store
                     .capabilities()
@@ -149,14 +164,10 @@ impl StreamService {
                     close_with_run: request.close_with_run,
                 }))
             }
-            // A Standalone Activity creates its own Stream with its task token.
             None if !request.task_token.is_empty() => {
-                if stream.activity_id.is_empty() {
-                    return Err(StreamError::invalid(
-                        "A create with a task token needs the ref of the owning Activity",
-                    ));
-                }
-                Owner::Activity(&request.task_token)
+                return Err(StreamError::invalid(
+                    "A create with a task token needs the Standalone Activity as its owner",
+                ));
             }
             None => Owner::Client,
         };

@@ -1245,32 +1245,64 @@ async fn a_page_keeps_under_max_bytes_and_a_larger_record_comes_alone() {
     }
 }
 
+/// The Standalone Activity's create of its own Stream as sent: the Activity's Producer, its task
+/// token and the Activity owner fields of the ref.
+fn activity_create(case: &Case, owner: Option<Producer>, activity_id: &str) -> CreateStreamRequest {
+    CreateStreamRequest {
+        namespace: case.namespace.clone(),
+        stream_id: case.stream.clone(),
+        owner,
+        r#ref: Some(StreamRef {
+            id: case.stream.clone(),
+            activity_id: activity_id.to_string(),
+            activity_run_id: "ar-1".to_string(),
+            ..Default::default()
+        }),
+        task_token: b"token".to_vec(),
+        ..Default::default()
+    }
+}
+
+fn standalone_activity() -> Producer {
+    Producer {
+        kind: ProducerKind::StandaloneActivity as i32,
+        id: temporalio_streams::ids::standalone_activity_producer_id("a-1", "ar-1"),
+        epoch: Some(ProducerEpoch {
+            attempt: 1,
+            ..Default::default()
+        }),
+        run_id: String::new(),
+    }
+}
+
+/// A create with a task token is a Standalone Activity's own: it needs the Activity as its owner
+/// and the Activity's ref, or it fails with `stream_invalid` before it reaches the Store.
+#[tokio::test]
+async fn a_create_with_a_task_token_needs_the_standalone_activity_as_its_owner() {
+    for case in cases_for(Needs::CALLS).await {
+        for request in [
+            activity_create(&case, None, "a-1"),
+            activity_create(&case, Some(client(1)), "a-1"),
+            activity_create(&case, Some(standalone_activity()), ""),
+        ] {
+            let error = call::<_, CreateStreamResponse>(&case.ext, "CreateStream", request)
+                .await
+                .unwrap_err();
+            assert_eq!(reason(&error), "stream_invalid");
+        }
+    }
+}
+
 /// A Store that keys on the id only, as Redis and memory do, can't nest a Stream in a Standalone
 /// Activity, so it refuses one with `stream_unsupported` and writes nothing.
 #[tokio::test]
 async fn only_the_native_backend_keeps_a_stream_that_a_standalone_activity_owns() {
     for case in cases_for(Needs::ID_KEYS).await {
-        let create = |activity_id: &str| CreateStreamRequest {
-            namespace: case.namespace.clone(),
-            stream_id: case.stream.clone(),
-            r#ref: Some(StreamRef {
-                id: case.stream.clone(),
-                activity_id: activity_id.to_string(),
-                activity_run_id: "ar-1".to_string(),
-                ..Default::default()
-            }),
-            task_token: b"token".to_vec(),
-            ..Default::default()
-        };
-        let error = call::<_, CreateStreamResponse>(&case.ext, "CreateStream", create("a-1"))
+        let request = activity_create(&case, Some(standalone_activity()), "a-1");
+        let error = call::<_, CreateStreamResponse>(&case.ext, "CreateStream", request)
             .await
             .unwrap_err();
         assert_eq!(reason(&error), "stream_unsupported");
-        let error = call::<_, CreateStreamResponse>(&case.ext, "CreateStream", create(""))
-            .await
-            .unwrap_err();
-        assert_eq!(reason(&error), "stream_invalid");
-        // Nothing was created.
         assert_eq!(
             reason(&case.describe().await.unwrap_err()),
             "stream_not_found"

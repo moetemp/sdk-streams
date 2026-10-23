@@ -147,7 +147,7 @@ impl RedisStore {
             .arg(match owner {
                 Owner::Workflow(_) => "wf",
                 Owner::Client => "client",
-                Owner::Activity(_) => return Err(crate::memory::activity_owner()),
+                Owner::Activity { .. } => return Err(crate::memory::activity_owner()),
             })
             .arg(millis(self.safety_ttl))
             .arg(millis(TOMBSTONE))

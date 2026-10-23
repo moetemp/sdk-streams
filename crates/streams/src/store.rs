@@ -29,9 +29,14 @@ pub enum Owner<'a> {
     Workflow(Option<RunOwner<'a>>),
     /// The Stream stays one Retention after its last write.
     Client,
-    /// A Standalone Activity's own Stream, with the Activity's task token, which the server
-    /// checks against the Activity's current attempt. Only the native Store keeps one.
-    Activity(&'a [u8]),
+    /// A Standalone Activity's own Stream. The server checks that the Producer is the Activity's
+    /// and that the task token is its current attempt. Only the native Store keeps one.
+    Activity {
+        /// The Activity's Producer, `sa:<activity id>:<activity run id>` at the token's attempt.
+        producer: &'a Producer,
+        /// The Activity's task token.
+        task_token: &'a [u8],
+    },
 }
 
 /// What a create found.
