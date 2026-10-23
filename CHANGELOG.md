@@ -132,3 +132,13 @@
   `StreamExtension::call` with a method name and proto bytes. An error has `code()` and
   `details()`, the encoded `StreamErrorDetails`. The crate no longer depends on
   `temporalio-sdk-core`, and it pins `temporalio-common` at sdk-rust Brook c7 `b565c433`.
+- The handles of one Producer epoch on one Stream share one writer. Each `OpenWriter` adds a
+  handle, and each `CloseWriter` or the new `FreeWriter` releases one. `FreeWriter` and
+  `StreamExtension::free_writer` release with no wait, for a handle that lang drops. The last
+  handle drops the writer, so a process keeps no writer that no handle uses.
+- Every writer in a process takes its batch `sequence` from one counter, so a writer opened again
+  after its close goes on above its earlier batches. The map of closed writers' sequences is
+  gone, and it no longer grows for the life of the process.
+- `ids::named_client_producer_id` makes `client:<name>`, a client Producer id that the caller
+  keeps across restarts. With the caller's epoch in `attempt`, a new incarnation fences the
+  earlier one and withdraws its Records, as an Activity retry does.

@@ -100,6 +100,7 @@ def ids():
             "process_key": "p-1",
             "id": "client:" + join("1@host", "p-1"),
         },
+        "named_client": {"name": "ingest:eu/1", "id": "client:" + join("ingest:eu/1")},
     }
     return {"streams": cases, "producers": producers}
 

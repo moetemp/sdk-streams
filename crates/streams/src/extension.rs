@@ -7,9 +7,9 @@ use crate::{
     metrics::Metrics,
     proto::{
         AppendRecordsRequest, CloseStreamRequest, CloseWriterRequest, CloseWriterResponse,
-        CloseWritersRequest, CloseWritersResponse, DescribeStreamRequest, OpenWriterRequest,
-        OpenWriterResponse, ReadRecordsRequest, RedisStreamConfig, WriteRecordsRequest,
-        WriteRecordsResponse,
+        CloseWritersRequest, CloseWritersResponse, DescribeStreamRequest, FreeWriterRequest,
+        FreeWriterResponse, OpenWriterRequest, OpenWriterResponse, ReadRecordsRequest,
+        RedisStreamConfig, WriteRecordsRequest, WriteRecordsResponse,
     },
     redis::{RedisStore, RedisStoreOptions},
     service::StreamService,
@@ -168,9 +168,21 @@ impl StreamExtension {
         self.shared.name
     }
 
+    /// Releases one handle of a writer with no wait, as the `FreeWriter` method does. A bridge
+    /// calls it from a finalizer, which has no runtime to await on.
+    pub fn free_writer(&self, writer_id: u64) -> StreamResult<()> {
+        self.shared.writers.free(writer_id)
+    }
+
     /// Runs one method on encoded input and answers the encoded output. The bridge raises an
     /// error with [StreamError::code] and [StreamError::details].
     pub async fn call(&self, method: &str, input: &[u8]) -> StreamResult<Vec<u8>> {
+        // A free needs no Store, so it works also when Redis is down.
+        if method == "FreeWriter" {
+            let request = decode::<FreeWriterRequest>(input)?;
+            self.free_writer(request.writer_id)?;
+            return Ok(FreeWriterResponse {}.encode_to_vec());
+        }
         let service = self.shared.service().await?;
         let output = match method {
             "CreateStream" => service.create_stream(decode(input)?).await?.encode_to_vec(),
