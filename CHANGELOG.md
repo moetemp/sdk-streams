@@ -202,3 +202,9 @@
   `la` on a Stream that an older crate created.
 - The crate pins `temporalio-common` at sdk-rust Brook c8 `320e725f`, which reverts the cache-off
   eviction reason. The crate uses nothing that the revert touches.
+- The native Store sends no `auto_close` on create and has no `Store::auto_close`, as the server
+  has no auto close either. A Workflow create, one with an owner and no task token, still passes
+  its `close_with_run` to the server, which closes the Stream when the owner's run chain ends.
+  The Stream service proto equals the api a4 copy byte for byte.
+- The crate pins `temporalio-common` and `temporalio-client` at sdk-rust Jetty c10 `191c8b8b`,
+  which takes Brook c8's revert of the cache-off eviction reason.
