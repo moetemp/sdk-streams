@@ -34,12 +34,6 @@
 - Reserved `ReadRecordsRequest.idle_timeout` (9) and `STREAM_RECORD_KIND_IDLE` (4). A read ends
   with Records, the close Record, or nothing after `wait`. A Reader that stops after a quiet
   period sets its own timer and resumes from `next_offset`.
-- Added `CreateStreamRequest.auto_close` (5) and `DescribeStreamResponse.auto_close` (4). A
-  Stream with an auto close closes with no result when no Record was appended for that long,
-  counted from the create. Each write step applies it before it acts, and a read or a describe
-  that finds it due applies it with the new auto close script. A long-polling read wakes when it
-  comes due. A create with another auto close is a conflict. A Store without the new
-  `auto_close` capability refuses such a create with `stream_unsupported`.
 - Added `StreamRef.backend` (4) and `RedisStreamConfig.backend` (10). The crate puts the
   configured backend name in each ref it builds, such as the one in a create answer, so every
   process routes a ref it receives. The Store never reads it.
@@ -118,8 +112,8 @@
   copy byte for byte.
 - A close Record has `close_status`. A close with no status is `COMPLETED`, or `FAILED` with a
   failure, and a caller may set `CANCELED`. A caller's `TERMINATED` or `TIMED_OUT` fails with
-  `stream_invalid`, since only the owner's end on the server sets them. An auto close is
-  `COMPLETED`, so its Record is `08 03 48 01`. The result and the failure stay.
+  `stream_invalid`, since only the owner's end on the server sets them. The result and the
+  failure stay.
 - `ReadRecordsRequest.last` reads the newest Records that pass the filter, oldest first, with the
   close Record at the end of a closed Stream. A Record that a newer `Superseded` item withdraws
   doesn't count. It never waits, and it takes no `from_offset` or `wake_only`. Redis reads it
@@ -146,3 +140,10 @@
   withdraws nothing, in the Redis script, the memory Store and the reader rule. The withdrawal
   rule stays for Workflow, Local Activity and Activity Producers. `testdata/withdrawals.json` has
   the case.
+- Removed the auto close, so a Redis or memory Stream closes only on a close call.
+  `CreateStreamRequest` reserves `auto_close` (5) and `DescribeStreamResponse` reserves
+  `auto_close` (4). The WIT drops `auto-close` from the create and the describe. Gone are the
+  `auto_close` capability, `Store::auto_close`, the `auto_close` argument of `Store::create`, the
+  auto close script and the `ac` and `la` meta fields. A create is idempotent for one Retention
+  only. A read writes nothing, so a Reader needs read access only. The scripts ignore `ac` and
+  `la` on a Stream that an older crate created.

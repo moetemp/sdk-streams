@@ -25,8 +25,6 @@ slot. `CreateStream` writes `:meta`, and the first entry makes `:log`.
 | `closed`, `close_id` | Set by the close, with the entry id of the close Record |
 | `newest` | The entry id of the newest entry |
 | `trimmed` | The entry id of the newest entry that Retention dropped |
-| `ac` | The auto close period in ms, absent when the Stream has none |
-| `la` | When the create or the newest append with Records ran, in ms since 1970, with `ac` only |
 | `e\|<kind>\|<producer id>` | The newest epoch key of the Producer, the fence |
 | `d\|<kind>\|<producer id>` | `<epoch key>\|<sequence>\|<first id>\|<last id>\|<digest>`, last batch |
 | `h\|<kind>\|<producer id>` | The newest epoch key that still has Records here |
@@ -65,22 +63,12 @@ withdraws them. It drops the tasks at or before the completed one, adds its own 
 withdrawn ones in `ow`, which fences a late write of such a task. A batch with no completed task
 skips the rule. A Stream that the run never writes again keeps its orphans.
 
-## Auto close
-
-A Stream with `ac` closes with no result when `la + ac` passes. Nothing runs at that time. The
-next create, append, close or auto close step finds it due and first writes the close Record
-`08 03 48 01` (a `StreamRecord` with only `kind = CLOSE` and `close_status = COMPLETED`), then
-acts on the closed Stream. So an append is refused with `stream_closed`, and a close answers that
-the Stream was already closed. The read script writes nothing, so a read or a describe that finds
-the close due runs the auto close step, then reads again. A long-polling read wakes when the
-period passes.
-
 ## Close
 
 Only the owner closes a Stream. A Workflow-owned Stream closes from its run chain, as a Local
 Activity or as the run itself, and a close whose ref names another chain than `oc` is refused.
 Any other Stream closes only from a client. The script refuses others with `stream_not_owner`
-before it writes. An auto close has no Producer and is not checked.
+before it writes.
 
 ## TTLs
 
@@ -93,7 +81,6 @@ otherwise. Each append drops the Records older than the Retention, and a read hi
 A Producer needs `+evalsha` and `+script|load` on `~<prefix>:{<namespace>:*`. A Reader needs
 `+evalsha_ro` or `+evalsha`, `+xread` and the read keys, and `+xrevrange` for a read of the last
 Records. A cluster also needs `+cluster|slots`.
-See the known limits for a Reader of a Stream with an auto close.
 
 ## Known limits
 
@@ -103,9 +90,6 @@ See the known limits for a Reader of a Stream with an auto close.
   again, keeps its Records. The memory Store has the same limit.
 - Core names only the last 100 failed Workflow Tasks of a run. An older failed task before the
   last completed one keeps its Local Activity Records.
-- A Reader of a Stream with an auto close needs `+evalsha` with write access to the Stream's
-  keys, since its read or describe may apply a due close. A Reader with read-only access gets
-  an error from that step.
 - A read or a describe served by a replica that is behind can report a Stream open just after
   its close.
 - Redis can't tie a run to its run chain. A run of another chain that holds the owner's ref, such
