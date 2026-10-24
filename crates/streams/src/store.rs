@@ -46,7 +46,7 @@ pub enum CreateOutcome {
     Created,
     /// The Stream exists with the same Retention.
     Exists,
-    /// The Stream exists with another Retention or auto close, which stays.
+    /// The Stream exists with another Retention, which stays.
     Conflict,
     /// The Stream is closed.
     Closed,
@@ -63,8 +63,6 @@ pub struct Created {
     pub retention: Duration,
     /// Whether the create withdrew a retry run's previous run.
     pub flagged: bool,
-    /// The auto close period of the Stream, the stored one if it existed.
-    pub auto_close: Option<Duration>,
 }
 
 /// The withdrawal facts of a Workflow batch or close, and the `Superseded` item they make.
@@ -150,31 +148,12 @@ pub struct StreamState {
     pub expires_ms: i64,
     /// The server time of the read, in ms since 1970.
     pub now_ms: i64,
-    /// The auto close period, if the Stream has one.
-    pub auto_close: Option<Duration>,
-    /// When the Stream was created or last took a Record, in ms since 1970. The auto close
-    /// counts from it.
-    pub last_append_ms: i64,
 }
 
 impl StreamState {
     /// The Stream is a Tombstone.
     pub fn expired(&self) -> bool {
         self.exists && self.expires_ms <= self.now_ms
-    }
-
-    /// When the auto close of an open Stream is due, in ms since 1970.
-    pub fn auto_close_at_ms(&self) -> Option<i64> {
-        if self.closed_at.is_some() || self.expired() {
-            return None;
-        }
-        let period = i64::try_from(self.auto_close?.as_millis()).unwrap_or(i64::MAX);
-        Some(self.last_append_ms.saturating_add(period))
-    }
-
-    /// The auto close period passed with no append, so the next write step closes the Stream.
-    pub fn auto_close_due(&self) -> bool {
-        self.auto_close_at_ms().is_some_and(|at| at <= self.now_ms)
     }
 
     /// The offset below which Retention dropped or hides the Records, as of the read.
@@ -218,19 +197,15 @@ impl Capabilities {
     pub const CLOSE: Self = Self(1 << 3);
     /// An open Workflow-owned Stream keeps the safety TTL, not the Retention.
     pub const SAFETY_TTL: Self = Self(1 << 4);
-    /// A Stream with an auto close period closes with no result when no append came for that
-    /// long. Each write step applies it before it acts, so no call sees the Stream open late.
-    pub const AUTO_CLOSE: Self = Self(1 << 5);
     /// Every capability.
-    pub const ALL: Self = Self((1 << 6) - 1);
+    pub const ALL: Self = Self((1 << 5) - 1);
 
-    const NAMES: [(Self, &'static str); 6] = [
+    const NAMES: [(Self, &'static str); 5] = [
         (Self::PRODUCER_FENCE, "producer_fence"),
         (Self::WITHDRAWAL, "withdrawal"),
         (Self::RUN_FENCE, "run_fence"),
         (Self::CLOSE, "close"),
         (Self::SAFETY_TTL, "safety_ttl"),
-        (Self::AUTO_CLOSE, "auto_close"),
     ];
 
     /// Both sets.
@@ -291,14 +266,12 @@ pub trait Store: Send + Sync + 'static {
 
     /// Creates a Stream, or finds it. The calls that write take the Stream's whole ref, since
     /// the server finds a Workflow's Stream by its owner fields. Redis and memory key on the id.
-    /// A retry run's create withdraws its previous run. An `auto_close` needs
-    /// [Capabilities::AUTO_CLOSE].
+    /// A retry run's create withdraws its previous run.
     async fn create(
         &self,
         namespace: &str,
         stream: &StreamRef,
         retention: Option<Duration>,
-        auto_close: Option<Duration>,
         owner: Owner<'_>,
         withdrawal: &Withdrawal<'_>,
     ) -> StreamResult<Created>;
@@ -356,12 +329,6 @@ pub trait Store: Send + Sync + 'static {
         Err(unsupported("last"))
     }
 
-    /// Closes the Stream if its auto close is due, for a read that found it due. Answers the
-    /// offset of the close Record if the Stream is closed. Needs [Capabilities::AUTO_CLOSE].
-    async fn auto_close(&self, _namespace: &str, _stream_id: &str) -> StreamResult<Option<i64>> {
-        Err(unsupported("auto_close"))
-    }
-
     /// The reads of a Store that answers whole reads and describes itself, such as the
     /// server. The service then forwards those calls and uses no [Store::read].
     fn remote_reads(&self) -> Option<&dyn RemoteReads> {
@@ -413,17 +380,17 @@ mod tests {
         let some = Capabilities::PRODUCER_FENCE.union(Capabilities::CLOSE);
         some.require(Capabilities::CLOSE).unwrap();
         let error = some
-            .require(Capabilities::CLOSE.union(Capabilities::AUTO_CLOSE))
+            .require(Capabilities::CLOSE.union(Capabilities::SAFETY_TTL))
             .unwrap_err();
         assert_eq!(error.reason, Reason::Unsupported);
-        assert!(error.message.ends_with("auto_close"), "{}", error.message);
-        assert_eq!(Capabilities::ALL.names().len(), 6);
+        assert!(error.message.ends_with("safety_ttl"), "{}", error.message);
+        assert_eq!(Capabilities::ALL.names().len(), 5);
         assert_eq!(
             Capabilities::ALL
-                .without(Capabilities::AUTO_CLOSE)
+                .without(Capabilities::SAFETY_TTL)
                 .names()
                 .len(),
-            5
+            4
         );
     }
 }

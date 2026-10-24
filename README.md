@@ -19,9 +19,11 @@ the crate.
 |---|---|---|
 | Brook v3 | `moe/brook/v3/s1-protos-and-ids` and up | `moe/brook/v3/c4-local-activity-workflow-task` `3a9203ac` |
 | Brook v4 | `moe/brook/v4/s20-orphan-local-activities` to `s21` | `moe/brook/v4/c6-local-activity-task-history` `32ba79d6` |
-| Brook v4 | `moe/brook/v4/s22-client-objects` and up | `moe/brook/v4/c7-no-worker-extension` `b565c433` |
+| Brook v4 | `moe/brook/v4/s22-client-objects` | `moe/brook/v4/c7-no-worker-extension` `b565c433` |
+| Brook v5 | `moe/brook/v5/s23-no-auto-close` and up | `moe/brook/v5/c8-no-eviction-reason` `320e725f` |
 | Jetty v2 | `moe/jetty/v2/k1-service-store` | `moe/jetty/v2/c8-no-workflow-task-hooks` `66a7c85c` |
-| Jetty v2 | `moe/jetty/v2/k2-store-takeovers` and up | `moe/jetty/v2/c9-no-worker-extension` `04312dfd` |
+| Jetty v2 | `moe/jetty/v2/k2-store-takeovers` | `moe/jetty/v2/c9-no-worker-extension` `04312dfd` |
+| Jetty v3 | `moe/jetty/v3/k3-no-auto-close` and up | `moe/jetty/v3/c10-no-eviction-reason` `191c8b8b` |
 
 ## Linking from a lang bridge
 

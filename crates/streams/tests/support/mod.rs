@@ -49,7 +49,7 @@ impl Needs {
     /// Producers, owners and runs as sent. The server checks them against its executions, so a
     /// case with made-up runs, or an Activity with no task token, can't run there.
     pub(crate) const UNCHECKED: Self = Self(1 << 2);
-    /// A Retention or an auto close of a few hundred ms.
+    /// A Retention of a few hundred ms.
     pub(crate) const SHORT_TIMES: Self = Self(1 << 3);
     /// The runtime built from the crate's own config, such as a backend name.
     pub(crate) const OWN_CONFIG: Self = Self(1 << 4);
@@ -299,7 +299,6 @@ impl Target {
             .create(
                 &self.namespace,
                 &self.stream_ref(),
-                None,
                 None,
                 owner,
                 &Withdrawal::default(),

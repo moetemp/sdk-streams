@@ -151,10 +151,6 @@ impl ServiceStore {
         request: CreateStreamRequest,
         retention: Option<Duration>,
     ) -> StreamResult<Created> {
-        let auto_close = request
-            .auto_close
-            .as_ref()
-            .map(|d| Duration::new(d.seconds.max(0) as u64, d.nanos.max(0) as u32));
         let namespace = request.namespace.clone();
         let answer: StreamResult<CreateStreamResponse> =
             self.call(CREATE, &namespace, request, None).await;
@@ -173,7 +169,6 @@ impl ServiceStore {
             outcome,
             retention,
             flagged: false,
-            auto_close,
         })
     }
 }
@@ -194,7 +189,6 @@ impl Store for ServiceStore {
         namespace: &str,
         stream: &StreamRef,
         retention: Option<Duration>,
-        auto_close: Option<Duration>,
         owner: Owner<'_>,
         withdrawal: &Withdrawal<'_>,
     ) -> StreamResult<Created> {
@@ -212,7 +206,6 @@ impl Store for ServiceStore {
             stream_id: stream.id.clone(),
             retention: retention.map(proto_duration),
             withdraw_run: withdrawal.withdraw_run.to_string(),
-            auto_close: auto_close.map(proto_duration),
             owner: run.map(|run| run.producer).or(activity).cloned(),
             close_with_run: run.is_some_and(|run| run.close_with_run),
             r#ref: Some(stream.clone()),
@@ -294,11 +287,6 @@ impl Store for ServiceStore {
             offset: 0,
             already: false,
         })
-    }
-
-    // The server applies the auto close itself.
-    async fn auto_close(&self, _namespace: &str, _stream_id: &str) -> StreamResult<Option<i64>> {
-        Ok(None)
     }
 
     async fn read(

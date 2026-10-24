@@ -2199,7 +2199,7 @@ dependencies = [
 [[package]]
 name = "temporalio-client"
 version = "1.1.0"
-source = "git+https://github.com/moetemp/sdk-rust?rev=04312dfd0cb54f62e3df2f4379fae4b589f9f59f#04312dfd0cb54f62e3df2f4379fae4b589f9f59f"
+source = "git+https://github.com/moetemp/sdk-rust?rev=191c8b8b64e08b4f81d17d3204b893186295d023#191c8b8b64e08b4f81d17d3204b893186295d023"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -2232,7 +2232,7 @@ dependencies = [
 [[package]]
 name = "temporalio-common"
 version = "1.1.0"
-source = "git+https://github.com/moetemp/sdk-rust?rev=04312dfd0cb54f62e3df2f4379fae4b589f9f59f#04312dfd0cb54f62e3df2f4379fae4b589f9f59f"
+source = "git+https://github.com/moetemp/sdk-rust?rev=191c8b8b64e08b4f81d17d3204b893186295d023#191c8b8b64e08b4f81d17d3204b893186295d023"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -2263,7 +2263,7 @@ dependencies = [
 [[package]]
 name = "temporalio-common-wasm"
 version = "1.1.0"
-source = "git+https://github.com/moetemp/sdk-rust?rev=04312dfd0cb54f62e3df2f4379fae4b589f9f59f#04312dfd0cb54f62e3df2f4379fae4b589f9f59f"
+source = "git+https://github.com/moetemp/sdk-rust?rev=191c8b8b64e08b4f81d17d3204b893186295d023#191c8b8b64e08b4f81d17d3204b893186295d023"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -2289,7 +2289,7 @@ dependencies = [
 [[package]]
 name = "temporalio-protos"
 version = "0.10.0"
-source = "git+https://github.com/moetemp/sdk-rust?rev=04312dfd0cb54f62e3df2f4379fae4b589f9f59f#04312dfd0cb54f62e3df2f4379fae4b589f9f59f"
+source = "git+https://github.com/moetemp/sdk-rust?rev=191c8b8b64e08b4f81d17d3204b893186295d023#191c8b8b64e08b4f81d17d3204b893186295d023"
 dependencies = [
  "anyhow",
  "base64 0.23.1",

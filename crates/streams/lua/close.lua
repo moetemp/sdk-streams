@@ -18,7 +18,7 @@ refused = check_owner(meta, kind, chain)
 if refused then
   return refused
 end
-if auto_close(meta, log, now, tombstone) then
+if redis.call('HGET', meta, 'closed') then
   return {'already', redis.call('HGET', meta, 'close_id')}
 end
 if run ~= '' and redis.call('HGET', meta, 'wr|' .. run) then

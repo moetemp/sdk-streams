@@ -131,8 +131,7 @@ message StreamRecord {
     CloseStatus close_status = 9;
 }
 
-// Idempotent for one id, one Retention and one auto_close. ALREADY_EXISTS for another
-// Retention or another auto_close.
+// Idempotent for one id and one Retention. ALREADY_EXISTS for another Retention.
 message CreateStreamRequest {
     string namespace = 1;
     // Required from Workflow code.
@@ -141,11 +140,8 @@ message CreateStreamRequest {
     google.protobuf.Duration retention = 3;
     // Workflow only. A retry run's first create: the previous run, whose Records it withdraws.
     string withdraw_run = 4;
-    // Close the Stream with no result when no Record was appended for this long, counted from
-    // the create. Empty never closes on its own. It is separate from Retention and the safety
-    // TTL. The Store applies it on the next access, so no call sees the Stream open after the
-    // period. UNIMPLEMENTED (detail stream_unsupported) on a Store that can't.
-    google.protobuf.Duration auto_close = 5;
+    reserved 5;
+    reserved "auto_close";
     // The Workflow run that owns the Stream. Workflow kind, with its run_id and epoch.
     Producer owner = 6;
     // Close the Stream with the result or the failure of the owner's run chain when the chain
@@ -282,8 +278,8 @@ message DescribeStreamResponse {
     // Zero when the Stream has no Record.
     int64 last_offset = 2;
     google.protobuf.Duration retention = 3;
-    // The auto_close of the create. Empty when the Stream has none.
-    google.protobuf.Duration auto_close = 4;
+    reserved 4;
+    reserved "auto_close";
 }
 
 // The details of a failed Stream call, in the gRPC status details and in the details of the
