@@ -147,3 +147,5 @@
   auto close script and the `ac` and `la` meta fields. A create is idempotent for one Retention
   only. A read writes nothing, so a Reader needs read access only. The scripts ignore `ac` and
   `la` on a Stream that an older crate created.
+- The crate pins `temporalio-common` at sdk-rust Brook c8 `320e725f`, which reverts the cache-off
+  eviction reason. The crate uses nothing that the revert touches.

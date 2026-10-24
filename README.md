@@ -17,7 +17,8 @@ The crate depends on `temporalio-common` from one sdk-rust commit. That commit m
 |---|---|---|
 | Brook v3 | `moe/brook/v3/s1-protos-and-ids` and up | `moe/brook/v3/c4-local-activity-workflow-task` `3a9203ac` |
 | Brook v4 | `moe/brook/v4/s20-orphan-local-activities` to `s21` | `moe/brook/v4/c6-local-activity-task-history` `32ba79d6` |
-| Brook v4 | `moe/brook/v4/s22-client-objects` and up | `moe/brook/v4/c7-no-worker-extension` `b565c433` |
+| Brook v4 | `moe/brook/v4/s22-client-objects` | `moe/brook/v4/c7-no-worker-extension` `b565c433` |
+| Brook v5 | `moe/brook/v5/s23-no-auto-close` and up | `moe/brook/v5/c8-no-eviction-reason` `320e725f` |
 
 ## Linking from a lang bridge
 
