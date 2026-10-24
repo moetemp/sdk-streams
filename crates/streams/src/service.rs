@@ -131,12 +131,6 @@ impl StreamService {
                 id: request.stream_id.clone(),
                 ..Default::default()
             });
-        let auto_close = duration(request.auto_close);
-        if auto_close.is_some() {
-            self.store
-                .capabilities()
-                .require(Capabilities::AUTO_CLOSE)?;
-        }
         // A Workflow's call that runs outside Workflow code, such as a Local Activity, names the
         // owning run, so the Stream keeps the safety TTL of a Workflow-owned one.
         let owner = match &request.owner {
@@ -169,7 +163,6 @@ impl StreamService {
                 &request.namespace,
                 &stream,
                 duration(request.retention),
-                auto_close,
                 owner,
                 &withdrawal,
             )
@@ -185,8 +178,8 @@ impl StreamService {
                 return Err(StreamError::new(
                     Reason::AlreadyExists,
                     format!(
-                        "The Stream exists with the Retention {:?} and the auto close {:?}",
-                        created.retention, created.auto_close
+                        "The Stream exists with the Retention {:?}",
+                        created.retention
                     ),
                 ));
             }
@@ -285,7 +278,7 @@ impl StreamService {
         request: DescribeStreamRequest,
     ) -> StreamResult<DescribeStreamResponse> {
         let id = stream_id(request.stream.as_ref())?;
-        let state = self.state(&request.namespace, id).await?;
+        let (state, _) = self.store.read(&request.namespace, id, 0, 0).await?;
         if !state.exists {
             return Err(StreamError::new(
                 Reason::NotFound,
@@ -303,35 +296,7 @@ impl StreamService {
             status: status as i32,
             last_offset: state.newest,
             retention: Some(proto_duration(state.retention)),
-            auto_close: state.auto_close.map(proto_duration),
         })
-    }
-
-    /// The state of a Stream, after its auto close if that is due. The read step writes
-    /// nothing, so a due auto close takes one more step that writes.
-    async fn state(&self, namespace: &str, id: &str) -> StreamResult<StreamState> {
-        let (state, _) = self.store.read(namespace, id, 0, 0).await?;
-        self.after_auto_close(namespace, id, state).await
-    }
-
-    async fn after_auto_close(
-        &self,
-        namespace: &str,
-        id: &str,
-        state: StreamState,
-    ) -> StreamResult<StreamState> {
-        if !state.auto_close_due() {
-            return Ok(state);
-        }
-        match self.store.auto_close(namespace, id).await {
-            // The read may come from a replica that is behind, so the Stream can expire
-            // between the two steps. The read then reports the expiry itself.
-            Err(error) if error.reason == Reason::Expired => {}
-            result => {
-                result?;
-            }
-        }
-        Ok(self.store.read(namespace, id, 0, 0).await?.0)
     }
 
     /// A long poll. It ends with the Records it found, a close Record, or nothing after `wait`.
@@ -373,8 +338,7 @@ impl StreamService {
             .min(MAX_WAIT);
         let deadline = started + wait;
 
-        let state = self.created(namespace, &id, started + create_wait).await?;
-        let mut state = self.after_auto_close(namespace, &id, state).await?;
+        let mut state = self.created(namespace, &id, started + create_wait).await?;
         if state.version > FORMAT_VERSION {
             return Err(StreamError::new(
                 Reason::FormatTooNew,
@@ -410,25 +374,18 @@ impl StreamService {
                 return Ok(page);
             }
             cursor = scanned;
-            let now = Instant::now();
-            if deadline <= now {
+            if deadline <= Instant::now() {
                 return Ok(ReadRecordsResponse {
                     next_offset: cursor,
                     ..Default::default()
                 });
             }
-            // The wait ends when the auto close comes due, so the read gives its close Record.
-            let until = state.auto_close_at_ms().map_or(deadline, |at| {
-                // At least a short pause, so a Store that keeps it open can't spin the loop.
-                let left = Duration::from_millis((at - state.now_ms).max(20) as u64);
-                deadline.min(now + left)
-            });
             let after = (cursor - 1).max(state.newest);
             self.metrics.read_waits(true);
-            let woke = self.store.wait_after(namespace, &id, after, until).await;
+            let woke = self.store.wait_after(namespace, &id, after, deadline).await;
             self.metrics.read_waits(false);
             woke?;
-            state = self.state(namespace, &id).await?;
+            state = self.store.read(namespace, &id, 0, 0).await?.0;
         }
     }
 
@@ -449,7 +406,6 @@ impl StreamService {
         let state = self
             .created(namespace, &id, Instant::now() + create_wait)
             .await?;
-        let state = self.after_auto_close(namespace, &id, state).await?;
         if state.version > FORMAT_VERSION {
             return Err(StreamError::new(
                 Reason::FormatTooNew,

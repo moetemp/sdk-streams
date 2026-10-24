@@ -439,12 +439,11 @@ impl Store for LosesFirstAnswer {
         namespace: &str,
         stream: &StreamRef,
         retention: Option<Duration>,
-        auto_close: Option<Duration>,
         owner: Owner,
         withdrawal: &Withdrawal<'_>,
     ) -> StreamResult<Created> {
         self.inner
-            .create(namespace, stream, retention, auto_close, owner, withdrawal)
+            .create(namespace, stream, retention, owner, withdrawal)
             .await
     }
 

@@ -133,7 +133,6 @@ impl RedisStore {
         namespace: &str,
         stream: &StreamRef,
         retention: Option<Duration>,
-        auto_close: Option<Duration>,
         owner: Owner,
         withdrawal: &Withdrawal<'_>,
     ) -> StreamResult<Created> {
@@ -152,18 +151,11 @@ impl RedisStore {
             .arg(millis(TOMBSTONE))
             .arg(encode_run(withdrawal.withdraw_run))
             .arg(withdrawal.supersession)
-            .arg(
-                auto_close
-                    .filter(|period| !period.is_zero())
-                    // Stored in ms, so a period below 1 ms rounds up and never stores as no wait.
-                    .map(|period| millis(period).max(1).to_string())
-                    .unwrap_or_default(),
-            )
             .arg(encode_run(&stream.workflow_id))
             .invoke_async(&mut self.shared.clone())
             .await
             .mapped()?;
-        let [outcome, stored, flag, period] = strings::<4>(reply, "create")?;
+        let [outcome, stored, flag] = strings::<3>(reply, "create")?;
         let outcome = match outcome.as_str() {
             "created" => CreateOutcome::Created,
             "exists" => CreateOutcome::Exists,
@@ -173,38 +165,11 @@ impl RedisStore {
             other => return Err(bad_reply("create", other)),
         };
         let stored: u64 = stored.parse().map_err(|_| bad_reply("create", &stored))?;
-        let auto_close = match period.as_str() {
-            "" => None,
-            period => Some(Duration::from_millis(
-                period.parse().map_err(|_| bad_reply("create", period))?,
-            )),
-        };
         Ok(Created {
             outcome,
             retention: Duration::from_millis(stored),
             flagged: flag == "1",
-            auto_close,
         })
-    }
-
-    /// Closes the Stream if its auto close is due. Answers the offset of the close Record if
-    /// the Stream is closed.
-    pub async fn auto_close(&self, namespace: &str, stream_id: &str) -> StreamResult<Option<i64>> {
-        let keys = self.keys(namespace, stream_id);
-        let reply: Value = scripts::AUTO_CLOSE_SCRIPT
-            .key(keys.meta())
-            .key(keys.log())
-            .arg(FORMAT_VERSION)
-            .arg(millis(TOMBSTONE))
-            .invoke_async(&mut self.shared.clone())
-            .await
-            .mapped()?;
-        let [outcome, id] = strings::<2>(reply, "auto close")?;
-        match outcome.as_str() {
-            "closed" => Ok(Some(offset_of_entry_id(&id)?)),
-            "open" => Ok(None),
-            other => Err(bad_reply("auto close", other)),
-        }
     }
 
     /// Appends one batch.
@@ -394,14 +359,10 @@ impl Store for RedisStore {
         namespace: &str,
         stream: &StreamRef,
         retention: Option<Duration>,
-        auto_close: Option<Duration>,
         owner: Owner,
         withdrawal: &Withdrawal<'_>,
     ) -> StreamResult<Created> {
-        RedisStore::create(
-            self, namespace, stream, retention, auto_close, owner, withdrawal,
-        )
-        .await
+        RedisStore::create(self, namespace, stream, retention, owner, withdrawal).await
     }
 
     async fn append(
@@ -441,10 +402,6 @@ impl Store for RedisStore {
         deadline: Instant,
     ) -> StreamResult<bool> {
         RedisStore::wait_after(self, namespace, stream_id, after, deadline).await
-    }
-
-    async fn auto_close(&self, namespace: &str, stream_id: &str) -> StreamResult<Option<i64>> {
-        RedisStore::auto_close(self, namespace, stream_id).await
     }
 
     async fn read_back(
@@ -563,8 +520,6 @@ fn read_reply(reply: Value) -> StreamResult<(StreamState, Vec<Entry>)> {
         retention: Duration::from_millis(number(5).max(0) as u64),
         expires_ms: number(6),
         now_ms: seconds * 1000 + micros / 1000,
-        auto_close: field(7).map(|_| Duration::from_millis(number(7).max(0) as u64)),
-        last_append_ms: number(8),
     };
     let Value::Array(entries) = entries else {
         return Err(bad_reply("read", entries));
