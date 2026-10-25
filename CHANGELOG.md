@@ -166,3 +166,5 @@
 - `AppendRecords` takes `withdraw_run` only from a Local Activity of another run than the one it
   names, as `CreateStream` takes it only with an owner. A client or an Activity that names a run
   fails with `stream_invalid`, instead of withdrawing and fencing that run.
+- A close of a Workflow-owned Stream whose ref has no `workflow_id` fails with `stream_not_owner`
+  when the Stream keeps its run chain. It skipped the chain check before.

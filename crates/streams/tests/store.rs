@@ -541,7 +541,8 @@ fn workflow(run: &str) -> Producer {
 }
 
 /// Only the owner closes a Stream: the close Activity of its run chain for a Workflow-owned one,
-/// a client for a client's. A Local Activity of the chain can't close it.
+/// a client for a client's. A Local Activity of the chain can't close it, and a ref with no
+/// chain can't either.
 #[tokio::test]
 async fn only_the_owner_closes_a_stream() {
     for target in stores_for(Needs::UNCHECKED.and(Needs::STORE_ANSWERS)).await {
@@ -575,6 +576,7 @@ async fn only_the_owner_closes_a_stream() {
             (owned("agent"), activity("r1", 1, 10)),
             (owned("agent"), la.clone()),
             (owned("another-agent"), workflow("r1")),
+            (owned(""), workflow("r1")),
         ] {
             let refused = target.close_at(&stream, &producer).await.unwrap_err();
             assert_eq!(refused.reason, Reason::NotOwner);

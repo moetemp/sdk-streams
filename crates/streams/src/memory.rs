@@ -159,10 +159,7 @@ impl Keys {
                     "only the close Activity of the owner run chain closes a Workflow-owned Stream",
                 ));
             }
-            if self
-                .get("oc")
-                .is_some_and(|owner| !chain.is_empty() && chain != owner)
-            {
+            if self.get("oc").is_some_and(|owner| chain != owner) {
                 return Err(refuse(
                     Reason::NotOwner,
                     "the ref names another run chain than the owner",

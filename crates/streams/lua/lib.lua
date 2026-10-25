@@ -31,8 +31,9 @@ end
 -- Nil when the Producer kind may close the Stream, or the refusal. A Workflow-owned Stream closes
 -- only from the close Activity of its run chain, as the run's Workflow Producer (1). A Local
 -- Activity (2) writes before its task commits, so its close could outlive a failed task. A ref
--- that names another chain is refused. Any other Stream closes only from a client (4). Redis
--- can't tie a run to its chain, so a run of another chain that holds this chain's ref passes.
+-- that names another chain, or none, is refused. Any other Stream closes only from a client (4).
+-- Redis can't tie a run to its chain, so a run of another chain that holds this chain's ref
+-- passes.
 local function check_owner(meta, kind, chain)
   if redis.call('HGET', meta, 'own') == 'wf' then
     if kind ~= '1' then
@@ -40,7 +41,7 @@ local function check_owner(meta, kind, chain)
         'Workflow-owned Stream')
     end
     local owner_chain = redis.call('HGET', meta, 'oc')
-    if owner_chain and chain ~= '' and chain ~= owner_chain then
+    if owner_chain and chain ~= owner_chain then
       return refuse('NOT_OWNER', 'the ref names another run chain than the owner')
     end
   elseif kind ~= '4' then
