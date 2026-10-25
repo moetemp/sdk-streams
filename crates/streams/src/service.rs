@@ -214,6 +214,15 @@ impl StreamService {
             .capabilities()
             .require(Capabilities::PRODUCER_FENCE.union(Capabilities::WITHDRAWAL))?;
         if !request.withdraw_run.is_empty() {
+            // Only a retry run's Local Activity withdraws its previous run, as only the owner's
+            // create does. Any other Producer could withdraw and fence a run it doesn't follow.
+            if producer.kind != ProducerKind::LocalActivity as i32
+                || request.withdraw_run == producer.run_id
+            {
+                return Err(StreamError::invalid(
+                    "Only a Local Activity of a later run withdraws a run",
+                ));
+            }
             self.store.capabilities().require(Capabilities::RUN_FENCE)?;
         }
         let digest = batch_digest(&request.records);

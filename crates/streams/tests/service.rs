@@ -908,6 +908,45 @@ async fn a_retry_run_s_local_activity_calls_withdraw_the_previous_run() {
     }
 }
 
+/// Only a Local Activity of a later run withdraws a run on append. A client, an Activity or the
+/// run's own Local Activity that names a run fails with `stream_invalid` and withdraws nothing.
+#[tokio::test]
+async fn only_a_later_run_s_local_activity_withdraws_a_run_on_append() {
+    for case in cases_for(Needs::UNCHECKED).await {
+        let run = format!("{}-run", case.stream);
+        case.create(None).await.unwrap();
+        let _: AppendRecordsResponse = call(
+            &case.ext,
+            "AppendRecords",
+            local_activity_write(&case, &run, "call-1", 3, 2, "workflow output"),
+        )
+        .await
+        .unwrap();
+        for producer in [client(1), activity(1, 10), local_activity(&run)] {
+            let error = call::<_, AppendRecordsResponse>(
+                &case.ext,
+                "AppendRecords",
+                AppendRecordsRequest {
+                    namespace: case.namespace.clone(),
+                    stream: case.stream(),
+                    producer: Some(producer),
+                    sequence: 1,
+                    records: vec![record("", "other")],
+                    withdraw_run: run.clone(),
+                    ..Default::default()
+                },
+            )
+            .await
+            .unwrap_err();
+            assert_eq!(reason(&error), "stream_invalid");
+        }
+        let read = case.read(ReadRecordsRequest::default()).await.unwrap();
+        assert_eq!(texts(&read), ["workflow output"]);
+        let next = local_activity_write(&case, &run, "call-2", 4, 3, "next");
+        let _: AppendRecordsResponse = call(&case.ext, "AppendRecords", next).await.unwrap();
+    }
+}
+
 /// The user Local Activity `call-1` of `run`, dispatched by the Workflow Task `[started]`. A
 /// rerun in a later task keeps the Producer id and gets newer task facts (field 20).
 fn user_local_activity(run: &str, started: i64, seconds: i64) -> Producer {

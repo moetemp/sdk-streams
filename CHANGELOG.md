@@ -163,3 +163,6 @@
 - A batch `sequence` is from 1 to 2^53 - 1, and the append script keeps it in the dedupe entry
   as sent. A sequence of 1e14 or more lost its dedupe entry on Redis before, so a resend went in
   twice. A higher one fails with `stream_invalid`.
+- `AppendRecords` takes `withdraw_run` only from a Local Activity of another run than the one it
+  names, as `CreateStream` takes it only with an owner. A client or an Activity that names a run
+  fails with `stream_invalid`, instead of withdrawing and fencing that run.
