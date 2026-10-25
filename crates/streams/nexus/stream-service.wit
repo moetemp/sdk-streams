@@ -172,7 +172,7 @@ interface stream-service {
   /// @nexus.doc "Create a Stream idempotently. ALREADY_EXISTS for another Retention."
   /// @nexus.proto "temporal.api.streamservice.v1.CreateStreamRequest"
   record create-stream-request {
-    /// @nexus.doc "Required from Workflow code. Empty elsewhere asks the service for an id."
+    /// @nexus.doc "Required on Redis and memory. On native, empty asks the server for an id."
     stream-id: string,
     /// @nexus.doc "The age after which a Record is dropped. Empty is the Store default."
     retention: option<duration>,
