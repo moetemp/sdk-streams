@@ -273,8 +273,7 @@ async fn every_store_and_wrapper_says_what_it_can_do() {
         Duration::from_secs(3600),
         Duration::from_secs(7200),
     ));
-    let without_run_fence = Capabilities::ALL.without(Capabilities::RUN_FENCE);
-    assert_eq!(memory.capabilities(), without_run_fence);
+    assert_eq!(memory.capabilities(), Capabilities::ALL);
     // A wrapper forwards the capabilities of its Store, less the masked ones.
     let wrapper = Masked {
         inner: memory.clone(),
@@ -287,5 +286,5 @@ async fn every_store_and_wrapper_says_what_it_can_do() {
     let redis = RedisStore::connect(RedisStoreOptions::new(url))
         .await
         .unwrap();
-    assert_eq!(Store::capabilities(&redis), without_run_fence);
+    assert_eq!(Store::capabilities(&redis), Capabilities::ALL);
 }

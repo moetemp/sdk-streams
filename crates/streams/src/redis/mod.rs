@@ -11,10 +11,10 @@ pub use crate::store::{
 };
 use crate::{
     StreamError, StreamResult,
-    epoch::epoch_key,
+    epoch::{epoch_key, task_key, task_of},
     ids::{StreamKeys, encode_part},
     offset::{entry_id_of_offset, offset_of_entry_id},
-    proto::{Producer, StreamRef},
+    proto::{Producer, StreamProducerKind, StreamRef},
     store::{Capabilities, Store, owner_chain},
 };
 use conn::{BlockingPool, Shared};
@@ -125,15 +125,15 @@ impl RedisStore {
         StreamKeys::new(&self.prefix, namespace, stream_id)
     }
 
-    /// Creates a Stream, or finds it. A Workflow-owned Stream stores the run chain of its ref, for
-    /// the owner check of a close.
+    /// Creates a Stream, or finds it. A retry run's create withdraws its previous run. A
+    /// Workflow-owned Stream stores the run chain of its ref, for the owner check of a close.
     pub async fn create(
         &self,
         namespace: &str,
         stream: &StreamRef,
         retention: Option<Duration>,
         owner: Owner,
-        _withdrawal: &Withdrawal<'_>,
+        withdrawal: &Withdrawal<'_>,
     ) -> StreamResult<Created> {
         let keys = self.keys(namespace, &stream.id);
         let retention = retention.filter(|r| !r.is_zero()).unwrap_or(self.retention);
@@ -148,11 +148,13 @@ impl RedisStore {
             })
             .arg(millis(self.safety_ttl))
             .arg(millis(TOMBSTONE))
+            .arg(encode_run(withdrawal.withdraw_run))
+            .arg(withdrawal.supersession)
             .arg(encode_run(owner_chain(stream)))
             .invoke_async(&mut self.shared.clone())
             .await
             .mapped()?;
-        let [outcome, stored] = strings::<2>(reply, "create")?;
+        let [outcome, stored, flag] = strings::<3>(reply, "create")?;
         let outcome = match outcome.as_str() {
             "created" => CreateOutcome::Created,
             "exists" => CreateOutcome::Exists,
@@ -165,7 +167,7 @@ impl RedisStore {
         Ok(Created {
             outcome,
             retention: Duration::from_millis(stored),
-            flagged: false,
+            flagged: flag == "1",
         })
     }
 
@@ -187,11 +189,17 @@ impl RedisStore {
             .arg(FORMAT_VERSION)
             .arg(producer.kind)
             .arg(&producer.id)
+            .arg(encode_run(&producer.run_id))
             .arg(epoch_key(&epoch))
             .arg(batch.sequence)
+            .arg(encode_run(withdrawal.withdraw_run))
             .arg(withdrawal.supersession)
             .arg(millis(self.safety_ttl))
             .arg(millis(TOMBSTONE))
+            .arg(local_activity_task(producer))
+            .arg(completed_arg(withdrawal))
+            .arg(failed_list(withdrawal))
+            .arg(withdrawal.tasks.map_or(&[][..], |tasks| tasks.supersession))
             .arg(batch.digest);
         for record in batch.records {
             invocation.arg(record.as_slice());
@@ -229,6 +237,7 @@ impl RedisStore {
             .arg(FORMAT_VERSION)
             .arg(producer.kind)
             .arg(&producer.id)
+            .arg(encode_run(&producer.run_id))
             .arg(epoch_key(&epoch))
             .arg(millis(TOMBSTONE))
             .arg(record)
@@ -335,9 +344,9 @@ impl RedisStore {
 
 #[async_trait::async_trait]
 impl Store for RedisStore {
-    // Every rule but the run fence is in the Lua scripts.
+    // Every rule is in the Lua scripts.
     fn capabilities(&self) -> Capabilities {
-        Capabilities::ALL.without(Capabilities::RUN_FENCE)
+        Capabilities::ALL
     }
 
     fn default_retention(&self) -> Duration {
@@ -411,6 +420,31 @@ fn encode_run(run_id: &str) -> String {
     } else {
         encode_part(run_id)
     }
+}
+
+/// The task key of a Local Activity's dispatching Workflow Task, empty for any other kind.
+fn local_activity_task(producer: &Producer) -> String {
+    if producer.kind != StreamProducerKind::LocalActivity as i32 {
+        return String::new();
+    }
+    task_key(&task_of(&producer.epoch.unwrap_or_default()))
+}
+
+/// The run's last completed task key, `-` when the batch gives no task facts.
+fn completed_arg(withdrawal: &Withdrawal<'_>) -> String {
+    match &withdrawal.tasks {
+        None => "-".to_string(),
+        Some(tasks) => tasks.completed.map(task_key).unwrap_or_default(),
+    }
+}
+
+fn failed_list(withdrawal: &Withdrawal<'_>) -> String {
+    let failed = withdrawal.tasks.map_or(&[][..], |tasks| tasks.failed_tasks);
+    failed
+        .iter()
+        .map(i64::to_string)
+        .collect::<Vec<_>>()
+        .join(" ")
 }
 
 fn bad_reply(call: &str, reply: impl std::fmt::Debug) -> StreamError {

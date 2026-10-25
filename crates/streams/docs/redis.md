@@ -28,8 +28,12 @@ slot. `CreateStream` writes `:meta`, and the first append creates `:log`.
 | `e\|<kind>\|<producer id>` | The newest epoch key of the Producer, the fence |
 | `d\|<kind>\|<producer id>` | `<epoch key>\|<sequence>\|<first id>\|<last id>\|<digest>`, last batch |
 | `h\|<kind>\|<producer id>` | The newest epoch key that still has Records here |
+| `oa\|<run>` | The run's Local Activity task keys here that may not have completed |
+| `ow\|<run>` | The task keys of the run whose Local Activity Records an orphan item withdrew |
+| `run\|<run>` | Set when a Producer of the run wrote a Record here |
+| `wr\|<run>` | Set when a Workflow retry withdrew the run |
 
-`<kind>` is the `ProducerKind` number. The digest is the
+`<kind>` is the `ProducerKind` number, and `<run>` is the percent-encoded run id. The digest is the
 batch's content digest (`testdata/digests.json`). A `sequence` is from 1 to 2^53 - 1, which a script
 compares exactly, and the entry stores its digits as sent. A resend with the last `sequence` and the
 same digest gets the stored ids. Another digest is refused with `seq_divergent`. An epoch key is
@@ -52,6 +56,19 @@ millisecond.
 The first batch of a Producer's newer epoch withdraws its earlier epochs' Records, for a Workflow, a
 Local Activity and an Activity. A client's newer epoch only fences. It writes no `s`, since a
 restarted client's earlier Records are real messages, not a failed attempt's.
+
+## Orphaned Local Activity Records
+
+A Local Activity batch can send its run's last completed Workflow Task (`previous_completed_task`, 0
+before the first) and failed tasks. Its epoch names its dispatching task. Before it writes, the
+append script withdraws the Records of the run's Local Activity tasks in `oa` that never completed.
+These are the tasks after the completed task and before the batch's own task, the failed tasks and
+the lower attempts. The script writes one entry with only `s`, a Workflow-kind `Supersession` with
+the run's Workflow Producer, the batch's task, and the completed and failed tasks. So a Reader
+withdraws them with the Workflow rule. Then the script drops the tasks at or before the completed
+one from `oa` and adds the batch's own task. It stores the withdrawn tasks in `ow`, which fences a
+late write of such a task. A batch with no `previous_completed_task` skips the rule. A Stream that
+the run never writes again keeps its orphans.
 
 ## Close
 
@@ -86,6 +103,12 @@ ignores a refused `CONFIG`. `tests/acl.rs` runs each role with exactly these com
 
 ## Known limits
 
+- A Local Activity call of a failed Workflow Task is withdrawn only when the retry task runs that
+  call again, or when a later Local Activity write names the failed task. A call that no later
+  write covers, for example because a Signal changed the path and no Local Activity writes
+  again, keeps its Records. The memory Store has the same limit.
+- Core sends only the last 100 failed Workflow Tasks of a run. An older failed task before the last
+  completed one keeps its Local Activity Records.
 - A read or a describe served by a replica that is behind can report a Stream open just after
   its close.
 - Redis can't tie a run to its run chain. A run of another chain that holds the owner's ref, such

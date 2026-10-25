@@ -323,6 +323,40 @@ async fn an_empty_batch_of_a_retry_withdraws_the_earlier_attempt() {
     }
 }
 
+/// A retry run's first write withdraws the previous run and fences its Producers.
+#[tokio::test]
+async fn a_retry_run_withdraws_and_fences_the_previous_run() {
+    for target in stores_for(Needs::UNCHECKED).await {
+        target.create(Owner::Workflow).await;
+        let (r1, r2) = (Run::new("r1"), Run::new("r2"));
+        target
+            .batch(&r1.local_activity("k", 3, 1, 1), 1, &["A"])
+            .await
+            .unwrap();
+        append(&target, &activity("r1", 1, 10), 1, &["A'"])
+            .await
+            .unwrap();
+        let b = target
+            .batch_retry(&r2.local_activity("k", 3, 1, 1), "r1", &["B"])
+            .await
+            .unwrap();
+        assert!(b.flagged);
+        assert_eq!(target.visible().await, ["B"]);
+        let late = append(&target, &activity("r1", 1, 10), 2, &["A''"]).await;
+        assert_eq!(late.unwrap_err().reason, Reason::Fenced);
+        let late = target
+            .batch(&r1.local_activity("j", 6, 1, 1), 1, &["A3"])
+            .await;
+        assert_eq!(late.unwrap_err().reason, Reason::Fenced);
+        // A second withdrawal of the same run withdraws nothing more.
+        let again = target
+            .batch_retry(&r2.local_activity("j", 6, 1, 1), "r1", &["B2"])
+            .await
+            .unwrap();
+        assert!(!again.flagged);
+    }
+}
+
 /// An open Workflow Stream keeps the safety TTL, and its close gives it the Retention.
 #[tokio::test]
 async fn the_ttl_follows_the_owner_and_the_close() {
@@ -616,6 +650,7 @@ async fn every_store_keeps_the_meta_fields_of_the_shared_vectors() {
             fence,
             fields::dedupe(kind, &producer.id),
             fields::holds(kind, &producer.id),
+            vectors["run_wrote"].as_str().unwrap().to_string(),
             fields::VERSION.to_string(),
         ] {
             assert!(target.meta(&field).await.is_some(), "{field}");

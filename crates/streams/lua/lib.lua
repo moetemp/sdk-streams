@@ -88,6 +88,75 @@ local function trim(meta, log, now)
   end
 end
 
+local function words(text)
+  local list = {}
+  if text then
+    for word in string.gmatch(text, '%S+') do
+      table.insert(list, word)
+    end
+  end
+  return list
+end
+
+local function contains(list, value)
+  for _, item in ipairs(list) do
+    if item == value then
+      return true
+    end
+  end
+  return false
+end
+
+local function started(task_key)
+  return tonumber(string.sub(task_key, 1, 16), 16)
+end
+
+-- Whether a task key at c's started id is a lower attempt than c. Lang sends c with attempt 0 when
+-- it knows only c's started id. Then the started time decides, since the attempts of one task start
+-- in time order.
+local function below_completed(key, c)
+  if string.sub(c, 18, 25) == '00000000' then
+    return string.sub(key, 27) < string.sub(c, 27)
+  end
+  return key < c
+end
+
+-- The orphan rule over the open Local Activity tasks of a run, for a write in task t with the run's
+-- last completed task c and its failed tasks. A task strictly between c and t, a failed one, or a
+-- lower attempt of t or c never completed, so the rule withdraws it. The list drops the other tasks
+-- at or before c, since they completed. Returns the withdrawn and the open tasks.
+local function orphan_tasks(open, t, c, failed)
+  local failed_set = {}
+  for _, id in ipairs(words(failed)) do
+    failed_set[tonumber(id)] = true
+  end
+  local ts = started(t)
+  local cs = 0
+  if c ~= '' then
+    cs = started(c)
+  end
+  local withdrawn, kept = {}, {}
+  for _, key in ipairs(open) do
+    local s = started(key)
+    if failed_set[s] or (cs < s and s < ts) or (s == ts and key < t)
+        or (c ~= '' and s == cs and below_completed(key, c)) then
+      table.insert(withdrawn, key)
+    elseif c == '' or key > c then
+      table.insert(kept, key)
+    end
+  end
+  return withdrawn, kept
+end
+
+-- Withdraws a retry run's previous run from the Stream. Returns true when that run wrote here.
+local function withdraw_run(meta, run)
+  if run == '' or redis.call('HGET', meta, 'wr|' .. run) then
+    return false
+  end
+  redis.call('HSET', meta, 'wr|' .. run, '1')
+  return redis.call('HGET', meta, 'run|' .. run) ~= false
+end
+
 -- The id of the script's next entry. A script numbers its entries itself, in one millisecond,
 -- since `XADD *` on Redis 7.0 can cross a millisecond inside one script.
 local next_ms, next_seq = 0, 0

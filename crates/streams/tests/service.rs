@@ -805,12 +805,142 @@ async fn a_create_answer_names_the_backend_and_the_store_never_reads_it() {
     }
 }
 
+/// The Local Activity Producer of a Workflow call in run `run`.
+fn local_activity(run: &str) -> Producer {
+    Producer {
+        kind: StreamProducerKind::LocalActivity as i32,
+        id: temporalio_streams::ids::local_activity_producer_id(run, "call-1"),
+        epoch: Some(ProducerEpoch {
+            task_started_event_id: 3,
+            task_attempt: 1,
+            task_started_time: Some(Timestamp {
+                seconds: 100,
+                nanos: 0,
+            }),
+            attempt: 1,
+            ..Default::default()
+        }),
+        run_id: run.to_string(),
+    }
+}
+
 fn workflow_owner(run: &str) -> Producer {
     Producer {
         kind: StreamProducerKind::Workflow as i32,
         id: temporalio_streams::ids::workflow_producer_id(run),
         run_id: run.to_string(),
         ..Default::default()
+    }
+}
+
+/// A retry run's Local Activity calls withdraw the previous run.
+#[tokio::test]
+async fn a_retry_run_s_local_activity_calls_withdraw_the_previous_run() {
+    for case in cases_for(Needs::UNCHECKED).await {
+        let (previous, retry) = (format!("{}-r1", case.stream), format!("{}-r2", case.stream));
+        let create = |run: &str, withdraw_run: &str| CreateStreamRequest {
+            namespace: case.namespace.clone(),
+            stream_id: case.stream.clone(),
+            withdraw_run: withdraw_run.to_string(),
+            owner: Some(workflow_owner(run)),
+            ..Default::default()
+        };
+        let append = |run: &str, withdraw_run: &str, text: &str| AppendRecordsRequest {
+            namespace: case.namespace.clone(),
+            stream: case.stream(),
+            producer: Some(local_activity(run)),
+            sequence: 1,
+            records: vec![record("", text)],
+            withdraw_run: withdraw_run.to_string(),
+            ..Default::default()
+        };
+        let _: CreateStreamResponse = call(&case.ext, "CreateStream", create(&previous, ""))
+            .await
+            .unwrap();
+        let _: AppendRecordsResponse =
+            call(&case.ext, "AppendRecords", append(&previous, "", "old"))
+                .await
+                .unwrap();
+        // The retry run's first create withdraws the previous run.
+        let _: CreateStreamResponse = call(&case.ext, "CreateStream", create(&retry, &previous))
+            .await
+            .unwrap();
+        let first: AppendRecordsResponse =
+            call(&case.ext, "AppendRecords", append(&retry, &previous, "new"))
+                .await
+                .unwrap();
+        // A retried Local Activity sends the same batch and gets its first answer.
+        let again: AppendRecordsResponse =
+            call(&case.ext, "AppendRecords", append(&retry, &previous, "new"))
+                .await
+                .unwrap();
+        assert_eq!(
+            (again.first_offset, again.last_offset),
+            (first.first_offset, first.last_offset)
+        );
+        assert!(first.last_offset > 0);
+        let read = case.read(ReadRecordsRequest::default()).await.unwrap();
+        assert_eq!(texts(&read), ["old", "<superseded>", "new"]);
+        let superseded = read.records[1].supersession.as_ref().unwrap();
+        assert_eq!(superseded.withdraw_run, previous);
+        // The item names its Producer, which the WIT requires.
+        assert_eq!(
+            superseded.producer_id,
+            temporalio_streams::ids::workflow_producer_id(&retry)
+        );
+        assert_eq!(superseded.run_id, retry);
+        let error = call::<_, CreateStreamResponse>(
+            &case.ext,
+            "CreateStream",
+            CreateStreamRequest {
+                owner: None,
+                ..create(&retry, &previous)
+            },
+        )
+        .await
+        .unwrap_err();
+        assert_eq!(reason(&error), "stream_invalid");
+        assert!(withdraws(superseded, &read.records[0]));
+        assert!(!withdraws(superseded, &read.records[2]));
+    }
+}
+
+/// Only a Local Activity of a later run withdraws a run on append. A client, an Activity or the
+/// run's own Local Activity that names a run fails with `stream_invalid` and withdraws nothing.
+#[tokio::test]
+async fn only_a_later_run_s_local_activity_withdraws_a_run_on_append() {
+    for case in cases_for(Needs::UNCHECKED).await {
+        let run = format!("{}-run", case.stream);
+        case.create(None).await.unwrap();
+        let _: AppendRecordsResponse = call(
+            &case.ext,
+            "AppendRecords",
+            local_activity_write(&case, &run, "call-1", 3, 2, "workflow output"),
+        )
+        .await
+        .unwrap();
+        for producer in [client(1), activity(1, 10), local_activity(&run)] {
+            let error = call::<_, AppendRecordsResponse>(
+                &case.ext,
+                "AppendRecords",
+                AppendRecordsRequest {
+                    namespace: case.namespace.clone(),
+                    stream: case.stream(),
+                    producer: Some(producer),
+                    sequence: 1,
+                    records: vec![record("", "other")],
+                    withdraw_run: run.clone(),
+                    ..Default::default()
+                },
+            )
+            .await
+            .unwrap_err();
+            assert_eq!(reason(&error), "stream_invalid");
+        }
+        let read = case.read(ReadRecordsRequest::default()).await.unwrap();
+        assert_eq!(texts(&read), ["workflow output"]);
+        let next = local_activity_write(&case, &run, "call-2", 4, 3, "next");
+        let _: AppendRecordsResponse = call(&case.ext, "AppendRecords", next).await.unwrap();
     }
 }
 
@@ -888,6 +1018,183 @@ async fn a_rerun_local_activity_supersedes_its_first_attempt() {
         // second attempt. After it applies the item, only the second attempt is visible.
         let read = case.read(ReadRecordsRequest::default()).await.unwrap();
         assert_eq!(texts(&read), ["first", "<superseded>", "second"]);
+        let superseded = read.records[1].supersession.as_ref().unwrap();
+        assert!(withdraws(superseded, &read.records[0]));
+        assert!(!withdraws(superseded, &read.records[2]));
+    }
+}
+
+/// A write of the Local Activity `call` of `run`, dispatched by task `[started]`, with the run's
+/// last completed task `[completed]`, or 0 before the first.
+fn local_activity_write(
+    case: &Case,
+    run: &str,
+    call: &str,
+    started: i64,
+    completed: i64,
+    text: &str,
+) -> AppendRecordsRequest {
+    let mut producer = user_local_activity(run, started, 100 + started);
+    producer.id = temporalio_streams::ids::local_activity_producer_id(run, call);
+    AppendRecordsRequest {
+        namespace: case.namespace.clone(),
+        stream: case.stream(),
+        producer: Some(producer),
+        sequence: 1,
+        records: vec![record("", text)],
+        previous_completed_task: Some(temporalio_streams::proto::WorkflowTaskEpoch {
+            started_event_id: completed,
+            ..Default::default()
+        }),
+        ..Default::default()
+    }
+}
+
+/// Only the close Activity, as the run's Workflow Producer, closes a Workflow's Stream. A Local
+/// Activity of the chain can't, even when a later write withdrew its task.
+#[tokio::test]
+async fn only_the_close_activity_closes_a_workflow_stream() {
+    for case in cases_for(Needs::UNCHECKED).await {
+        let run = format!("{}-run", case.stream);
+        let chain = StreamRef {
+            id: case.stream.clone(),
+            owner: support::workflow_execution(&format!("{}-wf", case.stream), "first-run"),
+            ..Default::default()
+        };
+        let _: CreateStreamResponse = call(
+            &case.ext,
+            "CreateStream",
+            CreateStreamRequest {
+                namespace: case.namespace.clone(),
+                stream_id: case.stream.clone(),
+                owner: Some(workflow_owner(&run)),
+                r#ref: Some(chain.clone()),
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+        let orphan = local_activity_write(&case, &run, "call-1", 5, 2, "orphan");
+        let _: AppendRecordsResponse = call(&case.ext, "AppendRecords", orphan.clone())
+            .await
+            .unwrap();
+        let mut next = local_activity_write(&case, &run, "call-2", 8, 2, "next");
+        next.failed_tasks = vec![5];
+        let _: AppendRecordsResponse = call(&case.ext, "AppendRecords", next.clone())
+            .await
+            .unwrap();
+        let close = |producer: Option<Producer>| CloseStreamRequest {
+            namespace: case.namespace.clone(),
+            stream: Some(chain.clone()),
+            producer,
+            ..Default::default()
+        };
+        for producer in [orphan.producer, next.producer] {
+            let error = call::<_, CloseStreamResponse>(&case.ext, "CloseStream", close(producer))
+                .await
+                .unwrap_err();
+            assert_eq!(reason(&error), "stream_not_owner");
+        }
+        assert_eq!(
+            case.describe().await.unwrap().status,
+            StreamStatus::Open as i32
+        );
+        let _: CloseStreamResponse =
+            call(&case.ext, "CloseStream", close(Some(workflow_owner(&run))))
+                .await
+                .unwrap();
+        assert_eq!(
+            case.describe().await.unwrap().status,
+            StreamStatus::Closed as i32
+        );
+    }
+}
+
+/// A Local Activity of a task that never completed is withdrawn by the run's next write.
+#[tokio::test]
+async fn a_local_activity_of_a_task_that_never_completed_is_withdrawn_by_the_next_write() {
+    for case in cases_for(Needs::UNCHECKED).await {
+        let run = format!("{}-run", case.stream);
+        case.create(None).await.unwrap();
+        // Task [2] completed. Task [3] runs a Local Activity that writes, then task [3] fails.
+        let _: AppendRecordsResponse = call(
+            &case.ext,
+            "AppendRecords",
+            local_activity_write(&case, &run, "call-1", 2, 0, "done"),
+        )
+        .await
+        .unwrap();
+        let _: AppendRecordsResponse = call(
+            &case.ext,
+            "AppendRecords",
+            local_activity_write(&case, &run, "call-2", 3, 2, "orphan"),
+        )
+        .await
+        .unwrap();
+        // Task [4] takes another path and writes once.
+        let _: AppendRecordsResponse = call(
+            &case.ext,
+            "AppendRecords",
+            local_activity_write(&case, &run, "call-3", 4, 2, "other"),
+        )
+        .await
+        .unwrap();
+        let read = case.read(ReadRecordsRequest::default()).await.unwrap();
+        assert_eq!(texts(&read), ["done", "orphan", "<superseded>", "other"]);
+        let superseded = read.records[2].supersession.as_ref().unwrap();
+        let kept: Vec<_> = [0, 1, 3]
+            .iter()
+            .filter(|&&i| !withdraws(superseded, &read.records[i]))
+            .map(|&i| texts(&read)[i].clone())
+            .collect();
+        assert_eq!(kept, ["done", "other"]);
+        // A late write of the orphaned call is fenced.
+        let late = call::<_, AppendRecordsResponse>(
+            &case.ext,
+            "AppendRecords",
+            AppendRecordsRequest {
+                sequence: 2,
+                ..local_activity_write(&case, &run, "call-2", 3, 2, "late")
+            },
+        )
+        .await
+        .unwrap_err();
+        assert_eq!(reason(&late), "stream_fenced");
+        // A later write that knows task [4] completed withdraws nothing more.
+        let _: AppendRecordsResponse = call(
+            &case.ext,
+            "AppendRecords",
+            local_activity_write(&case, &run, "call-4", 7, 4, "later"),
+        )
+        .await
+        .unwrap();
+        let read = case.read(ReadRecordsRequest::default()).await.unwrap();
+        assert_eq!(
+            texts(&read),
+            ["done", "orphan", "<superseded>", "other", "later"]
+        );
+    }
+}
+
+/// A failed task before the last completed one is withdrawn by its id.
+#[tokio::test]
+async fn a_failed_task_before_the_last_completed_one_is_withdrawn_by_its_id() {
+    for case in cases_for(Needs::UNCHECKED).await {
+        let run = format!("{}-run", case.stream);
+        case.create(None).await.unwrap();
+        let _: AppendRecordsResponse = call(
+            &case.ext,
+            "AppendRecords",
+            local_activity_write(&case, &run, "call-1", 3, 2, "orphan"),
+        )
+        .await
+        .unwrap();
+        // Task [3] failed and task [4] completed with no write here. Task [5] knows both.
+        let mut next = local_activity_write(&case, &run, "call-2", 5, 4, "next");
+        next.failed_tasks = vec![3];
+        let _: AppendRecordsResponse = call(&case.ext, "AppendRecords", next).await.unwrap();
+        let read = case.read(ReadRecordsRequest::default()).await.unwrap();
+        assert_eq!(texts(&read), ["orphan", "<superseded>", "next"]);
         let superseded = read.records[1].supersession.as_ref().unwrap();
         assert!(withdraws(superseded, &read.records[0]));
         assert!(!withdraws(superseded, &read.records[2]));

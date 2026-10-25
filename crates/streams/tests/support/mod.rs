@@ -419,6 +419,16 @@ impl Target {
         self.write(producer, sequence, "", texts).await
     }
 
+    /// A retry run's first batch, which withdraws `previous`.
+    pub(crate) async fn batch_retry(
+        &self,
+        producer: &Producer,
+        previous: &str,
+        texts: &[&str],
+    ) -> StreamResult<Appended> {
+        self.write(producer, 1, previous, texts).await
+    }
+
     async fn write(
         &self,
         producer: &Producer,
