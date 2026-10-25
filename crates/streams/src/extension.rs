@@ -150,10 +150,10 @@ impl StreamExtension {
         Self::build(EXTENSION_NAME, options, meter, None)
     }
 
-    /// Builds the runtime of a backend kind from its encoded config: a [RedisStreamConfig] for
-    /// `redis` and `memory`, a [NativeStreamConfig] for `native`, which may be empty. Native
-    /// calls the server on `connection`, the connection of the client that the bridge builds the
-    /// runtime for. The others don't use it.
+    /// Builds the runtime of a backend kind from its encoded config. That's a [RedisStreamConfig]
+    /// for `redis` and `memory`, and a [NativeStreamConfig], which may be empty, for `native`.
+    /// Native calls the server on `connection`, the connection of the client that the bridge builds
+    /// the runtime for. The others don't use it.
     pub fn for_backend(
         kind: &str,
         config: &[u8],
@@ -343,7 +343,7 @@ pub const NATIVE_EXTENSION_NAME: &str = "temporalio-streams-native";
 
 /// The Stream runtime on the server's Stream service, through [ServiceStore]. It serves the same
 /// calls as on Redis. A bridge builds one per client, on that client's connection, so every call
-/// has the client's TLS, API key and headers. A Worker's `replace_client` takes a new one.
+/// has the client's TLS, API key and headers. A Worker's `replace_client` needs a new one.
 #[derive(Debug)]
 pub struct NativeStreamExtension;
 

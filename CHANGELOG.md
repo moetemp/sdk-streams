@@ -75,19 +75,19 @@
   reads and describes to the server. A Workflow create passes its owner, `close_with_run` and
   ref in `Owner::Workflow`, which Redis and memory don't read. Server errors map to the crate's
   reasons by their `StreamErrorDetails`.
-- Synced `stream_service.proto` with the server's: `CreateStreamRequest.owner` (6),
-  `close_with_run` (7), `ref` (8), `CloseStreamRequest.withdraw_run` (8) and
-  `StreamErrorDetails`. The WIT has the same fields.
+- Synced `stream_service.proto` with the server's copy, which adds `CreateStreamRequest.owner` (6),
+  `close_with_run` (7), `ref` (8), `CloseStreamRequest.withdraw_run` (8) and `StreamErrorDetails`.
+  The WIT has the same fields.
 - `AppendRecordsRequest.defer_withdrawal` (9) marks the Workflow batch before a Local Activity
   on the server too, so the native Local Activity flush writes early as on Redis.
 - Synced `stream_service.proto` with the server's `ReadRecordsRequest.to_offset` (11) and
   `wake_only` (12). The native Store forwards them. The Redis and memory reads don't use them.
 - The native Store reads and describes over the direct System Nexus call
   (`WorkflowService.StartNexusOperation` on `__temporal_system`), not the `StreamService` gRPC
-  reads, so every caller reads through the path Workflow code uses. A failed operation maps to
-  the crate's reasons by its application failure type. A plain `RESOURCE_EXHAUSTED`, such as a
-  direct read past the reader cap, maps to the new reason `stream_exhausted` with the server's
-  message. A retry can pass.
+  reads, so every caller reads on the same path as Workflow code. A failed operation maps to the
+  crate's reasons by its application failure type. A plain `RESOURCE_EXHAUSTED`, such as a direct
+  read past the reader cap, maps to the new reason `stream_exhausted` with the server's message. A
+  retry can succeed.
 - The Store calls that write (`create`, `append`, `close`) take the Stream's `StreamRef`, so the
   native Store sends the owner fields on every call. The server finds a Workflow's Stream by
   them. Redis and memory key on the id.
@@ -95,10 +95,10 @@
   code, such as from its Local Activities. `CreateStreamRequest.owner` (6) makes the Stream
   Workflow-owned, and `withdraw_run` on both withdraws a retry run's previous run. The proto also
   has `close_with_run` (7) and `ref` (8), which only the server reads.
-- Added `WorkflowReadRecords`, a `ReadRecords` that names the Workflow run that reads. On native
-  the run goes as a `WorkflowEvent` link on the direct call, so Retention keeps a nested
-  Workflow Stream from the lowest offset that the open run read (S109). Redis and memory read
-  as `ReadRecords` does.
+- Added `WorkflowReadRecords`, a `ReadRecords` that names the Workflow run that reads. On native,
+  the direct call sends the run as a `WorkflowEvent` link, so Retention doesn't trim a nested
+  Workflow Stream past the lowest offset that the open run read. Redis and memory read as
+  `ReadRecords` does.
 - Removed the Workflow write path, since a Workflow now makes each create, publish and close from a
   Local Activity on the service calls. This removes `BufferWorkflowCalls`, `FlushRunBuffer` and
   `DrainCloses` with their messages, the run buffer, the Workflow Task interceptor, the deferred
@@ -160,36 +160,34 @@
   sequences, which grew for the life of the process.
 - `ids::named_client_producer_id` makes `client:<name>`, a client Producer id that the caller
   keeps across restarts. With the caller's epoch in `attempt`, a new incarnation fences the
-  earlier one and withdraws its Records, as an Activity retry does.
-- The native runtime takes its client's connection when the bridge builds it:
+  earlier one.
+- The native runtime gets its client's connection when the bridge builds it.
   `NativeStreamExtension::from_config_bytes`, `NativeStreamExtension::create`,
-  `StreamExtension::for_backend` and `ServiceStore::new` take a `Connection`. `attach` and
-  `attach_connection` are gone, so one runtime never calls on another client's connection.
-- The native Store sends the Activity task token on append, close and create, so the server
-  checks the Producer against the Activity's current attempt. `OpenWriterRequest.task_token`
-  (10) gives a writer's token, `Batch::task_token` carries it, and `Store::close` takes it.
-  `Owner::Activity` is a Standalone Activity's create of its own Stream, with its token and the
-  Activity owner fields of its ref. Redis and memory refuse it with `stream_unsupported`.
+  `StreamExtension::for_backend` and `ServiceStore::new` take a `Connection`. This removes `attach`
+  and `attach_connection`, so one runtime never calls on another client's connection.
+- The native Store sends the Activity task token on append, close and create, so the server checks
+  the Producer against the Activity's current attempt. `OpenWriterRequest.task_token` (10) gives a
+  writer's token, `Batch::task_token` has it, and `Store::close` takes it. `Owner::Activity` is a
+  Standalone Activity's create of its own Stream, with its token and the Activity owner fields of
+  its ref. Redis and memory refuse it with `stream_unsupported`.
 - The native Store sends the close Record's status as `CloseStreamRequest.status`.
-- A create answers the Stream's ref with the owner fields of the create's ref, the Workflow's
-  or the Standalone Activity's, so a caller routes the ref it gets on the native backend.
+- A create returns the Stream's ref with the owner fields of the create's ref, the Workflow's or the
+  Standalone Activity's, so a caller routes the ref it gets on the native backend.
 - A native `wake_only` read may wait up to 7 days, the server's `stream.maxWakeWait` default,
   since a parked wake adds nothing to History. Other reads keep the 60 s cap.
-- A native error with the reason `seq_divergent` or `stream_not_owner` reads back to its reason.
-  The native tests write with named clients, since the server refuses an Activity Producer with
-  no task token.
-  earlier one.
+- A native error with the reason `seq_divergent` or `stream_not_owner` maps back to its reason. The
+  native tests write with named clients, since the server refuses an Activity Producer with no task
+  token.
 - A client Producer's newer epoch fences its earlier epochs but writes no `Superseded` item and
   withdraws nothing, in the Redis script, the memory Store and the reader rule. The withdrawal
   rule stays for Workflow, Local Activity and Activity Producers. `testdata/withdrawals.json` has
   the case.
 - A Workflow read (`WorkflowReadRecords`) with `last` fails with `stream_invalid` on every
   backend, since a replay must read the same range.
-- A Standalone Activity's create of its own Stream sends its owner Producer
-  (`sa:<activity id>:<activity run id>` at the token's attempt) together with its task token, as
-  the server checks both. `Owner::Activity` carries both. A create with a task token and no
-  Standalone Activity owner, or no Activity ref, fails with `stream_invalid`, and it needs no
-  safety TTL.
+- A Standalone Activity's create of its own Stream sends its owner Producer (`sa:<activity
+  id>:<activity run id>` at the token's attempt) together with its task token, as the server checks
+  both. `Owner::Activity` has both. A create with a task token and no Standalone Activity owner, or
+  no Activity ref, fails with `stream_invalid`, and it needs no safety TTL.
 - Removed the auto close, so a Redis or memory Stream closes only on a close call.
   `CreateStreamRequest` reserves `auto_close` (5) and `DescribeStreamResponse` reserves `auto_close`
   (4). The WIT drops `auto-close` from the create and the describe. This removes the `auto_close`
@@ -202,8 +200,8 @@
   has no auto close either. A Workflow create, one with an owner and no task token, still passes
   its `close_with_run` to the server, which closes the Stream when the owner's run chain ends.
   The Stream service proto equals the api a4 copy byte for byte.
-- The crate pins `temporalio-common` and `temporalio-client` at sdk-rust Jetty c10 `191c8b8b`,
-  which takes Brook c8's revert of the cache-off eviction reason.
+- The crate pins `temporalio-common` and `temporalio-client` at sdk-rust Jetty c10 `191c8b8b`, which
+  has Brook c8's revert of the cache-off eviction reason.
 - A read of a closed Stream whose Retention passed fails with `stream_expired`, as a read of an open
   one does. It no longer waits out its `wait` and returns nothing.
 - A read whose scan stops at the 10,000-entry cap continues at once while entries up to the newest
@@ -230,11 +228,11 @@
 - `testdata/withdrawals.json` has the cases of a `Superseded` item with no epoch, as a retry run's
   create writes, of a Local Activity's newer epoch, and of more Local Activity Records under a
   Workflow item. A case with no `epoch` key has no epoch, and `gen_vectors.py` reads it that way.
-- The crate pins `temporalio-common` and `temporalio-client` at sdk-rust Jetty c10 `2de24aef`,
-  which takes Brook c8's Core CHANGELOG fix and Core tests.
+- The crate pins `temporalio-common` and `temporalio-client` at sdk-rust Jetty c10 `2de24aef`, which
+  has Brook c8's Core CHANGELOG fix and Core tests.
 - A native `FAILED_PRECONDITION` with no Stream reason, such as a namespace that isn't active on
   this cluster, maps to `stream_storage`, which a retry can pass. It mapped to `stream_closed`
-  before, so a write during a failover failed for good.
+  before, so a write during a failover failed permanently.
 - A native create, append and close send a 5 s deadline, the Redis Store's `response_timeout`
   default, instead of the client's 30 s default for a call with none.
 - A native create with another Retention fails with the server's `stream_already_exists`, whose

@@ -90,8 +90,8 @@ pub(crate) enum Backend {
     Native(Arc<ServiceStore>),
 }
 
-/// What the native backend gives: the Store's calls only. The server keeps its own keys, checks
-/// Producers and runs against its executions, answers no more than the API, and has its own
+/// What the native backend gives, which is the Store's calls only. The server keeps its own keys,
+/// checks Producers and runs against its executions, returns no more than the API, and has its own
 /// Retention floor.
 const NATIVE_GIVES: Needs = Needs::CALLS;
 

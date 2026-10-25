@@ -43,8 +43,8 @@ pub enum Reason {
     UnknownWriter,
     /// The Store lacks a capability that the call needs.
     Unsupported,
-    /// The server refused the call for one of its limits, such as the most Workflow readers of a
-    /// Stream. A later retry can pass.
+    /// The server refused the call for one of its limits, such as the maximum number of Workflow
+    /// readers of a Stream. A later retry can succeed.
     Exhausted,
 }
 
@@ -76,7 +76,7 @@ impl Reason {
         Self::ALL.into_iter().find(|reason| reason.token() == token)
     }
 
-    /// Every reason, so a token from the server reads back to its reason.
+    /// Every reason, so that a token from the server maps back to its reason.
     const ALL: [Reason; 16] = [
         Reason::NotFound,
         Reason::Expired,

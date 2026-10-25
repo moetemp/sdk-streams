@@ -207,7 +207,7 @@ impl StreamService {
                 ));
             }
         };
-        // The answer keeps the owner fields, since the server finds a Workflow's or an
+        // The response keeps the owner fields of the ref, since the server finds a Workflow's or an
         // Activity's Stream by them.
         Ok(CreateStreamResponse {
             stream: Some(StreamRef {
@@ -358,7 +358,7 @@ impl StreamService {
         request: ReadRecordsRequest,
         reader: Option<&ReaderRun>,
     ) -> StreamResult<ReadRecordsResponse> {
-        // A replay must read the same range, which the newest Records are not.
+        // A replay must read the same range, and the newest Records change.
         if reader.is_some() && request.last != 0 {
             return Err(StreamError::invalid(
                 "Workflow code reads from an offset, not the last Records",

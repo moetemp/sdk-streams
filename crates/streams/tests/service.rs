@@ -827,7 +827,7 @@ async fn a_create_answer_names_the_backend_and_the_store_never_reads_it() {
     for case in cases_for(Needs::OWN_CONFIG).await {
         let created = case.create(None).await.unwrap();
         assert_eq!(created.stream.unwrap().backend, "");
-        // The answer keeps the owner fields of the create's ref, which the server routes by.
+        // The response keeps the owner fields of the create's ref, since the server routes by them.
         let id = format!("{}-owned", case.stream);
         let owned = CreateStreamRequest {
             namespace: case.namespace.clone(),
@@ -1364,8 +1364,8 @@ async fn a_page_keeps_under_max_bytes_and_a_larger_record_comes_alone() {
     }
 }
 
-/// The Standalone Activity's create of its own Stream as sent: the Activity's Producer, its task
-/// token and the Activity owner fields of the ref.
+/// The Standalone Activity's create of its own Stream, with the Activity's Producer, its task token
+/// and the Activity owner fields of the ref.
 fn activity_create(case: &Case, owner: Option<Producer>, activity_id: &str) -> CreateStreamRequest {
     CreateStreamRequest {
         namespace: case.namespace.clone(),
@@ -1394,7 +1394,7 @@ fn standalone_activity() -> Producer {
     }
 }
 
-/// A create with a task token is a Standalone Activity's own: it needs the Activity as its owner
+/// A create with a task token is a Standalone Activity's own. It needs the Activity as its owner
 /// and the Activity's ref, or it fails with `stream_invalid` before it reaches the Store.
 #[tokio::test]
 async fn a_create_with_a_task_token_needs_the_standalone_activity_as_its_owner() {

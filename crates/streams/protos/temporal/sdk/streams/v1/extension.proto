@@ -12,9 +12,9 @@ import "temporal/api/streamservice/v1/stream_service.proto";
 // comes from the Worker or the client, so it needs no address.
 message NativeStreamConfig {
     // The backend name that lang registered this extension under. Empty is `native`. The crate
-    // puts it in each StreamRef it builds.
+    // sets it on each StreamRef that it builds.
     string backend = 1;
-    // The Retention of a create that gives none. Empty leaves it to the server's default.
+    // The Retention of a create that sets none. Empty uses the server's default.
     google.protobuf.Duration retention = 2;
 }
 
@@ -41,7 +41,7 @@ message RedisStreamConfig {
 }
 
 // Method `WorkflowReadRecords`, asynchronous. A `ReadRecords` that a Workflow run makes, for
-// example from its read Local Activity. It answers a `ReadRecordsResponse`. On native the server
+// example from its read Local Activity. It returns a `ReadRecordsResponse`. On native the server
 // gets the reading run as a link, and Retention never trims a nested Workflow Stream past the
 // lowest offset that the open run read. The other backends read as `ReadRecords` does.
 message WorkflowReadRecordsRequest {

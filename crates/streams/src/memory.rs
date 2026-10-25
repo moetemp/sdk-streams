@@ -352,7 +352,7 @@ impl MemoryStore {
     }
 }
 
-/// The refusal of a Stream that a Standalone Activity owns, which only the server keeps.
+/// The refusal of a Stream that a Standalone Activity owns, since only the server supports one.
 pub(crate) fn activity_owner() -> StreamError {
     StreamError::new(
         Reason::Unsupported,

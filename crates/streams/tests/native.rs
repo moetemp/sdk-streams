@@ -50,7 +50,7 @@ async fn case() -> Option<Case> {
     Some(Case {
         ext,
         namespace: std::env::var("STREAMS_NATIVE_NAMESPACE").unwrap_or("default".to_string()),
-        // Clocks with microsecond steps give two tests one time, so a counter tells them apart.
+        // Two tests can read the same clock time, so a counter tells them apart.
         stream: format!("native-test-{now}-{}", NEXT.fetch_add(1, Ordering::Relaxed)),
     })
 }
@@ -218,7 +218,7 @@ async fn a_stream_on_the_server_dedupes_withdraws_reads_and_closes() {
     assert!(created.created);
     assert_eq!(created.stream.unwrap().backend, "native");
 
-    // A resend of a batch answers its first offsets and writes nothing.
+    // A resend of a batch returns its first offsets and writes nothing.
     let first = case.append(1, &["a"]).await.unwrap();
     let again = case.append(1, &["a"]).await.unwrap();
     assert_eq!(
@@ -243,8 +243,8 @@ async fn a_stream_on_the_server_dedupes_withdraws_reads_and_closes() {
         .await
         .unwrap_err();
     assert_eq!(reason(&refused), "stream_not_owner");
-    // A Local Activity's next attempt withdraws the earlier one's Records. On a standalone
-    // Stream the server takes the run as sent.
+    // A Local Activity's next attempt withdraws the earlier one's Records. On a standalone Stream
+    // the server accepts the run as sent.
     case.write(local_activity(1), &["x"]).await;
     let written = case.write(local_activity(2), &["y"]).await;
     assert!(written.last_offset > first.last_offset);
@@ -278,7 +278,7 @@ async fn a_stream_on_the_server_dedupes_withdraws_reads_and_closes() {
 }
 
 impl Case {
-    /// Starts a Workflow on a Task Queue that no Worker polls, and answers its run id.
+    /// Starts a Workflow on a Task Queue that no Worker polls, and returns its run id.
     async fn start_workflow(&self, workflow_id: &str) -> String {
         use temporalio_common::protos::temporal::api::{
             common::v1::WorkflowType,
@@ -402,7 +402,7 @@ async fn a_workflow_stream_is_found_by_its_owner_ref_on_every_call() {
         first_execution_run_id: run_id.clone(),
         ..Default::default()
     };
-    // The Workflow's create and publish run as Local Activities on the service calls (S108).
+    // The Workflow's create and publish run as Local Activities on the service calls.
     let owner = Producer {
         kind: ProducerKind::Workflow as i32,
         id: temporalio_streams::ids::workflow_producer_id(&run_id),

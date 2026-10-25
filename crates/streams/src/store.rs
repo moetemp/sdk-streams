@@ -32,7 +32,7 @@ pub enum Owner<'a> {
     /// The Stream expires one Retention after its last write.
     Client,
     /// A Standalone Activity's own Stream. The server checks that the Producer is the Activity's
-    /// and that the task token is its current attempt. Only the native Store keeps one.
+    /// and that the task token is its current attempt. Only the native Store supports it.
     Activity {
         /// The Activity's Producer, `sa:<activity id>:<activity run id>` at the token's attempt.
         producer: &'a Producer,

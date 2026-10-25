@@ -1,7 +1,7 @@
-//! The native Store: the server's `temporal.api.streamservice.v1.StreamService`, called on the
-//! connection of the client that the bridge builds the runtime for. The server keeps the same
-//! rules as the Lua scripts, so the crate's writers and its checks work on it unchanged. The
-//! server answers whole reads and describes, so the service forwards those.
+//! The native Store, on the server's `temporal.api.streamservice.v1.StreamService`. It calls the
+//! server on the connection of the client that the bridge builds the runtime for. The server
+//! applies the same rules as the Lua scripts, so the crate's writers and checks work on it
+//! unchanged. The server answers whole reads and describes, so the service forwards those.
 
 use crate::{
     MAX_WAIT, Reason, StreamError, StreamResult,
@@ -37,7 +37,7 @@ const CREATE: &str = "/temporal.api.streamservice.v1.StreamService/CreateStream"
 const APPEND: &str = "/temporal.api.streamservice.v1.StreamService/AppendRecords";
 const CLOSE: &str = "/temporal.api.streamservice.v1.StreamService/CloseStream";
 
-/// The Retention the server gives a Stream with none, `stream.defaultRetention`.
+/// The Retention that the server gives a Stream with none, `stream.defaultRetention`.
 const SERVER_RETENTION: Duration = Duration::from_secs(7 * 24 * 60 * 60);
 
 /// The deadline of a create, an append and a close, the Redis Store's `response_timeout`
@@ -49,7 +49,7 @@ pub struct ServiceStore {
     /// The client's connection. Its clones share their headers, so an API key rotation on the
     /// client reaches every call.
     connection: Connection,
-    /// The Retention of a create that gives none, or the server's default.
+    /// The Retention of a create that sets none, or the server's default.
     retention: Option<Duration>,
 }
 
@@ -73,8 +73,8 @@ struct RpcStatus {
 }
 
 impl ServiceStore {
-    /// A Store on a client's connection. A create with no Retention takes `retention`, as a
-    /// Redis Store's does, or the server's default.
+    /// A Store on a client's connection. A create with no Retention uses `retention`, as a Redis
+    /// Store's does, or the server's default.
     pub fn new(connection: Connection, retention: Option<Duration>) -> Self {
         Self {
             connection,
@@ -121,13 +121,13 @@ fn from_status(status: tonic::Status) -> StreamError {
         .split_once(": ")
         .and_then(|(token, _)| Reason::from_token(token));
     // A FAILED_PRECONDITION with no Stream reason is the server's own, such as a namespace that
-    // isn't active here during a failover, so it stays a Store failure that a retry can pass.
+    // isn't active here during a failover. So it maps to a Store failure, which a retry can pass.
     let reason = detail.or(prefix).unwrap_or(match status.code() {
         tonic::Code::NotFound => Reason::NotFound,
         tonic::Code::AlreadyExists => Reason::AlreadyExists,
         tonic::Code::InvalidArgument => Reason::Invalid,
         tonic::Code::Unimplemented => Reason::Unsupported,
-        // A limit such as the reader cap. Not a Store failure, so the message stays the reason.
+        // A limit, such as the reader cap, isn't a Store failure, so it gets its own reason.
         tonic::Code::ResourceExhausted => Reason::Exhausted,
         _ => Reason::Storage,
     });
@@ -168,7 +168,7 @@ impl ServiceStore {
                 _ if answer.created => CreateOutcome::Created,
                 _ => CreateOutcome::Exists,
             },
-            // The server's conflict names the stored Retention, which a create answer lacks.
+            // The server's conflict names the stored Retention, which a create response lacks.
             Err(error) => return Err(error),
         };
         Ok(Created {
@@ -181,7 +181,7 @@ impl ServiceStore {
 
 #[async_trait::async_trait]
 impl Store for ServiceStore {
-    // The server keeps every rule.
+    // The server applies every rule.
     fn capabilities(&self) -> Capabilities {
         Capabilities::ALL
     }
@@ -332,15 +332,15 @@ impl Store for ServiceStore {
 
 #[async_trait::async_trait]
 impl RemoteReads for ServiceStore {
-    // Reads take the direct System Nexus call, which persists nothing, so every caller reads
-    // through the one path that Workflow code uses too.
+    // Reads use the direct System Nexus call, which persists nothing, so every caller reads on the
+    // same path as Workflow code.
     async fn read_records(
         &self,
         request: ReadRecordsRequest,
         reader: Option<&ReaderRun>,
     ) -> StreamResult<ReadRecordsResponse> {
-        // The server keeps the lowest offset that an open reading run read, and Retention keeps
-        // the Records from there.
+        // The server stores the lowest offset that an open reading run read, and Retention doesn't
+        // trim the Records from there.
         let links = reader
             .map(|reader| Link {
                 variant: Some(link::Variant::WorkflowEvent(link::WorkflowEvent {
@@ -522,8 +522,8 @@ fn request_id() -> String {
     format!("streams-{}-{now}-{n}", std::process::id())
 }
 
-/// The crate error of a failed operation: the reason is the application failure's type, else
-/// its first `StreamErrorDetails`, else the `<reason>: ` prefix of the message.
+/// The crate error of a failed operation. The reason is the application failure's type, else its
+/// first `StreamErrorDetails`, else the `<reason>: ` prefix of the message.
 fn from_failure(failure: Failure) -> StreamError {
     let application = match &failure.failure_info {
         Some(FailureInfo::ApplicationFailureInfo(info)) => Some(info),
