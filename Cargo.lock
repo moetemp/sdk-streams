@@ -2115,6 +2115,7 @@ version = "0.1.0"
 dependencies = [
  "async-trait",
  "aws-lc-rs",
+ "parking_lot",
  "prost",
  "prost-wkt-types",
  "serde_json",
