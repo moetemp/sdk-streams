@@ -169,3 +169,6 @@
   each role with exactly those. A Reader needs write access to the keys too, since `EVALSHA`
   counts as a write. `RedisStore::connect` skips the version check when the user may not run
   `INFO`, instead of failing.
+- `testdata/withdrawals.json` has the cases of a `Superseded` item with no epoch, as a retry run's
+  create writes, of a Local Activity's newer epoch, and of more Local Activity Records under a
+  Workflow item. A case with no `epoch` key has none, and `gen_vectors.py` reads it so.

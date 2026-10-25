@@ -209,7 +209,10 @@ def withdraws(supersession, record):
     # A client's newer epoch only fences. Its earlier Records are real messages.
     if supersession["producer_kind"] == "client":
         return False
-    old, new = producer.get("epoch", {}), supersession.get("epoch", {})
+    # An item with no epoch, such as a create's, withdraws only a run.
+    if "epoch" not in supersession or "epoch" not in producer:
+        return False
+    old, new = producer["epoch"], supersession["epoch"]
     if supersession["producer_kind"] != "workflow":
         return (
             producer["kind"] == supersession["producer_kind"]
@@ -334,6 +337,39 @@ def withdrawal_examples():
     named = {"kind": "client", "id": "client:" + join("ingest"), "epoch": {"attempt": 1}}
     s = {"producer_kind": "client", "producer_id": named["id"], "epoch": {"attempt": 2}}
     case("a client's newer epoch keeps its earlier Records", s, named, False)
+
+    def la_at(started, task_attempt=1, attempt=1, run=r1, call="k"):
+        return {"kind": "local_activity", "id": "la:" + join(run, call), "run_id": run,
+                "epoch": {"task_started_event_id": started, "task_attempt": task_attempt,
+                          "task_started_time": [100, 0], "attempt": attempt}}
+
+    # A retry run's create writes an item with no epoch. It withdraws only the previous run, also
+    # when it names failed tasks.
+    s = {"producer_kind": "workflow", "producer_id": "wf:" + part("r2"), "run_id": "r2",
+         "withdraw_run": r1, "failed_tasks": [5]}
+    case("no epoch, r1's Record goes", s, wf(r1, 5), True)
+    case("no epoch, r1's Local Activity Record goes", s, la_at(5), True)
+    case("no epoch, r2's Local Activity Record at a failed task stays", s, la_at(5, run="r2"),
+         False)
+    case("no epoch, r2's Record stays", s, wf("r2", 5), False)
+    # A Local Activity's newer epoch withdraws only its own lower epochs.
+    s = {"producer_kind": "local_activity", "producer_id": "la:" + join(r1, "k"), "run_id": r1,
+         "epoch": la_at(8, attempt=3)["epoch"]}
+    case("a Local Activity's newer epoch withdraws a lower attempt", s, la_at(8, attempt=2), True)
+    case("a Local Activity's newer epoch withdraws an earlier task", s, la_at(5, attempt=4), True)
+    case("a Local Activity's newer epoch keeps its own epoch", s, la_at(8, attempt=3), False)
+    case("a Local Activity's newer epoch keeps another call", s, la_at(5, call="j"), False)
+    case("a Local Activity's item keeps the run's Workflow Record", s, wf(r1, 5), False)
+    # Local Activity Records under a Workflow item with c = [8], t = [14] attempt 2, failed [5].
+    s = sup(wf(r1, 14, attempt=2), completed(8), failed=[5])
+    case("a Local Activity before c stays", s, la_at(3), False)
+    case("a Local Activity at c stays", s, la_at(8), False)
+    case("a Local Activity between c and t goes", s, la_at(11), True)
+    case("a Local Activity of a lower attempt of t goes", s, la_at(14, task_attempt=1), True)
+    case("a Local Activity of t itself stays", s, la_at(14, task_attempt=2), False)
+    case("a Local Activity of another run stays", s, la_at(11, run="r9"), False)
+    no_epoch = {"kind": "local_activity", "id": "la:" + join(r1, "k"), "run_id": r1}
+    case("a Local Activity Record with no epoch stays", s, no_epoch, False)
     return cases
 
 
