@@ -34,10 +34,11 @@ slot. `CreateStream` writes `:meta`, and the first entry makes `:log`.
 | `wr\|<run>` | Set when a Workflow retry withdrew the run |
 
 `<kind>` is the `ProducerKind` number, and `<run>` is the percent-encoded run id. The digest is
-the batch's content digest (`testdata/digests.json`). A resend with the last `sequence` and the
-same digest gets the stored ids. Another digest is refused with `seq_divergent`. An entry with no
-digest, written by an older crate, takes any resend. An epoch key is
-the epoch's fields as fixed-width hex, in the order of comparison, so two keys compare as
+the batch's content digest (`testdata/digests.json`). A `sequence` is from 1 to 2^53 - 1, which
+a script compares exactly, and the entry keeps its digits as sent. A resend with the last
+`sequence` and the same digest gets the stored ids. Another digest is refused with
+`seq_divergent`. An entry with no digest, written by an older crate, takes any resend. An epoch
+key is the epoch's fields as fixed-width hex, in the order of comparison, so two keys compare as
 strings.
 
 ## Log entries

@@ -160,3 +160,6 @@
 - `OpenWriter` of an Activity attempt above 1 takes a closed or an expired Stream, as it takes a
   Stream that nobody created. A retry that only reads the Stream still runs, and its first write
   fails with `stream_closed` or `stream_expired`.
+- A batch `sequence` is from 1 to 2^53 - 1, and the append script keeps it in the dedupe entry
+  as sent. A sequence of 1e14 or more lost its dedupe entry on Redis before, so a resend went in
+  twice. A higher one fails with `stream_invalid`.

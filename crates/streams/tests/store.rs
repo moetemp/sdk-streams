@@ -478,6 +478,29 @@ async fn a_sequence_below_one_is_refused() {
     }
 }
 
+/// A large sequence keeps its dedupe entry, so a resend gets its first answer and a lower or
+/// divergent batch is refused. A sequence past 2^53 - 1 is refused.
+#[tokio::test]
+async fn a_large_sequence_dedupes_and_one_past_2_53_is_refused() {
+    for target in stores_for(Needs::CALLS).await {
+        target.create(Owner::Client).await;
+        let p = client(1);
+        let large = 100_000_000_000_000;
+        let first = append(&target, &p, large, &["x"]).await.unwrap();
+        let resend = append(&target, &p, large, &["x"]).await.unwrap();
+        assert_eq!(resend.offsets, first.offsets);
+        let divergent = append(&target, &p, large, &["other"]).await;
+        assert_eq!(divergent.unwrap_err().reason, Reason::SeqDivergent);
+        let lower = append(&target, &p, large - 1, &["lower"]).await;
+        assert_eq!(lower.unwrap_err().reason, Reason::Sequence);
+        assert_eq!(target.texts().await, ["x"]);
+        let max = (1 << 53) - 1;
+        append(&target, &p, max, &["max"]).await.unwrap();
+        let past = append(&target, &p, max + 1, &["past"]).await;
+        assert_eq!(past.unwrap_err().reason, Reason::Invalid);
+    }
+}
+
 /// A Workflow's create makes a Stream that an Activity created Workflow-owned.
 #[tokio::test]
 async fn a_workflow_create_takes_over_a_stream_an_activity_created() {

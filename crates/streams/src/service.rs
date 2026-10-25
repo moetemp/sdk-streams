@@ -16,8 +16,8 @@ use crate::{
     },
     record::{caller_status, close_record, data_records, supersession},
     store::{
-        Batch, Capabilities, CreateOutcome, FORMAT_VERSION, Owner, Store, StreamState, TaskFacts,
-        Withdrawal,
+        Batch, Capabilities, CreateOutcome, FORMAT_VERSION, MAX_SEQUENCE, Owner, Store,
+        StreamState, TaskFacts, Withdrawal,
     },
 };
 use prost::Message;
@@ -204,8 +204,10 @@ impl StreamService {
         stream_id(request.stream.as_ref())?;
         let stream = request.stream.clone().unwrap_or_default();
         let producer = outside_producer(request.producer.as_ref())?;
-        if request.sequence < 1 {
-            return Err(StreamError::invalid("The sequence must be 1 or more"));
+        if !(1..=MAX_SEQUENCE).contains(&request.sequence) {
+            return Err(StreamError::invalid(
+                "The sequence must be from 1 to 2^53 - 1",
+            ));
         }
         // Without the fence and the flag, a copy or a stale batch would reach Readers.
         self.store

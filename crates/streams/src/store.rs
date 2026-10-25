@@ -14,6 +14,8 @@ pub const FORMAT_VERSION: u32 = 1;
 pub const MAX_RECORD_BYTES: usize = 1536 * 1024;
 /// An append's most bytes in a Store.
 pub const MAX_BATCH_BYTES: usize = 4 * 1024 * 1024;
+/// The highest batch `sequence`. A Lua number holds an integer exactly only up to it.
+pub const MAX_SEQUENCE: i64 = (1 << 53) - 1;
 /// How long the meta outlives the log, so a read can tell an expired Stream from a missing one.
 pub const TOMBSTONE: Duration = Duration::from_secs(30 * 24 * 60 * 60);
 

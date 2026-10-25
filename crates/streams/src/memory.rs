@@ -10,7 +10,7 @@ use crate::{
     proto::{Producer, ProducerKind, StreamRef},
     store::{
         Appended, Batch, Capabilities, Closed, CreateOutcome, Created, Entry, FORMAT_VERSION,
-        Owner, Store, StreamState, TOMBSTONE, Withdrawal,
+        MAX_SEQUENCE, Owner, Store, StreamState, TOMBSTONE, Withdrawal,
     },
 };
 use parking_lot::Mutex;
@@ -490,8 +490,11 @@ impl Store for MemoryStore {
             .unwrap_or_default();
         let (open_field, gone_field) = (format!("oa|{run}"), format!("ow|{run}"));
         let appended = self.with(namespace, stream_id, |keys, now| {
-            if sequence < 1 {
-                return Err(refuse(Reason::Invalid, "the sequence must be 1 or more"));
+            if !(1..=MAX_SEQUENCE).contains(&sequence) {
+                return Err(refuse(
+                    Reason::Invalid,
+                    "the sequence must be from 1 to 2^53 - 1",
+                ));
             }
             keys.check_live(now)?;
             if let Some(last) = keys.get(&format!("d{suffix}")) {
