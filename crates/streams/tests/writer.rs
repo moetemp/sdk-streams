@@ -274,6 +274,56 @@ async fn an_activity_retry_withdraws_the_earlier_attempt_even_with_nothing_to_wr
     }
 }
 
+/// An Activity retry opens its writer on a closed or expired Stream, so a retry that only reads
+/// the Stream still runs. Its first write fails with the real reason.
+#[tokio::test]
+async fn an_activity_retry_opens_on_a_closed_or_expired_stream() {
+    for case in cases().await {
+        let first = case.open(activity(1), |_| {}).await;
+        case.write(first, &["a1"]).await.unwrap();
+        let close = CloseStreamRequest {
+            namespace: case.namespace.clone(),
+            stream: Some(StreamRef {
+                id: case.stream.clone(),
+                ..Default::default()
+            }),
+            producer: Some(client()),
+            ..Default::default()
+        };
+        let _: temporalio_streams::proto::CloseStreamResponse =
+            case.call("CloseStream", close).await.unwrap();
+        let retry = case.open(activity(2), |_| {}).await;
+        let error = case.write(retry, &["a2"]).await.unwrap_err();
+        assert_eq!(reason(&error), "stream_closed");
+
+        let short = format!("{}-short", case.stream);
+        let _: CreateStreamResponse = case
+            .call(
+                "CreateStream",
+                CreateStreamRequest {
+                    namespace: case.namespace.clone(),
+                    stream_id: short.clone(),
+                    retention: millis(300),
+                    ..Default::default()
+                },
+            )
+            .await
+            .unwrap();
+        let on_short = |request: &mut OpenWriterRequest| {
+            request.stream = Some(StreamRef {
+                id: short.clone(),
+                ..Default::default()
+            });
+        };
+        let first = case.open(activity(1), on_short).await;
+        case.write(first, &["a1"]).await.unwrap();
+        tokio::time::sleep(Duration::from_millis(500)).await;
+        let retry = case.open(activity(2), on_short).await;
+        let error = case.write(retry, &["a2"]).await.unwrap_err();
+        assert_eq!(reason(&error), "stream_expired");
+    }
+}
+
 #[tokio::test]
 async fn a_closed_writer_is_gone() {
     for case in cases().await {

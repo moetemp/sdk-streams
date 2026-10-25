@@ -157,3 +157,6 @@
   time, whatever its `max_records`.
 - A page checks the state that each log read gives. A trim between two reads of one page fails a
   read from an offset with `stream_expired`, so the gap doesn't pass in silence.
+- `OpenWriter` of an Activity attempt above 1 takes a closed or an expired Stream, as it takes a
+  Stream that nobody created. A retry that only reads the Stream still runs, and its first write
+  fails with `stream_closed` or `stream_expired`.
