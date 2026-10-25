@@ -34,10 +34,10 @@ pub struct ExtensionOptions {
 }
 
 impl ExtensionOptions {
-    /// The options from the plugin's config message.
+    /// The options from the backend's config message.
     pub fn from_config(config: RedisStreamConfig) -> StreamResult<Self> {
         let Some(seed) = config.urls.first() else {
-            return Err(StreamError::invalid("The Redis Stream plugin needs a URL"));
+            return Err(StreamError::invalid("The Redis Stream backend needs a URL"));
         };
         let mut store = RedisStoreOptions::new(seed.clone());
         store.urls = config.urls;
@@ -100,7 +100,7 @@ impl Shared {
 ///
 /// On Redis it connects on its first call that needs Redis, so a bridge can build it with no
 /// runtime, and a Workflow that never publishes never needs Redis. A bridge builds one for each
-/// client of a plugin, and that client's Workers share it.
+/// client with a Stream backend, and that client's Workers share it.
 pub struct StreamExtension {
     shared: Arc<Shared>,
 }
@@ -264,7 +264,7 @@ impl MemoryStreamExtension {
     }
 
     /// Builds an extension from an encoded [RedisStreamConfig]. The URLs don't count, so a
-    /// plugin can pass the config it builds for Redis.
+    /// backend can pass the config it builds for Redis.
     pub fn from_config_bytes(
         config: &[u8],
         meter: Option<TemporalMeter>,
