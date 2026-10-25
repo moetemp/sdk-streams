@@ -4,7 +4,7 @@
 -- encoded withdrawn run, Supersession bytes, encoded Workflow id of the owner's run chain (empty
 -- for none).
 --
--- Answers {outcome, stored Retention ms, '1' when flagged}. The outcome is `created`, `exists`,
+-- Returns {outcome, stored Retention ms, '1' when flagged}. The outcome is `created`, `exists`,
 -- `conflict` for another Retention, `closed` or `expired`.
 local meta, log = KEYS[1], KEYS[2]
 local version, retention, owner = tonumber(ARGV[1]), ARGV[2], ARGV[3]

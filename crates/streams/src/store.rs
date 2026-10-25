@@ -1,5 +1,5 @@
-//! What every Store gives the Stream service: the Redis Store in production and the memory
-//! Store in tests. Both keep the same rules, which the Lua scripts state.
+//! The calls that every Store gives the Stream service. The Redis Store is for production and the
+//! memory Store is for tests. Both apply the rules of the Lua scripts.
 
 use crate::{
     Reason, StreamError, StreamResult,
@@ -10,21 +10,22 @@ use tokio::time::Instant;
 
 /// The format version this crate writes. A Stream with a higher one refuses writes.
 pub const FORMAT_VERSION: u32 = 1;
-/// A Record's most bytes in a Store.
+/// The maximum size of a stored Record, in bytes.
 pub const MAX_RECORD_BYTES: usize = 1536 * 1024;
-/// An append's most bytes in a Store.
+/// The maximum size of a stored append, in bytes.
 pub const MAX_BATCH_BYTES: usize = 4 * 1024 * 1024;
-/// The highest batch `sequence`. A Lua number holds an integer exactly only up to it.
+/// The highest batch `sequence`. A Lua number is exact for integers only up to this value.
 pub const MAX_SEQUENCE: i64 = (1 << 53) - 1;
-/// How long the meta outlives the log, so a read can tell an expired Stream from a missing one.
+/// How long the meta key stays after the log key expires, so that a read can tell an expired Stream
+/// from a missing one.
 pub const TOMBSTONE: Duration = Duration::from_secs(30 * 24 * 60 * 60);
 
 /// Who created a Stream, which decides its TTL while it is open.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Owner {
-    /// The Stream stays `safety_ttl` after its last write until it closes.
+    /// Until it closes, the Stream expires `safety_ttl` after its last write.
     Workflow,
-    /// The Stream stays one Retention after its last write.
+    /// The Stream expires one Retention after its last write.
     Client,
 }
 
@@ -35,7 +36,7 @@ pub enum CreateOutcome {
     Created,
     /// The Stream exists with the same Retention.
     Exists,
-    /// The Stream exists with another Retention, which stays.
+    /// The Stream exists with another Retention, and the create doesn't change it.
     Conflict,
     /// The Stream is closed.
     Closed,
@@ -43,7 +44,7 @@ pub enum CreateOutcome {
     Expired,
 }
 
-/// The answer of a create.
+/// The result of a create.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Created {
     /// What the create found.
@@ -54,7 +55,7 @@ pub struct Created {
     pub flagged: bool,
 }
 
-/// The withdrawal facts of a Workflow batch or close, and the `Superseded` item they make.
+/// The withdrawal facts of a batch, and the `Superseded` item that they make.
 #[derive(Debug, Clone, Default)]
 pub struct Withdrawal<'a> {
     /// A retry run's previous run.
@@ -94,24 +95,24 @@ pub struct Batch<'a> {
     pub withdrawal: Withdrawal<'a>,
 }
 
-/// The answer of an append.
+/// The result of an append.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Appended {
     /// The offsets of the first and the last entry, `None` for an empty batch with no
     /// `Superseded` item.
     pub offsets: Option<(i64, i64)>,
-    /// The batch was in the Store, so the offsets are the first answer's.
+    /// The Store already had the batch, so the offsets are those of the first result.
     pub resend: bool,
     /// The batch withdrew earlier Records.
     pub flagged: bool,
 }
 
-/// The answer of a close.
+/// The result of a close.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Closed {
     /// The offset of the close Record.
     pub offset: i64,
-    /// Someone closed the Stream before.
+    /// The Stream was already closed.
     pub already: bool,
 }
 
@@ -165,9 +166,9 @@ pub struct Entry {
     pub supersession: Option<Vec<u8>>,
 }
 
-/// What a Store does atomically beyond the log. The service checks a capability before a
-/// call that needs it, so a Store that lacks one refuses that call cleanly instead of giving
-/// weaker guarantees in silence.
+/// The rules that a Store applies atomically beyond the log. The service checks a capability before
+/// a call that needs it. So a Store that lacks the capability refuses the call, and doesn't give
+/// weaker guarantees without notice.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct Capabilities(u8);
 
@@ -237,17 +238,17 @@ fn unsupported(capability: &str) -> StreamError {
 
 /// The calls of a Store. Each one is atomic, as one Lua script is on Redis.
 ///
-/// The required calls are the log contract: a create key, an atomic batch append, an ordered
-/// read with the Stream's state, stable offsets, prefix Retention and a wait for the next
-/// entry. An append applies the rules of the capabilities the Store declares. The optional
-/// calls refuse by default.
+/// The required calls make the log contract. They are a create key, an atomic batch append, an
+/// ordered read with the Stream's state, stable offsets, prefix Retention and a wait for the next
+/// entry. An append applies the rules of the capabilities that the Store declares. The optional
+/// calls fail by default.
 #[async_trait::async_trait]
 pub trait Store: Send + Sync + 'static {
     /// What the Store does atomically beyond the log. It has no default, so a Store that wraps
     /// another one must say what it forwards.
     fn capabilities(&self) -> Capabilities;
 
-    /// The Retention of a Stream that its create gives none.
+    /// The Retention of a Stream whose create sets none.
     fn default_retention(&self) -> Duration;
 
     /// Creates a Stream, or finds it. The calls that write take the Stream's whole ref, since
@@ -262,7 +263,7 @@ pub trait Store: Send + Sync + 'static {
         withdrawal: &Withdrawal<'_>,
     ) -> StreamResult<Created>;
 
-    /// Appends one batch whole, or nothing of it.
+    /// Appends the whole batch, or nothing of it.
     async fn append(
         &self,
         namespace: &str,
@@ -280,7 +281,7 @@ pub trait Store: Send + Sync + 'static {
         count: usize,
     ) -> StreamResult<(StreamState, Vec<Entry>)>;
 
-    /// Waits until the log has an entry after `after`, or `deadline` passes. Answers whether an
+    /// Waits until the log has an entry after `after`, or `deadline` passes. Returns whether an
     /// entry came.
     async fn wait_after(
         &self,

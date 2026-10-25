@@ -5,7 +5,7 @@
 -- (`-` when the write gives no task facts), failed task ids, task Supersession bytes, the batch
 -- digest, then one Record per argument.
 --
--- Answers {'ok' or 'resend', first id, last id, '1' when flagged}.
+-- Returns {'ok' or 'resend', first id, last id, '1' when flagged}.
 local meta, log = KEYS[1], KEYS[2]
 local version, kind, producer = tonumber(ARGV[1]), ARGV[2], ARGV[3]
 local run, epoch, sequence_text = ARGV[4], ARGV[5], ARGV[6]
@@ -16,7 +16,7 @@ local task, completed, failed, task_supersession = ARGV[11], ARGV[12], ARGV[13],
 local digest = ARGV[15]
 local records = #ARGV - 15
 -- A Local Activity write with its run's task facts withdraws the run's orphaned Local Activity
--- Records: those of tasks that never completed.
+-- Records, which are those of tasks that never completed.
 local orphans = kind == '2' and completed ~= '-' and run ~= ''
 local open_field, gone_field = 'oa|' .. run, 'ow|' .. run
 
@@ -30,10 +30,10 @@ if refused then
   return refused
 end
 local suffix = '|' .. kind .. '|' .. producer
--- The dedupe key goes before the close status, so a resend gets its Positions after a close.
+-- Check the dedupe key before the close status, so that a resend gets its entry ids after a close.
 local last = redis.call('HGET', meta, 'd' .. suffix)
 if last then
-  -- An entry written before the digest has none, and takes any resend.
+  -- An entry from an older crate has no digest, and accepts any resend.
   local last_epoch, last_sequence, first_id, last_id, last_digest =
     string.match(last, '^([^|]*)|(%d+)|([^|]*)|([^|]*)|?([^|]*)$')
   if last_epoch == epoch then
@@ -85,7 +85,7 @@ end
 
 trim(meta, log, now)
 local first_id, last_id = '', ''
--- The orphans go in an entry of their own, since the batch's first entry may carry its own
+-- The orphan item has an entry of its own, since the batch's first entry can have its own
 -- Superseded item.
 local orphan_id = ''
 if #withdrawn > 0 then

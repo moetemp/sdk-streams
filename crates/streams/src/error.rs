@@ -1,4 +1,4 @@
-//! The one error every call fails with, and its form for lang.
+//! The error of every failed call, and its form for lang.
 
 use crate::proto::StreamErrorDetails;
 use prost::Message;
@@ -12,7 +12,7 @@ pub type StreamResult<T> = Result<T, StreamError>;
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 #[non_exhaustive]
 pub enum Reason {
-    /// Nobody created the Stream, also after `create_wait`.
+    /// Nobody created the Stream, even after `create_wait`.
     NotFound,
     /// The Stream's Retention or safety TTL passed.
     Expired,

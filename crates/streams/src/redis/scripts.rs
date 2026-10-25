@@ -1,5 +1,5 @@
-//! The Lua scripts, one per operation. They are the canonical form of the stored format, so
-//! their hashes are pinned. A change to a script is a change of the format.
+//! The Lua scripts, one per operation. They are the canonical form of the stored format, so a
+//! change to a script is a change of the format.
 
 use redis::Script;
 use std::sync::LazyLock;

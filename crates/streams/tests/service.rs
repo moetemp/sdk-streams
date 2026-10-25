@@ -1,4 +1,4 @@
-//! The five operations through the extension's byte call, as lang sends them, on a real Redis.
+//! The five operations through the extension's byte call, as lang sends them, on each backend.
 
 mod support;
 
@@ -88,7 +88,7 @@ fn client(attempt: i32) -> Producer {
     }
 }
 
-/// A client Producer that a test names, at `attempt`. Every backend takes it as sent.
+/// A client Producer that a test names, at `attempt`. Every backend accepts it as sent.
 fn named(name: &str, attempt: i32) -> Producer {
     Producer {
         kind: ProducerKind::Client as i32,
@@ -101,8 +101,8 @@ fn named(name: &str, attempt: i32) -> Producer {
     }
 }
 
-/// An Activity Producer of a made-up run, at `attempt`. A higher attempt withdraws the lower
-/// ones' Records. The server wants the Activity's task token, so only Redis and memory take it.
+/// An Activity Producer of a made-up run, at `attempt`. A higher attempt withdraws the lower ones'
+/// Records. The server requires the Activity's task token, so only Redis and memory accept it.
 fn activity(attempt: i32, scheduled: i64) -> Producer {
     Producer {
         kind: ProducerKind::Activity as i32,
@@ -358,8 +358,8 @@ async fn a_topic_filter_keeps_superseded_items() {
         .unwrap();
         let all = case.read(ReadRecordsRequest::default()).await.unwrap();
         assert_eq!(texts(&all), ["old", "<superseded>", "b1", "a1"]);
-        // The item comes just before the batch's first Record. Redis keeps both in one entry with
-        // one offset, and the server gives the item its own offset just below.
+        // The item is just before the batch's first Record. Redis stores both in one entry with one
+        // offset, and the server gives the item its own offset just below.
         let superseded = &all.records[1];
         assert!(all.records[0].offset < superseded.offset);
         assert!(superseded.offset <= all.records[2].offset);
@@ -517,7 +517,7 @@ async fn a_close_ends_every_read_with_its_record() {
 async fn a_read_from_a_trimmed_offset_fails_as_expired() {
     for case in cases_for(Needs::SHORT_TIMES).await {
         case.create(millis(200)).await.unwrap();
-        // Each write keeps the client Stream one more Retention, so only the old Record goes.
+        // Each write extends the Stream's expiry by one Retention, so only the old Record expires.
         let old = case
             .append(client(1), 1, vec![record("", "old")])
             .await
@@ -629,9 +629,9 @@ async fn a_read_of_an_expired_closed_stream_fails_instead_of_waiting() {
     }
 }
 
-/// A filtered read scans on past the scan cap with no wait while entries are left, so a match
-/// after 10,000 entries of other Topics comes at once. A read with no wait answers an empty page
-/// that moved `next_offset`, and the next read from there finds the match.
+/// A filtered read continues past the scan cap with no wait while entries are left, so a match
+/// after 10,000 entries of other Topics returns at once. A read with no wait returns an empty page
+/// with an advanced `next_offset`, and the next read from there finds the match.
 #[tokio::test]
 async fn a_filtered_read_scans_past_the_cap_without_waiting() {
     for case in cases_for(Needs::CALLS).await {
@@ -695,7 +695,7 @@ async fn a_prefix_filter_reads_the_topics_under_it_and_keeps_superseded_items() 
             .await
             .unwrap();
         assert_eq!(texts(&read), ["old", "<superseded>", "t1", "a1", "b1"]);
-        // A filter that matches nothing scans the log and moves the offset on.
+        // A filter that matches nothing scans the log and advances the offset.
         let none = case
             .read(ReadRecordsRequest {
                 topic_prefixes: vec!["nothing/".to_string()],
@@ -808,7 +808,7 @@ async fn a_create_answer_names_the_backend_and_the_store_never_reads_it() {
     }
 }
 
-/// The Local Activity Producer of a Workflow call in run `run`, as S108 writes it.
+/// The Local Activity Producer of a Workflow call in run `run`.
 fn local_activity(run: &str) -> Producer {
     Producer {
         kind: ProducerKind::LocalActivity as i32,
@@ -947,8 +947,8 @@ async fn only_a_later_run_s_local_activity_withdraws_a_run_on_append() {
     }
 }
 
-/// The user Local Activity `call-1` of `run`, dispatched by the Workflow Task `[started]`. A
-/// rerun in a later task keeps the Producer id and gets newer task facts (field 20).
+/// The user Local Activity `call-1` of `run`, dispatched by the Workflow Task `[started]`. A rerun
+/// in a later task keeps the Producer id and has a newer dispatching task.
 fn user_local_activity(run: &str, started: i64, seconds: i64) -> Producer {
     Producer {
         kind: ProducerKind::LocalActivity as i32,
@@ -1017,8 +1017,8 @@ async fn a_rerun_local_activity_supersedes_its_first_attempt() {
         .await
         .unwrap_err();
         assert_eq!(reason(&late), "stream_fenced");
-        // A Reader sees the first attempt, then the Superseded item that withdraws it, then
-        // the second attempt. Applied, only the second attempt stays.
+        // A Reader sees the first attempt, then the Superseded item that withdraws it, then the
+        // second attempt. After it applies the item, only the second attempt is visible.
         let read = case.read(ReadRecordsRequest::default()).await.unwrap();
         assert_eq!(texts(&read), ["first", "<superseded>", "second"]);
         let superseded = read.records[1].supersession.as_ref().unwrap();
@@ -1028,7 +1028,7 @@ async fn a_rerun_local_activity_supersedes_its_first_attempt() {
 }
 
 /// A write of the Local Activity `call` of `run`, dispatched by task `[started]`, with the run's
-/// last completed task `[completed]` (0 before the first) as S110 has lang send it.
+/// last completed task `[completed]`, or 0 before the first.
 fn local_activity_write(
     case: &Case,
     run: &str,
@@ -1054,7 +1054,7 @@ fn local_activity_write(
 }
 
 /// Only the close Activity, as the run's Workflow Producer, closes a Workflow's Stream. A Local
-/// Activity of the chain can't, also when a later write withdrew its task.
+/// Activity of the chain can't, even when a later write withdrew its task.
 #[tokio::test]
 async fn only_the_close_activity_closes_a_workflow_stream() {
     for case in cases_for(Needs::UNCHECKED).await {
@@ -1293,7 +1293,7 @@ async fn a_last_read_gives_the_newest_records_oldest_first_without_withdrawn_one
     }
 }
 
-/// A page keeps under `max_bytes`, and a larger Record still comes alone.
+/// A page stays under `max_bytes`, and a larger Record is still returned alone.
 #[tokio::test]
 async fn a_page_keeps_under_max_bytes_and_a_larger_record_comes_alone() {
     for case in cases_for(Needs::CALLS).await {

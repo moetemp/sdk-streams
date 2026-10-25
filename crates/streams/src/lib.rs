@@ -32,9 +32,9 @@ pub use extension::{
 };
 pub use service::{MAX_RECORDS, MAX_WAIT};
 
-/// The protos lang and the crate exchange.
+/// The protos that lang and the crate exchange.
 pub mod proto {
     pub use crate::protos::temporal::{api::streamservice::v1::*, sdk::streams::v1::*};
-    // Both packages have the message. The extension's is the one in extension errors.
+    // Both packages define `StreamErrorDetails`. Extension errors use the one of `sdk.streams.v1`.
     pub use crate::protos::temporal::sdk::streams::v1::StreamErrorDetails;
 }

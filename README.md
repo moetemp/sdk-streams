@@ -5,8 +5,8 @@ Internal and experimental.
 `temporalio-streams` is the Stream runtime for Temporal SDKs. It serves the Stream service of the
 Brook API proposal on the customer's Redis. The SDKs link this crate into their bridges. A bridge
 builds the runtime per client, as a plain object, and calls `StreamExtension::call` with a method
-name and proto bytes. A Workflow writes through a Local Activity per call, on the same calls.
-Temporal Core holds no stream code and no hook for it.
+name and proto bytes. A Workflow makes each Stream call from a Local Activity. Temporal Core has no
+Stream code.
 
 ## Stage pins
 
@@ -22,10 +22,10 @@ The crate depends on `temporalio-common` from one sdk-rust commit. That commit m
 
 ## Linking from a lang bridge
 
-A bridge that also links the sdk-rust crates must make the crate use its own copy of them, so that
-one type exists for each. Use the dependency URL in this exact form, with no `.git` suffix. A key
-that does not match byte for byte only warns "patch was not used", and the build then fails with
-two copies of each type.
+A bridge that also links the sdk-rust crates must patch this crate to use the bridge's copy of them,
+so that each type exists once. Use the dependency URL in this exact form, with no `.git` suffix.
+Cargo matches the `[patch]` key byte for byte. With any other form, Cargo only warns that the patch
+was not used, and the build fails with two copies of each type.
 
 ```toml
 [dependencies.temporalio-streams]
@@ -37,9 +37,9 @@ default-features = false
 temporalio-common = { path = "./sdk-core/crates/common" }
 ```
 
-The crate features `tls-ring` and `tls-aws-lc` forward to `temporalio-common`. A FIPS build takes
-`fips` with no default features. It turns on `tls-aws-lc` and the FIPS build of `aws-lc-rs`, which
-needs CMake and Go.
+The crate features `tls-ring` and `tls-aws-lc` forward to `temporalio-common`. A FIPS build uses the
+`fips` feature with no default features. It turns on `tls-aws-lc` and the FIPS build of `aws-lc-rs`,
+which needs CMake and Go.
 
 ## Protos and shared vectors
 
@@ -48,18 +48,18 @@ needs CMake and Go.
   generates the same file.
 - `protos/temporal/sdk/streams/v1/extension.proto` has the crate's own calls, such as the writer
   calls.
-- `nexus/stream-service.wit` is the Stream service as a System Nexus service, backed by the
-  proto above. Each SDK copies it and generates its bindings with nexgen. A test keeps every
-  line at most 100 columns.
+- `nexus/stream-service.wit` is the Stream service as a System Nexus service, with the messages of
+  the proto above. Each SDK copies it and generates its bindings with nexgen. A test checks that
+  every line is at most 100 columns.
 - `nexus/stream-writer.wit` is the crate's writer calls (`OpenWriter`, `WriteRecords`,
-  `CloseWriter`, `CloseWriters`) as an internal, client-only interface, backed by
-  `extension.proto`. It is not a Temporal API, and no server serves it. Each SDK copies it beside
+  `CloseWriter`, `CloseWriters`) as an internal, client-only interface, with the messages of
+  `extension.proto`. It isn't a Temporal API, and no server serves it. Each SDK copies it next to
   the Stream service WIT and generates a `Writer` for Activities and clients.
 - `protos/api_include` is a copy of the Temporal API protos, for imports only.
   `scripts/sync-api-protos.sh` refreshes it from the pinned sdk-rust commit, and CI fails when the
   copy differs.
-- `testdata/*.json` are the shared vectors: Stream ids, Producer ids, Redis keys and meta fields,
-  offsets, epoch keys, the withdrawal rule and the batch digest of a dedupe entry.
+- `testdata/*.json` are the shared vectors. They cover Stream ids, Producer ids, Redis keys and meta
+  fields, offsets, epoch keys, the withdrawal rule and the batch digest of a dedupe entry.
   `testdata/gen_vectors.py` writes them from a second implementation. Each SDK and the server run
   the same files.
 
@@ -69,8 +69,8 @@ The build needs `protoc`.
 
 - Format and lint: `cargo fmt --all -- --check`, then
   `cargo clippy --workspace --tests -- -D warnings`.
-- Tests: `cargo test --workspace`. With no Redis set, the Store, service, Workflow and writer
-  tests run on the memory Store only.
+- Tests: `cargo test --workspace`. With no Redis set, the Store, service and writer tests run on the
+  memory Store only.
 - FIPS: `cargo tree -e normal,build --no-default-features --features fips -i ring` prints
   nothing.
 - Redis: run `crates/streams/scripts/redis-test-servers.sh`, then the test command with the two

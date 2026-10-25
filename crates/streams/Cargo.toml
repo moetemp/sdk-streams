@@ -13,18 +13,18 @@ categories = ["development-tools"]
 
 [features]
 default = ["tls-ring"]
-# The TLS providers of the sdk-rust crates. A FIPS build takes `tls-aws-lc` with no default
-# features, so no crate in the build pulls `ring`.
+# The TLS providers of the sdk-rust crates. A FIPS build uses `tls-aws-lc` with no default features,
+# so that no crate in the build depends on `ring`.
 tls-ring = ["temporalio-common/tls-ring"]
 tls-aws-lc = ["temporalio-common/tls-aws-lc"]
-# A FIPS build: `tls-aws-lc`, and `aws-lc-rs` in FIPS mode, so the shared rustls provider links
+# Turns on `tls-aws-lc` and the FIPS mode of `aws-lc-rs`, so that the shared rustls provider links
 # `aws-lc-fips-sys`.
 fips = ["tls-aws-lc", "dep:aws-lc-rs"]
 
 [dependencies]
 async-trait = "0.1"
-# Only under `fips`. The crate never calls it. Its `fips` feature switches the one `aws-lc-rs` in
-# the build into FIPS mode.
+# Only with `fips`. The crate doesn't call it. Its `fips` feature puts the one `aws-lc-rs` of the
+# build in FIPS mode.
 aws-lc-rs = { version = "1", features = ["fips"], optional = true }
 crc16 = "0.4"
 parking_lot = "0.12"

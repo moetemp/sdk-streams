@@ -1,6 +1,6 @@
-//! The Store rules, on a real Redis, standalone and as a cluster, and on the memory Store. One
-//! suite runs on all of them, so they can't drift. Start the Redis servers with
-//! `scripts/redis-test-servers.sh` and set the two URLs it prints.
+//! The Store rules, on Redis standalone, on a Redis cluster and on the memory Store. One suite runs
+//! on all of them, so that they keep the same rules. Start the Redis servers with
+//! `scripts/redis-test-servers.sh` and set the two URLs that it prints.
 
 mod support;
 
@@ -44,7 +44,7 @@ fn client(attempt: i32) -> Producer {
     }
 }
 
-/// A second client Producer, which every backend takes as sent.
+/// A second client Producer, which every backend accepts as sent.
 fn other_client() -> Producer {
     Producer {
         id: named_client_producer_id("other"),
@@ -131,7 +131,7 @@ async fn a_create_writes_the_key_once_and_keeps_its_retention() {
     }
 }
 
-/// A resend with the last sequence gets the offsets of its first answer, also after another
+/// A resend with the last sequence gets the offsets of its first result, even after another
 /// Producer wrote, and a lower sequence is refused.
 #[tokio::test]
 async fn a_resend_gets_its_first_positions_and_a_lower_sequence_is_refused() {
@@ -156,8 +156,8 @@ async fn a_resend_gets_its_first_positions_and_a_lower_sequence_is_refused() {
     }
 }
 
-/// A resend with the last sequence and other content fails as `seq_divergent` and writes
-/// nothing. With `RAW_KEYS`, a dedupe entry from before the digest takes any resend.
+/// A resend with the last sequence and other content fails as `seq_divergent` and writes nothing.
+/// With `RAW_KEYS`, a dedupe entry with no digest accepts any resend.
 #[tokio::test]
 async fn a_resend_with_other_content_fails_as_divergent() {
     for target in stores_for(Needs::CALLS).await {
@@ -170,7 +170,7 @@ async fn a_resend_with_other_content_fails_as_divergent() {
         if !target.gives.gives(Needs::RAW_KEYS) {
             continue;
         }
-        // A dedupe entry written before the digest has none, so it takes any resend.
+        // A dedupe entry from an older crate has no digest, so it accepts any resend.
         let field = temporalio_streams::ids::fields::dedupe(ProducerKind::Client as i32, &p.id);
         let entry = target.meta(&field).await.unwrap();
         target
@@ -206,7 +206,7 @@ async fn a_lower_epoch_is_fenced_for_each_producer_kind() {
 }
 
 /// A close refuses later appends but not a resend of an earlier batch, and a create finds the
-/// Stream closed. With `STORE_ANSWERS`, a second close answers `already` with the same offset.
+/// Stream closed. With `STORE_ANSWERS`, a second close returns `already` with the same offset.
 #[tokio::test]
 async fn a_close_stops_appends_but_not_a_resend() {
     for target in stores_for(Needs::CALLS).await {
@@ -329,7 +329,7 @@ async fn an_empty_batch_of_a_retry_withdraws_the_earlier_attempt() {
             .unwrap();
         assert!(!again.flagged);
         assert_eq!(again.offsets, None);
-        // An empty batch still moves the fence.
+        // An empty batch still raises the fence.
         let stale = append(&target, &activity("r1", 2, 20), 2, &["late"]).await;
         assert_eq!(stale.unwrap_err().reason, Reason::Fenced);
     }
@@ -540,9 +540,9 @@ fn workflow(run: &str) -> Producer {
     }
 }
 
-/// Only the owner closes a Stream: the close Activity of its run chain for a Workflow-owned one,
-/// a client for a client's. A Local Activity of the chain can't close it, and a ref with no
-/// chain can't either.
+/// Only the owner closes a Stream. That's the close Activity of its run chain for a Workflow-owned
+/// Stream, and a client for a client's Stream. A Local Activity of the chain can't close it, and a
+/// ref with no chain can't either.
 #[tokio::test]
 async fn only_the_owner_closes_a_stream() {
     for target in stores_for(Needs::UNCHECKED.and(Needs::STORE_ANSWERS)).await {
@@ -583,7 +583,7 @@ async fn only_the_owner_closes_a_stream() {
         }
         let closed = target.close_at(&owned("agent"), &workflow("r1")).await;
         assert!(!closed.unwrap().already);
-        // The owner check comes first, also on a closed Stream.
+        // The owner check comes first, even on a closed Stream.
         let refused = target.close_at(&owned("agent"), &la).await.unwrap_err();
         assert_eq!(refused.reason, Reason::NotOwner);
     }

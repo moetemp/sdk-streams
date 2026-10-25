@@ -23,7 +23,7 @@ use redis::Value;
 use std::{sync::Arc, time::Duration};
 use tokio::time::Instant;
 
-/// How to reach Redis and how long Streams live there.
+/// The Redis connection options and the Stream TTLs.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RedisStoreOptions {
     /// One `redis://` or `rediss://` URL, or the seed nodes of a cluster. Credentials and TLS
@@ -31,9 +31,9 @@ pub struct RedisStoreOptions {
     pub urls: Vec<String>,
     /// Whether `urls` are the seeds of a Redis Cluster.
     pub cluster: bool,
-    /// The start of every key, so Streams can share a Redis with other data.
+    /// The prefix of every key, so that Streams can share a Redis with other data.
     pub key_prefix: String,
-    /// The Retention of a Stream that its create gives none.
+    /// The Retention of a Stream whose create sets none.
     pub retention: Duration,
     /// How long an open Workflow-owned Stream stays after its last write.
     pub safety_ttl: Duration,
@@ -116,7 +116,7 @@ impl RedisStore {
         })
     }
 
-    /// The Retention of a Stream that its create gives none.
+    /// The Retention of a Stream whose create sets none.
     pub fn default_retention(&self) -> Duration {
         self.retention
     }
@@ -126,8 +126,7 @@ impl RedisStore {
     }
 
     /// Creates a Stream, or finds it. A retry run's create withdraws its previous run. A
-    /// Workflow-owned Stream keeps the run chain that its ref names, for the owner check of a
-    /// close.
+    /// Workflow-owned Stream stores the run chain of its ref, for the owner check of a close.
     pub async fn create(
         &self,
         namespace: &str,
@@ -303,8 +302,8 @@ impl RedisStore {
         entries.into_iter().map(entry).collect()
     }
 
-    /// Waits until the log has an entry after `after`, or `deadline` passes. Answers whether an
-    /// entry came. The wait blocks a connection of its own.
+    /// Waits until the log has an entry after `after`, or `deadline` passes. Returns whether an
+    /// entry came. The wait uses a dedicated connection.
     pub async fn wait_after(
         &self,
         namespace: &str,
@@ -575,8 +574,8 @@ async fn check_server(shared: &Shared) -> StreamResult<()> {
                 check_version(&node, &text)?;
             }
         }
-        // A user with only the Store's commands may lack INFO. A Redis before 7.0 then fails at
-        // the first read, on the read script's flags.
+        // A user with only the Store's commands may not have INFO. Then a Redis before 7.0 fails at
+        // the first read, on the flags of the read script.
         Err(error) if error.code() == Some("NOPERM") => {
             tracing::debug!("Could not read the Redis version: {error}");
         }
@@ -598,7 +597,7 @@ async fn check_server(shared: &Shared) -> StreamResult<()> {
                 }
             }
         }
-        // Managed services often refuse CONFIG. The policy is theirs to document then.
+        // Managed services often refuse CONFIG and document their eviction policy instead.
         Err(error) => tracing::debug!("Could not read maxmemory-policy: {error}"),
     }
     Ok(())

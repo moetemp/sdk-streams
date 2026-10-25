@@ -1,5 +1,5 @@
-//! A Store that lacks a capability: every call that needs it is refused cleanly, by name, with
-//! nothing written. The memory Store stands in for such a Store with one capability masked.
+//! A Store that lacks a capability refuses every call that needs it, by name, and writes nothing.
+//! The tests use the memory Store with one capability masked.
 
 mod support;
 
@@ -262,7 +262,7 @@ async fn a_retry_run_without_the_run_fence_is_refused_before_it_writes() {
     let error = case.create_owned("previous-run").await.unwrap_err();
     assert_eq!(refused_capability(&error), "run_fence");
     assert!(!case.created());
-    // A run that is no retry needs no run fence.
+    // A run that isn't a retry needs no run fence.
     case.create_owned("").await.unwrap();
     assert!(case.created());
 }
@@ -274,7 +274,7 @@ async fn every_store_and_wrapper_says_what_it_can_do() {
         Duration::from_secs(7200),
     ));
     assert_eq!(memory.capabilities(), Capabilities::ALL);
-    // A wrapper forwards what its Store can do. Only the mask comes off.
+    // A wrapper forwards the capabilities of its Store, less the masked ones.
     let wrapper = Masked {
         inner: memory.clone(),
         without: Capabilities::default(),

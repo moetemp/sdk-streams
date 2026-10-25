@@ -1,10 +1,8 @@
-// Internal. Not a Temporal API, and no server serves it. The crate's runtime object serves these
-// calls in process, backed by the messages in ../protos/temporal/sdk/streams/v1/
-// extension.proto. Lang reaches them through the bridge's call transport, from Activities and
-// clients only. So the interface is client-only and has no endpoint, which keeps it out of the
-// System Nexus path. The writer keeps the Producer epoch and the sequence in the crate. This file
-// is the source. Each SDK copies it beside stream-service.wit and generates its bindings with
-// nexgen.
+// Internal. This isn't a Temporal API, and no server serves it. The crate's runtime object serves
+// these calls in process, with the messages of ../protos/temporal/sdk/streams/v1/extension.proto.
+// Lang calls them through the bridge, from Activities and clients only. So the interface is
+// client-only and has no endpoint, and it isn't on the System Nexus path. This file is the source.
+// Each SDK copies it next to stream-service.wit and generates its bindings with nexgen.
 package temporal:streams@1.0.0;
 
 world writer {

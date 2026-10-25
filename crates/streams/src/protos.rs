@@ -1,8 +1,8 @@
-//! The generated protos: the Stream service of the API proposal, and the crate's own calls.
+//! The generated protos of the Stream service of the API proposal and of the crate's own calls.
 
 #![allow(missing_docs, unreachable_pub, clippy::all)]
 
-/// The Temporal API packages the crate generates. The rest map to `temporalio-common`.
+/// The Temporal API packages that the crate generates. Others map to `temporalio-common`.
 pub mod temporal {
     pub mod api {
         pub mod streamservice {

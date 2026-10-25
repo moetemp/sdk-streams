@@ -1,10 +1,9 @@
-//! The crate's metrics, on the meter lang gives, or on a no-op meter.
+//! The crate's metrics. They use the meter that lang gives, or a no-op meter.
 
 use temporalio_common::telemetry::metrics::{
     Counter, MetricAttributes, MetricParameters, TemporalMeter, UpDownCounter,
 };
 
-/// Every metric of the Stream runtime.
 #[derive(Clone)]
 pub(crate) struct Metrics {
     attributes: MetricAttributes,

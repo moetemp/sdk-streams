@@ -1,7 +1,7 @@
 # The Redis layout
 
 Every SDK that reads or writes Brook Streams on Redis must use this layout. The Lua scripts in
-`lua/` are its canonical form, and `testdata/*.json` pins the ids, keys and fields.
+`lua/` are its canonical form, and `testdata/*.json` has the expected ids, keys and fields.
 
 ## Keys
 
@@ -11,7 +11,7 @@ Every SDK that reads or writes Brook Streams on Redis must use this layout. The 
 ```
 
 Each part is percent-encoded. The part in braces is the hash tag, so both keys are in one cluster
-slot. `CreateStream` writes `:meta`, and the first entry makes `:log`.
+slot. `CreateStream` writes `:meta`, and the first append creates `:log`.
 
 ## The meta hash
 
@@ -33,36 +33,36 @@ slot. `CreateStream` writes `:meta`, and the first entry makes `:log`.
 | `run\|<run>` | Set when a Producer of the run wrote a Record here |
 | `wr\|<run>` | Set when a Workflow retry withdrew the run |
 
-`<kind>` is the `ProducerKind` number, and `<run>` is the percent-encoded run id. The digest is
-the batch's content digest (`testdata/digests.json`). A `sequence` is from 1 to 2^53 - 1, which
-a script compares exactly, and the entry keeps its digits as sent. A resend with the last
-`sequence` and the same digest gets the stored ids. Another digest is refused with
-`seq_divergent`. An entry with no digest, written by an older crate, takes any resend. An epoch
-key is the epoch's fields as fixed-width hex, in the order of comparison, so two keys compare as
-strings.
+`<kind>` is the `ProducerKind` number, and `<run>` is the percent-encoded run id. The digest is the
+batch's content digest (`testdata/digests.json`). A `sequence` is from 1 to 2^53 - 1, which a script
+compares exactly, and the entry stores its digits as sent. A resend with the last `sequence` and the
+same digest gets the stored ids. Another digest is refused with `seq_divergent`. An entry with no
+digest, written by an older crate, accepts any resend. An epoch key is the epoch's fields as
+fixed-width hex, in the order of comparison, so two keys compare as strings.
 
 ## Log entries
 
 Each entry has `r`, the encoded `temporal.api.streamservice.v1.StreamRecord` with no offset, and
-`s`, the encoded `Supersession`, on the first entry of a batch that withdraws. An entry with
-only `s` withdraws and has no Record. A reader gives a `SUPERSEDED` item for `s` just before the
-Record of the same entry. An offset is the entry id `<ms>-<seq>` packed as `ms << 20 | seq`.
+`s`, the encoded `Supersession`, on the first entry of a batch that withdraws. An entry with only
+`s` withdraws and has no Record. A reader returns a `SUPERSEDED` item for `s` just before the Record
+of the same entry. An offset is the entry id `<ms>-<seq>` packed as `ms << 20 | seq`.
 
-The first batch of a Producer's newer epoch withdraws its earlier epochs' Records, for a
-Workflow, a Local Activity and an Activity. A client's newer epoch only fences: it writes no `s`,
-since a restarted client's earlier Records are real messages, not a failed attempt's.
+The first batch of a Producer's newer epoch withdraws its earlier epochs' Records, for a Workflow, a
+Local Activity and an Activity. A client's newer epoch only fences. It writes no `s`, since a
+restarted client's earlier Records are real messages, not a failed attempt's.
 
 ## Orphaned Local Activity Records
 
-A Local Activity batch that gives its run's last completed Workflow Task (`previous_completed_task`,
-0 before the first) and failed tasks names its dispatching task in its epoch. Before it writes,
-the append script withdraws the Records of the run's Local Activity tasks in `oa` that never
-completed: those after the completed task and before the batch's own task, the failed ones and the
-lower attempts. It writes one entry with only `s`, a Workflow-kind `Supersession` (the run's
-Workflow Producer, the batch's task, the completed and failed tasks), so a Reader's Workflow rule
-withdraws them. It drops the tasks at or before the completed one, adds its own task, and keeps the
-withdrawn ones in `ow`, which fences a late write of such a task. A batch with no completed task
-skips the rule. A Stream that the run never writes again keeps its orphans.
+A Local Activity batch can send its run's last completed Workflow Task (`previous_completed_task`, 0
+before the first) and failed tasks. Its epoch names its dispatching task. Before it writes, the
+append script withdraws the Records of the run's Local Activity tasks in `oa` that never completed.
+These are the tasks after the completed task and before the batch's own task, the failed tasks and
+the lower attempts. The script writes one entry with only `s`, a Workflow-kind `Supersession` with
+the run's Workflow Producer, the batch's task, and the completed and failed tasks. So a Reader
+withdraws them with the Workflow rule. Then the script drops the tasks at or before the completed
+one from `oa` and adds the batch's own task. It stores the withdrawn tasks in `ow`, which fences a
+late write of such a task. A batch with no completed task skips the rule. A Stream that the run
+never writes again keeps its orphans.
 
 ## Close
 
@@ -81,9 +81,9 @@ otherwise. Each append drops the Records older than the Retention, and a read hi
 ## Access
 
 Redis checks the ACL of the script call and of each command the script runs. The crate sends
-`EVALSHA`, and `SCRIPT LOAD` when Redis doesn't have the script yet. `EVALSHA` counts as a write
-to its keys, so each role needs read and write access to `~<prefix>:{<namespace>:*`, a Reader
-too. These are the commands of each role.
+`EVALSHA`, and `SCRIPT LOAD` when Redis doesn't have the script yet. `EVALSHA` counts as a write to
+its keys, so each role, a Reader too, needs read and write access to `~<prefix>:{<namespace>:*`.
+These are the commands of each role.
 
 - A Producer, which creates, appends and closes, needs `+evalsha`, `+script|load`, `+time`,
   `+hget`, `+hset`, `+hdel`, `+exists`, `+pexpireat`, `+xadd`, `+xtrim` and `+xrevrange`.
@@ -101,8 +101,8 @@ ignores a refused `CONFIG`. `tests/acl.rs` runs each role with exactly these com
   call again, or when a later Local Activity write names the failed task. A call that no later
   write covers, for example because a Signal changed the path and no Local Activity writes
   again, keeps its Records. The memory Store has the same limit.
-- Core names only the last 100 failed Workflow Tasks of a run. An older failed task before the
-  last completed one keeps its Local Activity Records.
+- Core sends only the last 100 failed Workflow Tasks of a run. An older failed task before the last
+  completed one keeps its Local Activity Records.
 - A read or a describe served by a replica that is behind can report a Stream open just after
   its close.
 - Redis can't tie a run to its run chain. A run of another chain that holds the owner's ref, such

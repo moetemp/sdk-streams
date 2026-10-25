@@ -213,8 +213,8 @@ async fn a_filtered_page_reads_the_log_in_chunks_whatever_its_max() {
     assert!(reads <= 10, "{reads} log reads");
 }
 
-/// A trim between a read's state and its log read fails a read from an offset as expired, so
-/// the gap never passes in silence. A read from the start skips what the trim took.
+/// A trim between a read's state and its log read fails a read from an offset as expired, so that
+/// the Reader always sees the gap. A read from the start skips the trimmed Records.
 #[tokio::test]
 async fn a_trim_under_a_read_from_an_offset_fails_it_as_expired() {
     let (store, ext) = counted();
