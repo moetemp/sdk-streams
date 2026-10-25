@@ -80,9 +80,20 @@ otherwise. Each append drops the Records older than the Retention, and a read hi
 
 ## Access
 
-A Producer needs `+evalsha` and `+script|load` on `~<prefix>:{<namespace>:*`. A Reader needs
-`+evalsha_ro` or `+evalsha`, `+xread` and the read keys, and `+xrevrange` for a read of the last
-Records. A cluster also needs `+cluster|slots`.
+Redis checks the ACL of the script call and of each command the script runs. The crate sends
+`EVALSHA`, and `SCRIPT LOAD` when Redis doesn't have the script yet. `EVALSHA` counts as a write
+to its keys, so each role needs read and write access to `~<prefix>:{<namespace>:*`, a Reader
+too. These are the commands of each role.
+
+- A Producer, which creates, appends and closes, needs `+evalsha`, `+script|load`, `+time`,
+  `+hget`, `+hset`, `+hdel`, `+exists`, `+pexpireat`, `+xadd`, `+xtrim` and `+xrevrange`.
+- A Reader, which reads and describes, needs `+evalsha`, `+script|load`, `+time`, `+hmget` and
+  `+xrange`, with `+xread` for a read that waits and `+xrevrange` for a read of the last Records.
+
+A process with both roles needs both sets, and a cluster also needs `+cluster|slots`. On connect,
+the Store runs `INFO server` to check the Redis version and `CONFIG GET maxmemory-policy` to warn
+about eviction. Neither is required. Without `+info` the Store skips the version check, and it
+ignores a refused `CONFIG`. `tests/acl.rs` runs each role with exactly these commands.
 
 ## Known limits
 

@@ -567,10 +567,20 @@ fn entry(value: Value) -> StreamResult<Entry> {
 async fn check_server(shared: &Shared) -> StreamResult<()> {
     let mut info = redis::cmd("INFO");
     info.arg("server");
-    for (node, reply) in shared.on_each_primary(info).await.mapped()? {
-        let text: String =
-            redis::from_redis_value(reply).map_err(|error| bad_reply("INFO", error))?;
-        check_version(&node, &text)?;
+    match shared.on_each_primary(info).await {
+        Ok(replies) => {
+            for (node, reply) in replies {
+                let text: String =
+                    redis::from_redis_value(reply).map_err(|error| bad_reply("INFO", error))?;
+                check_version(&node, &text)?;
+            }
+        }
+        // A user with only the Store's commands may lack INFO. A Redis before 7.0 then fails at
+        // the first read, on the read script's flags.
+        Err(error) if error.code() == Some("NOPERM") => {
+            tracing::debug!("Could not read the Redis version: {error}");
+        }
+        Err(error) => return Err(errors::stream_error(&error)),
     }
     let mut policy = redis::cmd("CONFIG");
     policy.arg("GET").arg("maxmemory-policy");

@@ -145,8 +145,8 @@
   `auto_close` (4). The WIT drops `auto-close` from the create and the describe. Gone are the
   `auto_close` capability, `Store::auto_close`, the `auto_close` argument of `Store::create`, the
   auto close script and the `ac` and `la` meta fields. A create is idempotent for one Retention
-  only. A read writes nothing, so a Reader needs read access only. The scripts ignore `ac` and
-  `la` on a Stream that an older crate created.
+  only. A read writes nothing. The scripts ignore `ac` and `la` on a Stream that an older crate
+  created.
 - The crate pins `temporalio-common` at sdk-rust Brook c8 `320e725f`, which reverts the cache-off
   eviction reason. The crate uses nothing that the revert touches.
 - A read of a closed Stream whose Retention passed fails with `stream_expired`, as a read of an
@@ -168,3 +168,7 @@
   fails with `stream_invalid`, instead of withdrawing and fencing that run.
 - A close of a Workflow-owned Stream whose ref has no `workflow_id` fails with `stream_not_owner`
   when the Stream keeps its run chain. It skipped the chain check before.
+- `docs/redis.md` lists the Redis commands of a Producer and of a Reader, and `tests/acl.rs` runs
+  each role with exactly those. A Reader needs write access to the keys too, since `EVALSHA`
+  counts as a write. `RedisStore::connect` skips the version check when the user may not run
+  `INFO`, instead of failing.
