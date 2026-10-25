@@ -1,7 +1,7 @@
 //! The crate's metrics. They use the meter that lang gives, or a no-op meter.
 
 use temporalio_common::telemetry::metrics::{
-    Counter, MetricAttributes, MetricParameters, TemporalMeter,
+    Counter, MetricAttributes, MetricParameters, TemporalMeter, UpDownCounter,
 };
 
 #[derive(Clone)]
@@ -9,6 +9,7 @@ pub(crate) struct Metrics {
     attributes: MetricAttributes,
     fenced: Counter,
     superseded: Counter,
+    blocking_reads_waiting: UpDownCounter,
 }
 
 fn parameters(
@@ -37,6 +38,11 @@ impl Metrics {
                 "Superseded flags that the Store set",
                 "",
             )),
+            blocking_reads_waiting: meter.up_down_counter(parameters(
+                "stream_blocking_reads_waiting",
+                "Reads that wait on the Store",
+                "",
+            )),
         }
     }
 
@@ -46,5 +52,10 @@ impl Metrics {
 
     pub(crate) fn superseded(&self) {
         self.superseded.add(1, &self.attributes);
+    }
+
+    pub(crate) fn read_waits(&self, waiting: bool) {
+        self.blocking_reads_waiting
+            .add(if waiting { 1 } else { -1 }, &self.attributes);
     }
 }

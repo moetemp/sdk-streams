@@ -29,6 +29,7 @@ pub use runtime::{
     MEMORY_RUNTIME_NAME, MemoryStreamRuntime, REDIS_RUNTIME_NAME, RedisStreamRuntime,
     RuntimeOptions, StreamRuntime,
 };
+pub use service::{MAX_RECORDS, MAX_WAIT};
 
 /// The protos that lang and the crate exchange.
 pub mod proto {
