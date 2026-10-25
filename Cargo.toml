@@ -10,6 +10,7 @@ license-file = "LICENSE.txt"
 prost = "0.14"
 # The well-known types the sdk-rust crates use, under the name the generated code expects.
 prost-types = { version = "0.7", package = "prost-wkt-types" }
+serde_json = "1.0"
 thiserror = "2"
 tonic = { version = "0.14.6", default-features = false }
 tonic-prost-build = "0.14.6"

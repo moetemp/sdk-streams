@@ -1,0 +1,65 @@
+{
+  "streams": [
+    {
+      "prefix": "temporal-streams",
+      "namespace": "default",
+      "workflow_id": "agent-1",
+      "first_run_id": "run-1",
+      "name": null,
+      "stream_id": "agent-1:run-1",
+      "meta": "temporal-streams:{default:agent-1%3Arun-1}:meta",
+      "log": "temporal-streams:{default:agent-1%3Arun-1}:log"
+    },
+    {
+      "prefix": "temporal-streams",
+      "namespace": "default",
+      "workflow_id": "agent-1",
+      "first_run_id": "run-1",
+      "name": "turn-3",
+      "stream_id": "agent-1:run-1:turn-3",
+      "meta": "temporal-streams:{default:agent-1%3Arun-1%3Aturn-3}:meta",
+      "log": "temporal-streams:{default:agent-1%3Arun-1%3Aturn-3}:log"
+    },
+    {
+      "prefix": "p:x",
+      "namespace": "ns{1}",
+      "workflow_id": "a:b/c",
+      "first_run_id": "r%1",
+      "name": "é name",
+      "stream_id": "a%3Ab%2Fc:r%251:%C3%A9%20name",
+      "meta": "p%3Ax:{ns%7B1%7D:a%253Ab%252Fc%3Ar%25251%3A%25C3%25A9%2520name}:meta",
+      "log": "p%3Ax:{ns%7B1%7D:a%253Ab%252Fc%3Ar%25251%3A%25C3%25A9%2520name}:log"
+    }
+  ],
+  "producers": {
+    "workflow": {
+      "run_id": "run:1",
+      "id": "wf:run%3A1"
+    },
+    "local_activity": {
+      "run_id": "run:1",
+      "call_key": "k-1",
+      "id": "la:run%3A1:k-1"
+    },
+    "activity": {
+      "run_id": "run:1",
+      "activity_id": "a/1",
+      "schedule_key": "s-1",
+      "id": "act:run%3A1:a%2F1:s-1"
+    },
+    "standalone_activity": {
+      "activity_id": "sa 1",
+      "activity_run_id": "ar-1",
+      "id": "sa:sa%201:ar-1"
+    },
+    "client": {
+      "identity": "1@host",
+      "process_key": "p-1",
+      "id": "client:1%40host:p-1"
+    },
+    "named_client": {
+      "name": "ingest:eu/1",
+      "id": "client:ingest%3Aeu%2F1"
+    }
+  }
+}

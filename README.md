@@ -29,7 +29,7 @@ The crate features `tls-ring` and `tls-aws-lc` forward to `temporalio-common`. A
 `fips` feature with no default features. It turns on `tls-aws-lc` and the FIPS build of `aws-lc-rs`,
 which needs CMake and Go.
 
-## Protos
+## Protos and shared vectors
 
 - `protos/temporal/api/stream/v1/message.proto`,
   `protos/temporal/api/streamservice/v1/request_response.proto` and
@@ -41,6 +41,10 @@ which needs CMake and Go.
 - `protos/api_include` is a copy of the Temporal API protos, for imports only.
   `scripts/sync-api-protos.sh` refreshes it from the sdk-rust release tag of the `temporalio-common`
   version in `Cargo.lock`, and CI fails when the copy differs.
+- `testdata/*.json` are the shared vectors. They cover Stream ids, Producer ids, Redis keys and meta
+  fields, offsets, epoch keys, the withdrawal rule and the batch digest of a dedupe entry.
+  `testdata/gen_vectors.py` writes them from a second implementation. Each SDK and the server run
+  the same files.
 
 ## Building and testing
 

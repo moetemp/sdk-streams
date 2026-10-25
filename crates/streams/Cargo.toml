@@ -27,12 +27,16 @@ fips = ["tls-aws-lc", "dep:aws-lc-rs"]
 aws-lc-rs = { version = "1", features = ["fips"], optional = true }
 prost = { workspace = true }
 prost-types = { workspace = true }
+sha2 = "0.10"
 temporalio-common = { workspace = true }
 thiserror = { workspace = true }
 tonic = { workspace = true }
 
 [build-dependencies]
 tonic-prost-build = { workspace = true }
+
+[dev-dependencies]
+serde_json = { workspace = true }
 
 [lints]
 workspace = true

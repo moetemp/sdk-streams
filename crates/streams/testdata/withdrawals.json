@@ -1,0 +1,1354 @@
+[
+  {
+    "name": "e1 B at the failed task 5 goes",
+    "supersession": {
+      "producer_kind": "workflow",
+      "producer_id": "wf:r1",
+      "run_id": "r1",
+      "epoch": {
+        "task_started_event_id": 11,
+        "task_attempt": 1,
+        "task_started_time": [
+          100,
+          0
+        ]
+      },
+      "failed_tasks": [
+        5
+      ],
+      "previous_completed_task": {
+        "started_event_id": 8,
+        "attempt": 1,
+        "started_time": [
+          100,
+          0
+        ]
+      }
+    },
+    "record": {
+      "producer": {
+        "kind": "workflow",
+        "id": "wf:r1",
+        "run_id": "r1",
+        "epoch": {
+          "task_started_event_id": 5,
+          "task_attempt": 1,
+          "task_started_time": [
+            100,
+            0
+          ]
+        }
+      }
+    },
+    "withdraws": true
+  },
+  {
+    "name": "e1 a Record at the completed task 8 stays",
+    "supersession": {
+      "producer_kind": "workflow",
+      "producer_id": "wf:r1",
+      "run_id": "r1",
+      "epoch": {
+        "task_started_event_id": 11,
+        "task_attempt": 1,
+        "task_started_time": [
+          100,
+          0
+        ]
+      },
+      "failed_tasks": [
+        5
+      ],
+      "previous_completed_task": {
+        "started_event_id": 8,
+        "attempt": 1,
+        "started_time": [
+          100,
+          0
+        ]
+      }
+    },
+    "record": {
+      "producer": {
+        "kind": "workflow",
+        "id": "wf:r1",
+        "run_id": "r1",
+        "epoch": {
+          "task_started_event_id": 8,
+          "task_attempt": 1,
+          "task_started_time": [
+            100,
+            0
+          ]
+        }
+      }
+    },
+    "withdraws": false
+  },
+  {
+    "name": "e1 a Record before c stays",
+    "supersession": {
+      "producer_kind": "workflow",
+      "producer_id": "wf:r1",
+      "run_id": "r1",
+      "epoch": {
+        "task_started_event_id": 11,
+        "task_attempt": 1,
+        "task_started_time": [
+          100,
+          0
+        ]
+      },
+      "failed_tasks": [
+        5
+      ],
+      "previous_completed_task": {
+        "started_event_id": 8,
+        "attempt": 1,
+        "started_time": [
+          100,
+          0
+        ]
+      }
+    },
+    "record": {
+      "producer": {
+        "kind": "workflow",
+        "id": "wf:r1",
+        "run_id": "r1",
+        "epoch": {
+          "task_started_event_id": 3,
+          "task_attempt": 1,
+          "task_started_time": [
+            100,
+            0
+          ]
+        }
+      }
+    },
+    "withdraws": false
+  },
+  {
+    "name": "e2 B goes",
+    "supersession": {
+      "producer_kind": "workflow",
+      "producer_id": "wf:r1",
+      "run_id": "r1",
+      "epoch": {
+        "task_started_event_id": 8,
+        "task_attempt": 1,
+        "task_started_time": [
+          100,
+          0
+        ]
+      },
+      "failed_tasks": [
+        5
+      ],
+      "previous_completed_task": {
+        "started_event_id": 2,
+        "attempt": 1,
+        "started_time": [
+          100,
+          0
+        ]
+      }
+    },
+    "record": {
+      "producer": {
+        "kind": "workflow",
+        "id": "wf:r1",
+        "run_id": "r1",
+        "epoch": {
+          "task_started_event_id": 5,
+          "task_attempt": 1,
+          "task_started_time": [
+            100,
+            0
+          ]
+        }
+      }
+    },
+    "withdraws": true
+  },
+  {
+    "name": "e2 an older completed Record stays",
+    "supersession": {
+      "producer_kind": "workflow",
+      "producer_id": "wf:r1",
+      "run_id": "r1",
+      "epoch": {
+        "task_started_event_id": 8,
+        "task_attempt": 1,
+        "task_started_time": [
+          100,
+          0
+        ]
+      },
+      "failed_tasks": [
+        5
+      ],
+      "previous_completed_task": {
+        "started_event_id": 2,
+        "attempt": 1,
+        "started_time": [
+          100,
+          0
+        ]
+      }
+    },
+    "record": {
+      "producer": {
+        "kind": "workflow",
+        "id": "wf:r1",
+        "run_id": "r1",
+        "epoch": {
+          "task_started_event_id": 2,
+          "task_attempt": 1,
+          "task_started_time": [
+            100,
+            0
+          ]
+        }
+      }
+    },
+    "withdraws": false
+  },
+  {
+    "name": "e3 D at a lower attempt of t goes",
+    "supersession": {
+      "producer_kind": "workflow",
+      "producer_id": "wf:r1",
+      "run_id": "r1",
+      "epoch": {
+        "task_started_event_id": 8,
+        "task_attempt": 3,
+        "task_started_time": [
+          100,
+          0
+        ]
+      },
+      "failed_tasks": [],
+      "previous_completed_task": {
+        "started_event_id": 5,
+        "attempt": 1,
+        "started_time": [
+          100,
+          0
+        ]
+      }
+    },
+    "record": {
+      "producer": {
+        "kind": "workflow",
+        "id": "wf:r1",
+        "run_id": "r1",
+        "epoch": {
+          "task_started_event_id": 8,
+          "task_attempt": 2,
+          "task_started_time": [
+            100,
+            0
+          ]
+        }
+      }
+    },
+    "withdraws": true
+  },
+  {
+    "name": "e3 a Record of t itself stays",
+    "supersession": {
+      "producer_kind": "workflow",
+      "producer_id": "wf:r1",
+      "run_id": "r1",
+      "epoch": {
+        "task_started_event_id": 8,
+        "task_attempt": 3,
+        "task_started_time": [
+          100,
+          0
+        ]
+      },
+      "failed_tasks": [],
+      "previous_completed_task": {
+        "started_event_id": 5,
+        "attempt": 1,
+        "started_time": [
+          100,
+          0
+        ]
+      }
+    },
+    "record": {
+      "producer": {
+        "kind": "workflow",
+        "id": "wf:r1",
+        "run_id": "r1",
+        "epoch": {
+          "task_started_event_id": 8,
+          "task_attempt": 3,
+          "task_started_time": [
+            100,
+            0
+          ]
+        }
+      }
+    },
+    "withdraws": false
+  },
+  {
+    "name": "e4 U at an earlier started time goes",
+    "supersession": {
+      "producer_kind": "workflow",
+      "producer_id": "wf:r1",
+      "run_id": "r1",
+      "epoch": {
+        "task_started_event_id": 9,
+        "task_attempt": 1,
+        "task_started_time": [
+          200,
+          0
+        ]
+      },
+      "failed_tasks": [],
+      "previous_completed_task": {
+        "started_event_id": 6,
+        "attempt": 1,
+        "started_time": [
+          100,
+          0
+        ]
+      }
+    },
+    "record": {
+      "producer": {
+        "kind": "workflow",
+        "id": "wf:r1",
+        "run_id": "r1",
+        "epoch": {
+          "task_started_event_id": 9,
+          "task_attempt": 1,
+          "task_started_time": [
+            150,
+            0
+          ]
+        }
+      }
+    },
+    "withdraws": true
+  },
+  {
+    "name": "e5 D between c and t goes",
+    "supersession": {
+      "producer_kind": "workflow",
+      "producer_id": "wf:r1",
+      "run_id": "r1",
+      "epoch": {
+        "task_started_event_id": 14,
+        "task_attempt": 1,
+        "task_started_time": [
+          100,
+          0
+        ]
+      },
+      "failed_tasks": [],
+      "previous_completed_task": {
+        "started_event_id": 5,
+        "attempt": 1,
+        "started_time": [
+          100,
+          0
+        ]
+      }
+    },
+    "record": {
+      "producer": {
+        "kind": "workflow",
+        "id": "wf:r1",
+        "run_id": "r1",
+        "epoch": {
+          "task_started_event_id": 11,
+          "task_attempt": 2,
+          "task_started_time": [
+            100,
+            0
+          ]
+        }
+      }
+    },
+    "withdraws": true
+  },
+  {
+    "name": "e5 a Record at c stays",
+    "supersession": {
+      "producer_kind": "workflow",
+      "producer_id": "wf:r1",
+      "run_id": "r1",
+      "epoch": {
+        "task_started_event_id": 14,
+        "task_attempt": 1,
+        "task_started_time": [
+          100,
+          0
+        ]
+      },
+      "failed_tasks": [],
+      "previous_completed_task": {
+        "started_event_id": 5,
+        "attempt": 1,
+        "started_time": [
+          100,
+          0
+        ]
+      }
+    },
+    "record": {
+      "producer": {
+        "kind": "workflow",
+        "id": "wf:r1",
+        "run_id": "r1",
+        "epoch": {
+          "task_started_event_id": 5,
+          "task_attempt": 1,
+          "task_started_time": [
+            100,
+            0
+          ]
+        }
+      }
+    },
+    "withdraws": false
+  },
+  {
+    "name": "c attempt 0, an earlier attempt at c goes",
+    "supersession": {
+      "producer_kind": "workflow",
+      "producer_id": "wf:r1",
+      "run_id": "r1",
+      "epoch": {
+        "task_started_event_id": 14,
+        "task_attempt": 1,
+        "task_started_time": [
+          100,
+          0
+        ]
+      },
+      "failed_tasks": [],
+      "previous_completed_task": {
+        "started_event_id": 8,
+        "attempt": 0,
+        "started_time": [
+          300,
+          0
+        ]
+      }
+    },
+    "record": {
+      "producer": {
+        "kind": "workflow",
+        "id": "wf:r1",
+        "run_id": "r1",
+        "epoch": {
+          "task_started_event_id": 8,
+          "task_attempt": 1,
+          "task_started_time": [
+            200,
+            0
+          ]
+        }
+      }
+    },
+    "withdraws": true
+  },
+  {
+    "name": "c attempt 0, c itself stays",
+    "supersession": {
+      "producer_kind": "workflow",
+      "producer_id": "wf:r1",
+      "run_id": "r1",
+      "epoch": {
+        "task_started_event_id": 14,
+        "task_attempt": 1,
+        "task_started_time": [
+          100,
+          0
+        ]
+      },
+      "failed_tasks": [],
+      "previous_completed_task": {
+        "started_event_id": 8,
+        "attempt": 0,
+        "started_time": [
+          300,
+          0
+        ]
+      }
+    },
+    "record": {
+      "producer": {
+        "kind": "workflow",
+        "id": "wf:r1",
+        "run_id": "r1",
+        "epoch": {
+          "task_started_event_id": 8,
+          "task_attempt": 2,
+          "task_started_time": [
+            300,
+            0
+          ]
+        }
+      }
+    },
+    "withdraws": false
+  },
+  {
+    "name": "e1 a Local Activity of the failed task goes",
+    "supersession": {
+      "producer_kind": "workflow",
+      "producer_id": "wf:r1",
+      "run_id": "r1",
+      "epoch": {
+        "task_started_event_id": 11,
+        "task_attempt": 1,
+        "task_started_time": [
+          100,
+          0
+        ]
+      },
+      "failed_tasks": [
+        5
+      ],
+      "previous_completed_task": {
+        "started_event_id": 8,
+        "attempt": 1,
+        "started_time": [
+          100,
+          0
+        ]
+      }
+    },
+    "record": {
+      "producer": {
+        "kind": "local_activity",
+        "id": "la:r1:k",
+        "run_id": "r1",
+        "epoch": {
+          "task_started_event_id": 5,
+          "task_attempt": 1,
+          "task_started_time": [
+            100,
+            0
+          ],
+          "attempt": 2
+        }
+      }
+    },
+    "withdraws": true
+  },
+  {
+    "name": "another run's Record stays",
+    "supersession": {
+      "producer_kind": "workflow",
+      "producer_id": "wf:r1",
+      "run_id": "r1",
+      "epoch": {
+        "task_started_event_id": 11,
+        "task_attempt": 1,
+        "task_started_time": [
+          100,
+          0
+        ]
+      },
+      "failed_tasks": [
+        5
+      ],
+      "previous_completed_task": {
+        "started_event_id": 8,
+        "attempt": 1,
+        "started_time": [
+          100,
+          0
+        ]
+      }
+    },
+    "record": {
+      "producer": {
+        "kind": "workflow",
+        "id": "wf:r9",
+        "run_id": "r9",
+        "epoch": {
+          "task_started_event_id": 5,
+          "task_attempt": 1,
+          "task_started_time": [
+            100,
+            0
+          ]
+        }
+      }
+    },
+    "withdraws": false
+  },
+  {
+    "name": "e6 r1's Record goes",
+    "supersession": {
+      "producer_kind": "workflow",
+      "producer_id": "wf:r2",
+      "run_id": "r2",
+      "epoch": {
+        "task_started_event_id": 3,
+        "task_attempt": 1,
+        "task_started_time": [
+          100,
+          0
+        ]
+      },
+      "failed_tasks": [],
+      "withdraw_run": "r1"
+    },
+    "record": {
+      "producer": {
+        "kind": "workflow",
+        "id": "wf:r1",
+        "run_id": "r1",
+        "epoch": {
+          "task_started_event_id": 20,
+          "task_attempt": 1,
+          "task_started_time": [
+            100,
+            0
+          ]
+        }
+      }
+    },
+    "withdraws": true
+  },
+  {
+    "name": "e6 r1's Activity Record goes",
+    "supersession": {
+      "producer_kind": "workflow",
+      "producer_id": "wf:r2",
+      "run_id": "r2",
+      "epoch": {
+        "task_started_event_id": 3,
+        "task_attempt": 1,
+        "task_started_time": [
+          100,
+          0
+        ]
+      },
+      "failed_tasks": [],
+      "withdraw_run": "r1"
+    },
+    "record": {
+      "producer": {
+        "kind": "activity",
+        "id": "act:r1:a:s",
+        "run_id": "r1",
+        "epoch": {
+          "attempt_scheduled_time": [
+            100,
+            0
+          ],
+          "attempt": 1
+        }
+      }
+    },
+    "withdraws": true
+  },
+  {
+    "name": "e6 r2's own earlier Record of t stays",
+    "supersession": {
+      "producer_kind": "workflow",
+      "producer_id": "wf:r2",
+      "run_id": "r2",
+      "epoch": {
+        "task_started_event_id": 3,
+        "task_attempt": 1,
+        "task_started_time": [
+          100,
+          0
+        ]
+      },
+      "failed_tasks": [],
+      "withdraw_run": "r1"
+    },
+    "record": {
+      "producer": {
+        "kind": "workflow",
+        "id": "wf:r2",
+        "run_id": "r2",
+        "epoch": {
+          "task_started_event_id": 3,
+          "task_attempt": 1,
+          "task_started_time": [
+            100,
+            0
+          ]
+        }
+      }
+    },
+    "withdraws": false
+  },
+  {
+    "name": "an Activity retry withdraws attempt 1",
+    "supersession": {
+      "producer_kind": "activity",
+      "producer_id": "act:r1:a:s",
+      "run_id": "r1",
+      "epoch": {
+        "attempt_scheduled_time": [
+          130,
+          0
+        ],
+        "attempt": 2
+      }
+    },
+    "record": {
+      "producer": {
+        "kind": "activity",
+        "id": "act:r1:a:s",
+        "run_id": "r1",
+        "epoch": {
+          "attempt_scheduled_time": [
+            100,
+            0
+          ],
+          "attempt": 1
+        }
+      }
+    },
+    "withdraws": true
+  },
+  {
+    "name": "an Activity retry keeps another Activity",
+    "supersession": {
+      "producer_kind": "activity",
+      "producer_id": "act:r1:a:s",
+      "run_id": "r1",
+      "epoch": {
+        "attempt_scheduled_time": [
+          130,
+          0
+        ],
+        "attempt": 2
+      }
+    },
+    "record": {
+      "producer": {
+        "kind": "activity",
+        "id": "act:r1:b:s",
+        "run_id": "r1",
+        "epoch": {
+          "attempt_scheduled_time": [
+            100,
+            0
+          ],
+          "attempt": 1
+        }
+      }
+    },
+    "withdraws": false
+  },
+  {
+    "name": "a client's newer epoch keeps its earlier Records",
+    "supersession": {
+      "producer_kind": "client",
+      "producer_id": "client:ingest",
+      "epoch": {
+        "attempt": 2
+      }
+    },
+    "record": {
+      "producer": {
+        "kind": "client",
+        "id": "client:ingest",
+        "epoch": {
+          "attempt": 1
+        }
+      }
+    },
+    "withdraws": false
+  },
+  {
+    "name": "no epoch, r1's Record goes",
+    "supersession": {
+      "producer_kind": "workflow",
+      "producer_id": "wf:r2",
+      "run_id": "r2",
+      "withdraw_run": "r1",
+      "failed_tasks": [
+        5
+      ]
+    },
+    "record": {
+      "producer": {
+        "kind": "workflow",
+        "id": "wf:r1",
+        "run_id": "r1",
+        "epoch": {
+          "task_started_event_id": 5,
+          "task_attempt": 1,
+          "task_started_time": [
+            100,
+            0
+          ]
+        }
+      }
+    },
+    "withdraws": true
+  },
+  {
+    "name": "no epoch, r1's Local Activity Record goes",
+    "supersession": {
+      "producer_kind": "workflow",
+      "producer_id": "wf:r2",
+      "run_id": "r2",
+      "withdraw_run": "r1",
+      "failed_tasks": [
+        5
+      ]
+    },
+    "record": {
+      "producer": {
+        "kind": "local_activity",
+        "id": "la:r1:k",
+        "run_id": "r1",
+        "epoch": {
+          "task_started_event_id": 5,
+          "task_attempt": 1,
+          "task_started_time": [
+            100,
+            0
+          ],
+          "attempt": 1
+        }
+      }
+    },
+    "withdraws": true
+  },
+  {
+    "name": "no epoch, r2's Local Activity Record at a failed task stays",
+    "supersession": {
+      "producer_kind": "workflow",
+      "producer_id": "wf:r2",
+      "run_id": "r2",
+      "withdraw_run": "r1",
+      "failed_tasks": [
+        5
+      ]
+    },
+    "record": {
+      "producer": {
+        "kind": "local_activity",
+        "id": "la:r2:k",
+        "run_id": "r2",
+        "epoch": {
+          "task_started_event_id": 5,
+          "task_attempt": 1,
+          "task_started_time": [
+            100,
+            0
+          ],
+          "attempt": 1
+        }
+      }
+    },
+    "withdraws": false
+  },
+  {
+    "name": "no epoch, r2's Record stays",
+    "supersession": {
+      "producer_kind": "workflow",
+      "producer_id": "wf:r2",
+      "run_id": "r2",
+      "withdraw_run": "r1",
+      "failed_tasks": [
+        5
+      ]
+    },
+    "record": {
+      "producer": {
+        "kind": "workflow",
+        "id": "wf:r2",
+        "run_id": "r2",
+        "epoch": {
+          "task_started_event_id": 5,
+          "task_attempt": 1,
+          "task_started_time": [
+            100,
+            0
+          ]
+        }
+      }
+    },
+    "withdraws": false
+  },
+  {
+    "name": "a Local Activity's newer epoch withdraws a lower attempt",
+    "supersession": {
+      "producer_kind": "local_activity",
+      "producer_id": "la:r1:k",
+      "run_id": "r1",
+      "epoch": {
+        "task_started_event_id": 8,
+        "task_attempt": 1,
+        "task_started_time": [
+          100,
+          0
+        ],
+        "attempt": 3
+      }
+    },
+    "record": {
+      "producer": {
+        "kind": "local_activity",
+        "id": "la:r1:k",
+        "run_id": "r1",
+        "epoch": {
+          "task_started_event_id": 8,
+          "task_attempt": 1,
+          "task_started_time": [
+            100,
+            0
+          ],
+          "attempt": 2
+        }
+      }
+    },
+    "withdraws": true
+  },
+  {
+    "name": "a Local Activity's newer epoch withdraws an earlier task",
+    "supersession": {
+      "producer_kind": "local_activity",
+      "producer_id": "la:r1:k",
+      "run_id": "r1",
+      "epoch": {
+        "task_started_event_id": 8,
+        "task_attempt": 1,
+        "task_started_time": [
+          100,
+          0
+        ],
+        "attempt": 3
+      }
+    },
+    "record": {
+      "producer": {
+        "kind": "local_activity",
+        "id": "la:r1:k",
+        "run_id": "r1",
+        "epoch": {
+          "task_started_event_id": 5,
+          "task_attempt": 1,
+          "task_started_time": [
+            100,
+            0
+          ],
+          "attempt": 4
+        }
+      }
+    },
+    "withdraws": true
+  },
+  {
+    "name": "a Local Activity's newer epoch keeps its own epoch",
+    "supersession": {
+      "producer_kind": "local_activity",
+      "producer_id": "la:r1:k",
+      "run_id": "r1",
+      "epoch": {
+        "task_started_event_id": 8,
+        "task_attempt": 1,
+        "task_started_time": [
+          100,
+          0
+        ],
+        "attempt": 3
+      }
+    },
+    "record": {
+      "producer": {
+        "kind": "local_activity",
+        "id": "la:r1:k",
+        "run_id": "r1",
+        "epoch": {
+          "task_started_event_id": 8,
+          "task_attempt": 1,
+          "task_started_time": [
+            100,
+            0
+          ],
+          "attempt": 3
+        }
+      }
+    },
+    "withdraws": false
+  },
+  {
+    "name": "a Local Activity's newer epoch keeps another call",
+    "supersession": {
+      "producer_kind": "local_activity",
+      "producer_id": "la:r1:k",
+      "run_id": "r1",
+      "epoch": {
+        "task_started_event_id": 8,
+        "task_attempt": 1,
+        "task_started_time": [
+          100,
+          0
+        ],
+        "attempt": 3
+      }
+    },
+    "record": {
+      "producer": {
+        "kind": "local_activity",
+        "id": "la:r1:j",
+        "run_id": "r1",
+        "epoch": {
+          "task_started_event_id": 5,
+          "task_attempt": 1,
+          "task_started_time": [
+            100,
+            0
+          ],
+          "attempt": 1
+        }
+      }
+    },
+    "withdraws": false
+  },
+  {
+    "name": "a Local Activity's item keeps the run's Workflow Record",
+    "supersession": {
+      "producer_kind": "local_activity",
+      "producer_id": "la:r1:k",
+      "run_id": "r1",
+      "epoch": {
+        "task_started_event_id": 8,
+        "task_attempt": 1,
+        "task_started_time": [
+          100,
+          0
+        ],
+        "attempt": 3
+      }
+    },
+    "record": {
+      "producer": {
+        "kind": "workflow",
+        "id": "wf:r1",
+        "run_id": "r1",
+        "epoch": {
+          "task_started_event_id": 5,
+          "task_attempt": 1,
+          "task_started_time": [
+            100,
+            0
+          ]
+        }
+      }
+    },
+    "withdraws": false
+  },
+  {
+    "name": "a Local Activity before c stays",
+    "supersession": {
+      "producer_kind": "workflow",
+      "producer_id": "wf:r1",
+      "run_id": "r1",
+      "epoch": {
+        "task_started_event_id": 14,
+        "task_attempt": 2,
+        "task_started_time": [
+          100,
+          0
+        ]
+      },
+      "failed_tasks": [
+        5
+      ],
+      "previous_completed_task": {
+        "started_event_id": 8,
+        "attempt": 1,
+        "started_time": [
+          100,
+          0
+        ]
+      }
+    },
+    "record": {
+      "producer": {
+        "kind": "local_activity",
+        "id": "la:r1:k",
+        "run_id": "r1",
+        "epoch": {
+          "task_started_event_id": 3,
+          "task_attempt": 1,
+          "task_started_time": [
+            100,
+            0
+          ],
+          "attempt": 1
+        }
+      }
+    },
+    "withdraws": false
+  },
+  {
+    "name": "a Local Activity at c stays",
+    "supersession": {
+      "producer_kind": "workflow",
+      "producer_id": "wf:r1",
+      "run_id": "r1",
+      "epoch": {
+        "task_started_event_id": 14,
+        "task_attempt": 2,
+        "task_started_time": [
+          100,
+          0
+        ]
+      },
+      "failed_tasks": [
+        5
+      ],
+      "previous_completed_task": {
+        "started_event_id": 8,
+        "attempt": 1,
+        "started_time": [
+          100,
+          0
+        ]
+      }
+    },
+    "record": {
+      "producer": {
+        "kind": "local_activity",
+        "id": "la:r1:k",
+        "run_id": "r1",
+        "epoch": {
+          "task_started_event_id": 8,
+          "task_attempt": 1,
+          "task_started_time": [
+            100,
+            0
+          ],
+          "attempt": 1
+        }
+      }
+    },
+    "withdraws": false
+  },
+  {
+    "name": "a Local Activity between c and t goes",
+    "supersession": {
+      "producer_kind": "workflow",
+      "producer_id": "wf:r1",
+      "run_id": "r1",
+      "epoch": {
+        "task_started_event_id": 14,
+        "task_attempt": 2,
+        "task_started_time": [
+          100,
+          0
+        ]
+      },
+      "failed_tasks": [
+        5
+      ],
+      "previous_completed_task": {
+        "started_event_id": 8,
+        "attempt": 1,
+        "started_time": [
+          100,
+          0
+        ]
+      }
+    },
+    "record": {
+      "producer": {
+        "kind": "local_activity",
+        "id": "la:r1:k",
+        "run_id": "r1",
+        "epoch": {
+          "task_started_event_id": 11,
+          "task_attempt": 1,
+          "task_started_time": [
+            100,
+            0
+          ],
+          "attempt": 1
+        }
+      }
+    },
+    "withdraws": true
+  },
+  {
+    "name": "a Local Activity of a lower attempt of t goes",
+    "supersession": {
+      "producer_kind": "workflow",
+      "producer_id": "wf:r1",
+      "run_id": "r1",
+      "epoch": {
+        "task_started_event_id": 14,
+        "task_attempt": 2,
+        "task_started_time": [
+          100,
+          0
+        ]
+      },
+      "failed_tasks": [
+        5
+      ],
+      "previous_completed_task": {
+        "started_event_id": 8,
+        "attempt": 1,
+        "started_time": [
+          100,
+          0
+        ]
+      }
+    },
+    "record": {
+      "producer": {
+        "kind": "local_activity",
+        "id": "la:r1:k",
+        "run_id": "r1",
+        "epoch": {
+          "task_started_event_id": 14,
+          "task_attempt": 1,
+          "task_started_time": [
+            100,
+            0
+          ],
+          "attempt": 1
+        }
+      }
+    },
+    "withdraws": true
+  },
+  {
+    "name": "a Local Activity of t itself stays",
+    "supersession": {
+      "producer_kind": "workflow",
+      "producer_id": "wf:r1",
+      "run_id": "r1",
+      "epoch": {
+        "task_started_event_id": 14,
+        "task_attempt": 2,
+        "task_started_time": [
+          100,
+          0
+        ]
+      },
+      "failed_tasks": [
+        5
+      ],
+      "previous_completed_task": {
+        "started_event_id": 8,
+        "attempt": 1,
+        "started_time": [
+          100,
+          0
+        ]
+      }
+    },
+    "record": {
+      "producer": {
+        "kind": "local_activity",
+        "id": "la:r1:k",
+        "run_id": "r1",
+        "epoch": {
+          "task_started_event_id": 14,
+          "task_attempt": 2,
+          "task_started_time": [
+            100,
+            0
+          ],
+          "attempt": 1
+        }
+      }
+    },
+    "withdraws": false
+  },
+  {
+    "name": "a Local Activity of another run stays",
+    "supersession": {
+      "producer_kind": "workflow",
+      "producer_id": "wf:r1",
+      "run_id": "r1",
+      "epoch": {
+        "task_started_event_id": 14,
+        "task_attempt": 2,
+        "task_started_time": [
+          100,
+          0
+        ]
+      },
+      "failed_tasks": [
+        5
+      ],
+      "previous_completed_task": {
+        "started_event_id": 8,
+        "attempt": 1,
+        "started_time": [
+          100,
+          0
+        ]
+      }
+    },
+    "record": {
+      "producer": {
+        "kind": "local_activity",
+        "id": "la:r9:k",
+        "run_id": "r9",
+        "epoch": {
+          "task_started_event_id": 11,
+          "task_attempt": 1,
+          "task_started_time": [
+            100,
+            0
+          ],
+          "attempt": 1
+        }
+      }
+    },
+    "withdraws": false
+  },
+  {
+    "name": "a Local Activity Record with no epoch stays",
+    "supersession": {
+      "producer_kind": "workflow",
+      "producer_id": "wf:r1",
+      "run_id": "r1",
+      "epoch": {
+        "task_started_event_id": 14,
+        "task_attempt": 2,
+        "task_started_time": [
+          100,
+          0
+        ]
+      },
+      "failed_tasks": [
+        5
+      ],
+      "previous_completed_task": {
+        "started_event_id": 8,
+        "attempt": 1,
+        "started_time": [
+          100,
+          0
+        ]
+      }
+    },
+    "record": {
+      "producer": {
+        "kind": "local_activity",
+        "id": "la:r1:k",
+        "run_id": "r1"
+      }
+    },
+    "withdraws": false
+  }
+]

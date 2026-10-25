@@ -1,0 +1,10 @@
+{
+  "kind": 3,
+  "producer_id": "act:run%3A1:a:s",
+  "run_id": "run:1",
+  "fence": "e|3|act:run%3A1:a:s",
+  "dedupe": "d|3|act:run%3A1:a:s",
+  "holds": "h|3|act:run%3A1:a:s",
+  "run_wrote": "run|run%3A1",
+  "withdrawn_run": "wr|run%3A1"
+}
