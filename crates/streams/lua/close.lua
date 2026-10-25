@@ -3,7 +3,7 @@
 -- ARGV: format version, kind, Producer id, encoded run id, epoch key, Tombstone ms, close
 -- Record, encoded Workflow id of the run chain that the close's ref names (empty for none).
 --
--- Answers {'closed' or 'already', close id}.
+-- Returns {'closed' or 'already', close id}.
 local meta, log = KEYS[1], KEYS[2]
 local version, kind, producer, run = tonumber(ARGV[1]), ARGV[2], ARGV[3], ARGV[4]
 local epoch, tombstone, record = ARGV[5], tonumber(ARGV[6]), ARGV[7]
@@ -18,7 +18,7 @@ refused = check_owner(meta, kind, chain)
 if refused then
   return refused
 end
-if auto_close(meta, log, now, tombstone) then
+if redis.call('HGET', meta, 'closed') then
   return {'already', redis.call('HGET', meta, 'close_id')}
 end
 if run ~= '' and redis.call('HGET', meta, 'wr|' .. run) then

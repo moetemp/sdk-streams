@@ -155,13 +155,14 @@ fn meta_fields_match() {
 #[test]
 fn the_appendix_e_withdrawals_match() {
     let cases = load("withdrawals.json");
-    assert!(cases.as_array().unwrap().len() >= 15);
+    assert!(cases.as_array().unwrap().len() >= 35);
     for case in cases.as_array().unwrap() {
         let s = &case["supersession"];
         let supersession = Supersession {
             producer_kind: kind(text(s, "producer_kind")) as i32,
             producer_id: text(s, "producer_id").to_string(),
-            epoch: Some(epoch(&s["epoch"])),
+            // A create's item has no epoch, and a Reader must not read it as an empty one.
+            epoch: s.get("epoch").map(epoch),
             previous_completed_task: s.get("previous_completed_task").map(|c| WorkflowTaskEpoch {
                 started_event_id: number(c, "started_event_id"),
                 attempt: number(c, "attempt") as i32,
@@ -179,7 +180,7 @@ fn the_appendix_e_withdrawals_match() {
             producer: Some(Producer {
                 kind: kind(text(p, "kind")) as i32,
                 id: text(p, "id").to_string(),
-                epoch: Some(epoch(&p["epoch"])),
+                epoch: p.get("epoch").map(epoch),
                 run_id: p["run_id"].as_str().unwrap_or_default().to_string(),
             }),
             ..Default::default()

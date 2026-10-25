@@ -1,8 +1,8 @@
 syntax = "proto3";
 
-// The messages of the crate's own calls, next to the five Stream service operations. Lang sends
-// them through the bridge's call on the runtime object, by the method name in each comment. Field
-// numbers are part of the contract with every SDK.
+// The messages of the crate's own calls, in addition to the five Stream service operations. Lang
+// sends them through the bridge's call on the runtime object, by the method name in each comment.
+// Field numbers are part of the contract with every SDK.
 package temporal.sdk.streams.v1;
 
 import "google/protobuf/duration.proto";
@@ -12,13 +12,13 @@ import "temporal/api/streamservice/v1/stream_service.proto";
 // comes from the Worker or the client, so it needs no address.
 message NativeStreamConfig {
     // The backend name that lang registered this extension under. Empty is `native`. The crate
-    // puts it in each StreamRef it builds.
+    // sets it on each StreamRef that it builds.
     string backend = 1;
-    // The Retention of a create that gives none. Empty leaves it to the server's default.
+    // The Retention of a create that sets none. Empty uses the server's default.
     google.protobuf.Duration retention = 2;
 }
 
-// The settings of the Redis Stream extension. Lang builds it from the plugin options.
+// The settings of the Redis Stream extension. Lang builds it from the backend options.
 message RedisStreamConfig {
     // One URL, or the seed URLs of a cluster. Credentials and TLS come from the URL.
     repeated string urls = 1;
@@ -29,20 +29,19 @@ message RedisStreamConfig {
     google.protobuf.Duration retention = 4;
     // How long an open Workflow-owned Stream stays after its last write. Empty is 90 days.
     google.protobuf.Duration safety_ttl = 5;
-    // A write is durable as an Activity write is, so a Workflow write has no replica wait.
     reserved 6, 7;
     reserved "durable_writes", "durable_timeout";
     // Zero is 256.
     int32 blocking_reads_per_node = 8;
     // Empty is 5 s.
     google.protobuf.Duration response_timeout = 9;
-    // The backend name that lang registered this extension under. The crate puts it in each
-    // StreamRef it builds, such as the one in a create answer.
+    // The backend name that lang registered this extension under. The crate sets it on each
+    // StreamRef that it builds, such as the one in a create response.
     string backend = 10;
 }
 
 // Method `WorkflowReadRecords`, asynchronous. A `ReadRecords` that a Workflow run makes, for
-// example from its read Local Activity. It answers a `ReadRecordsResponse`. On native the server
+// example from its read Local Activity. It returns a `ReadRecordsResponse`. On native the server
 // gets the reading run as a link, and Retention never trims a nested Workflow Stream past the
 // lowest offset that the open run read. The other backends read as `ReadRecords` does.
 message WorkflowReadRecordsRequest {
@@ -52,17 +51,16 @@ message WorkflowReadRecordsRequest {
     string run_id = 3;
 }
 
-// Method `OpenWriter`, asynchronous. A writer for an Activity or a client Producer, which keeps
-// its epoch and `sequence` order. A writer of an Activity attempt above 1 first sends an empty
-// batch, so the new epoch withdraws the earlier attempt's Records. The handles of one Producer
-// epoch on one Stream share one writer: each open adds a handle, and each `CloseWriter` or
-// `FreeWriter` releases one. The batches of every writer in a process take their `sequence` from
-// one counter, so a writer opened again after its close goes on above its earlier batches.
+// Method `OpenWriter`, asynchronous. A writer for an Activity or a client Producer, which keeps its
+// epoch and `sequence` order. A writer of an Activity attempt above 1 first sends an empty batch,
+// so that the new epoch withdraws the earlier attempt's Records. The handles of one Producer epoch
+// on one Stream share one writer. Each open adds a handle, and each `CloseWriter` or `FreeWriter`
+// releases one. The batches of every writer in a process take their `sequence` from one counter, so
+// a writer that opens again after its close continues above its earlier batches.
 message OpenWriterRequest {
     string namespace = 1;
     temporal.api.streamservice.v1.StreamRef stream = 2;
     temporal.api.streamservice.v1.Producer producer = 3;
-    // The interval flush and its buffer limit are gone. Lang buffers on its own.
     reserved 4, 7;
     reserved "batch_interval", "max_buffered_records";
     // A write sends at most this many Records in one batch. Zero is 1000.
@@ -82,11 +80,11 @@ message OpenWriterResponse {
     uint64 writer_id = 1;
 }
 
-// Method `WriteRecords`, asynchronous. Appends Records at once for an open writer and answers
-// when they are in the Store. It keeps the writer's Producer epoch and `sequence` order, and a
-// Store failure resends the same batch, so it goes in once. Records past the Store's batch limit
-// go as more batches, in order. An awaited publish of an Activity or a client uses this call. A
-// failure after the Store retries fails the writer, since the batch may be in the Store.
+// Method `WriteRecords`, asynchronous. Appends Records at once for an open writer and responds when
+// the Store has them. It uses the writer's Producer epoch and `sequence` order. After a Store
+// failure it resends the same batch, so that the Store writes it once. Records past the Store's
+// batch limit go in more batches, in order. An awaited publish of an Activity or a client uses this
+// call. A failure after the retries fails the writer, since the batch may be in the Store.
 message WriteRecordsRequest {
     uint64 writer_id = 1;
     repeated temporal.api.streamservice.v1.AppendRecord records = 2;
@@ -112,7 +110,7 @@ message CloseWriterResponse {
 
 // Method `FreeWriter`. Releases one handle of the writer with no wait, for a handle that lang
 // drops, such as from a finalizer. The bridge may also call it with no runtime. A write in flight
-// still ends. The writer's error, if any, is lost.
+// still completes. The writer's error, if any, is lost.
 message FreeWriterRequest {
     uint64 writer_id = 1;
 }
@@ -120,7 +118,7 @@ message FreeWriterRequest {
 message FreeWriterResponse {
 }
 
-// Method `CloseWriters`, asynchronous. Drops every open writer, for example when the plugin's
+// Method `CloseWriters`, asynchronous. Drops every open writer, for example when the backend's
 // client or Worker shuts down.
 message CloseWritersRequest {
 }

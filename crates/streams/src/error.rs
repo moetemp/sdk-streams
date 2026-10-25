@@ -1,4 +1,4 @@
-//! The one error every call fails with, and its form for lang.
+//! The error of every failed call, and its form for lang.
 
 use crate::proto::StreamErrorDetails;
 use prost::Message;
@@ -12,7 +12,7 @@ pub type StreamResult<T> = Result<T, StreamError>;
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 #[non_exhaustive]
 pub enum Reason {
-    /// Nobody created the Stream, also after `create_wait`.
+    /// Nobody created the Stream, even after `create_wait`.
     NotFound,
     /// The Stream's Retention or safety TTL passed.
     Expired,
@@ -43,8 +43,8 @@ pub enum Reason {
     UnknownWriter,
     /// The Store lacks a capability that the call needs.
     Unsupported,
-    /// The server refused the call for one of its limits, such as the most Workflow readers of a
-    /// Stream. A later retry can pass.
+    /// The server refused the call for one of its limits, such as the maximum number of Workflow
+    /// readers of a Stream. A later retry can succeed.
     Exhausted,
 }
 
@@ -76,7 +76,7 @@ impl Reason {
         Self::ALL.into_iter().find(|reason| reason.token() == token)
     }
 
-    /// Every reason, so a token from the server reads back to its reason.
+    /// Every reason, so that a token from the server maps back to its reason.
     const ALL: [Reason; 16] = [
         Reason::NotFound,
         Reason::Expired,

@@ -11,8 +11,8 @@ local function refuse(code, message)
   return redis.error_reply('STREAM_' .. code .. ' ' .. message)
 end
 
--- Nil when the Stream takes writes, or the refusal. An open Stream whose `exp` passed is a
--- Tombstone, which only a read still uses.
+-- Returns nil when the Stream accepts writes, or else the refusal. An open Stream whose `exp`
+-- passed is a Tombstone, and only a read still uses it.
 local function check_live(meta, version, now)
   local v = redis.call('HGET', meta, 'v')
   if not v then
@@ -28,17 +28,17 @@ local function check_live(meta, version, now)
   return nil
 end
 
--- Nil when the Producer kind may close the Stream, or the refusal. A Workflow-owned Stream closes
--- only from its run chain, as a Workflow (2 is a Local Activity, 1 the run itself), and a ref that
--- names another chain is refused. Any other Stream closes only from a client (4). Redis can't tie
--- a run to its chain, so a run of another chain that holds this chain's ref still passes.
+-- Returns nil when the Producer kind may close the Stream, or else the refusal. Only the Workflow
+-- Producer (1) closes a Workflow-owned Stream, with a ref of the run chain in `oc`. A Local
+-- Activity (2) can't, since it writes before its task commits. A client (4) closes the others.
 local function check_owner(meta, kind, chain)
   if redis.call('HGET', meta, 'own') == 'wf' then
-    if kind ~= '1' and kind ~= '2' then
-      return refuse('NOT_OWNER', 'only the owner run chain closes a Workflow-owned Stream')
+    if kind ~= '1' then
+      return refuse('NOT_OWNER', 'only the close Activity of the owner run chain closes a ' ..
+        'Workflow-owned Stream')
     end
     local owner_chain = redis.call('HGET', meta, 'oc')
-    if owner_chain and chain ~= '' and chain ~= owner_chain then
+    if owner_chain and chain ~= owner_chain then
       return refuse('NOT_OWNER', 'the ref names another run chain than the owner')
     end
   elseif kind ~= '4' then
@@ -47,8 +47,8 @@ local function check_owner(meta, kind, chain)
   return nil
 end
 
--- Sets the time the Stream stays after this write: the safety TTL for an open Workflow-owned
--- Stream, the Retention otherwise. The meta stays 30 days longer as the Tombstone.
+-- Sets the expiry after this write. It's the safety TTL for an open Workflow-owned Stream, or the
+-- Retention otherwise. The meta key expires 30 days later, as the Tombstone.
 local function refresh(meta, log, now, safety, tombstone)
   local ttl = tonumber(redis.call('HGET', meta, 'ret'))
   if redis.call('HGET', meta, 'own') == 'wf' and not redis.call('HGET', meta, 'closed') then
@@ -111,9 +111,9 @@ local function started(task_key)
   return tonumber(string.sub(task_key, 1, 16), 16)
 end
 
--- Whether a task key at c's started id is a lower attempt than c. Lang gives c with attempt 0
--- when it knows only c's started id. The attempts of one task start in time order, so the
--- started time decides then.
+-- Whether a task key at c's started id is a lower attempt than c. Lang sends c with attempt 0 when
+-- it knows only c's started id. Then the started time decides, since the attempts of one task start
+-- in time order.
 local function below_completed(key, c)
   if string.sub(c, 18, 25) == '00000000' then
     return string.sub(key, 27) < string.sub(c, 27)
@@ -121,10 +121,10 @@ local function below_completed(key, c)
   return key < c
 end
 
--- The orphan rule over the open Local Activity tasks of a run, for a write in task t with the
--- run's last completed task c and its failed tasks. A task strictly between c and t, a failed
--- one, or a lower attempt of t or c never completed, so its Records go. A task at or before c
--- that stays completed, so the list drops it. Answers the withdrawn tasks and the open ones.
+-- The orphan rule over the open Local Activity tasks of a run, for a write in task t with the run's
+-- last completed task c and its failed tasks. A task strictly between c and t, a failed one, or a
+-- lower attempt of t or c never completed, so the rule withdraws it. The list drops the other tasks
+-- at or before c, since they completed. Returns the withdrawn and the open tasks.
 local function orphan_tasks(open, t, c, failed)
   local failed_set = {}
   for _, id in ipairs(words(failed)) do
@@ -148,7 +148,7 @@ local function orphan_tasks(open, t, c, failed)
   return withdrawn, kept
 end
 
--- Takes a retry run's previous run out of the Stream. Answers true when that run wrote here.
+-- Withdraws a retry run's previous run from the Stream. Returns true when that run wrote here.
 local function withdraw_run(meta, run)
   if run == '' or redis.call('HGET', meta, 'wr|' .. run) then
     return false
@@ -174,31 +174,4 @@ end
 
 local function add(log, fields)
   return redis.call('XADD', log, '*', unpack(fields))
-end
-
--- The close Record of an auto close: an encoded StreamRecord with kind = CLOSE (3) and
--- close_status = COMPLETED (field 9, 1). It has no Producer, result or failure, so every script
--- can write it with no argument.
-local AUTO_CLOSE_RECORD = '\8\3\72\1'
-
--- Closes an open Stream whose auto close period passed since its last append, so the call that
--- finds it late acts as if the close came on time. Answers true when the Stream is closed after
--- the call, by this auto close or by an earlier close.
-local function auto_close(meta, log, now, tombstone)
-  if redis.call('HGET', meta, 'closed') then
-    return true
-  end
-  local period = tonumber(redis.call('HGET', meta, 'ac'))
-  if not period then
-    return false
-  end
-  local last = tonumber(redis.call('HGET', meta, 'la')) or 0
-  if now < last + period or check_ids_fit(log, now, 1) then
-    return false
-  end
-  trim(meta, log, now)
-  local id = add(log, {'r', AUTO_CLOSE_RECORD})
-  redis.call('HSET', meta, 'closed', '1', 'close_id', id, 'newest', id)
-  refresh(meta, log, now, 0, tombstone)
-  return true
 end

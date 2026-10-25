@@ -5,22 +5,24 @@
 -- (`-` when the write gives no task facts), failed task ids, task Supersession bytes, the batch
 -- digest, then one Record per argument.
 --
--- Answers {'ok' or 'resend', first id, last id, '1' when flagged}.
+-- Returns {'ok' or 'resend', first id, last id, '1' when flagged}.
 local meta, log = KEYS[1], KEYS[2]
 local version, kind, producer = tonumber(ARGV[1]), ARGV[2], ARGV[3]
-local run, epoch, sequence = ARGV[4], ARGV[5], tonumber(ARGV[6])
+local run, epoch, sequence_text = ARGV[4], ARGV[5], ARGV[6]
+local sequence = tonumber(sequence_text)
 local withdrawn_run, supersession = ARGV[7], ARGV[8]
 local safety, tombstone = tonumber(ARGV[9]), tonumber(ARGV[10])
 local task, completed, failed, task_supersession = ARGV[11], ARGV[12], ARGV[13], ARGV[14]
 local digest = ARGV[15]
 local records = #ARGV - 15
 -- A Local Activity write with its run's task facts withdraws the run's orphaned Local Activity
--- Records: those of tasks that never completed.
+-- Records, which are those of tasks that never completed.
 local orphans = kind == '2' and completed ~= '-' and run ~= ''
 local open_field, gone_field = 'oa|' .. run, 'ow|' .. run
 
-if not sequence or sequence < 1 then
-  return refuse('INVALID', 'the sequence must be 1 or more')
+-- A Lua number past 2^53 - 1 loses digits, so the dedupe entry keeps the sequence as sent.
+if not string.match(sequence_text, '^[1-9]%d*$') or sequence > 9007199254740991 then
+  return refuse('INVALID', 'the sequence must be from 1 to 2^53 - 1')
 end
 local now = now_ms()
 local refused = check_live(meta, version, now)
@@ -28,10 +30,10 @@ if refused then
   return refused
 end
 local suffix = '|' .. kind .. '|' .. producer
--- The dedupe key goes before the close status, so a resend gets its Positions after a close.
+-- Check the dedupe key before the close status, so that a resend gets its entry ids after a close.
 local last = redis.call('HGET', meta, 'd' .. suffix)
 if last then
-  -- An entry written before the digest has none, and takes any resend.
+  -- An entry from an older crate has no digest, and accepts any resend.
   local last_epoch, last_sequence, first_id, last_id, last_digest =
     string.match(last, '^([^|]*)|(%d+)|([^|]*)|([^|]*)|?([^|]*)$')
   if last_epoch == epoch then
@@ -49,7 +51,7 @@ if last then
     end
   end
 end
-if auto_close(meta, log, now, tombstone) then
+if redis.call('HGET', meta, 'closed') then
   return refuse('CLOSED', 'the Stream is closed')
 end
 if run ~= '' and redis.call('HGET', meta, 'wr|' .. run) then
@@ -83,7 +85,7 @@ end
 
 trim(meta, log, now)
 local first_id, last_id = '', ''
--- The orphans go in an entry of their own, since the batch's first entry may carry its own
+-- The orphan item has an entry of its own, since the batch's first entry can have its own
 -- Superseded item.
 local orphan_id = ''
 if #withdrawn > 0 then
@@ -113,7 +115,7 @@ end
 
 redis.call('HSET', meta, 'e' .. suffix, epoch)
 redis.call('HSET', meta, 'd' .. suffix,
-  epoch .. '|' .. sequence .. '|' .. first_id .. '|' .. last_id .. '|' .. digest)
+  epoch .. '|' .. sequence_text .. '|' .. first_id .. '|' .. last_id .. '|' .. digest)
 if records > 0 then
   redis.call('HSET', meta, 'h' .. suffix, epoch)
 elseif flagged then
@@ -138,10 +140,6 @@ if orphans then
     end
     redis.call('HSET', meta, gone_field, table.concat(all, ' '))
   end
-end
--- Only Records hold off the auto close. An empty batch that withdraws adds no data.
-if records > 0 and redis.call('HGET', meta, 'ac') then
-  redis.call('HSET', meta, 'la', now)
 end
 if last_id ~= '' then
   redis.call('HSET', meta, 'newest', last_id)

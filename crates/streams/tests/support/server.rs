@@ -1,6 +1,5 @@
-/// The server URL in `variable`, or `None` so a case with no server set skips. A CI job sets
-/// `STREAMS_REQUIRE` to the services it starts, such as `redis`, and a missing URL of one of
-/// them fails there, so a job can't pass with its cases skipped.
+/// The server URL in `variable`, or `None` so that a case with no server skips. When
+/// `STREAMS_REQUIRE` names the service, as in CI, a missing URL fails the case instead.
 pub(crate) fn server_url(variable: &str) -> Option<String> {
     if let Ok(url) = std::env::var(variable) {
         return Some(url);

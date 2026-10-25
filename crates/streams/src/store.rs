@@ -1,5 +1,5 @@
-//! What every Store gives the Stream service: the Redis Store in production and the memory
-//! Store in tests. Both keep the same rules, which the Lua scripts state.
+//! The calls that every Store gives the Stream service. The Redis Store is for production and the
+//! memory Store is for tests. Both apply the rules of the Lua scripts.
 
 use crate::{
     Reason, StreamError, StreamResult,
@@ -13,24 +13,26 @@ use tokio::time::Instant;
 
 /// The format version this crate writes. A Stream with a higher one refuses writes.
 pub const FORMAT_VERSION: u32 = 1;
-/// A Record's most bytes in a Store.
+/// The maximum size of a stored Record, in bytes.
 pub const MAX_RECORD_BYTES: usize = 1536 * 1024;
-/// An append's most bytes in a Store.
+/// The maximum size of a stored append, in bytes.
 pub const MAX_BATCH_BYTES: usize = 4 * 1024 * 1024;
-/// How long the meta outlives the log, so a read can tell an expired Stream from a missing one.
+/// The highest batch `sequence`. A Lua number is exact for integers only up to this value.
+pub const MAX_SEQUENCE: i64 = (1 << 53) - 1;
+/// How long the meta key stays after the log key expires, so that a read can tell an expired Stream
+/// from a missing one.
 pub const TOMBSTONE: Duration = Duration::from_secs(30 * 24 * 60 * 60);
 
 /// Who created a Stream, which decides its TTL while it is open.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Owner<'a> {
-    /// The Stream stays `safety_ttl` after its last write until it closes. The owning run, when
-    /// the create knows it, for a Store that keeps the owner, such as the server. Redis and
-    /// memory don't read it.
+    /// Until it closes, the Stream expires `safety_ttl` after its last write. The owning run is for
+    /// a Store that keeps the owner, such as the server.
     Workflow(Option<RunOwner<'a>>),
-    /// The Stream stays one Retention after its last write.
+    /// The Stream expires one Retention after its last write.
     Client,
     /// A Standalone Activity's own Stream. The server checks that the Producer is the Activity's
-    /// and that the task token is its current attempt. Only the native Store keeps one.
+    /// and that the task token is its current attempt. Only the native Store supports it.
     Activity {
         /// The Activity's Producer, `sa:<activity id>:<activity run id>` at the token's attempt.
         producer: &'a Producer,
@@ -46,7 +48,7 @@ pub enum CreateOutcome {
     Created,
     /// The Stream exists with the same Retention.
     Exists,
-    /// The Stream exists with another Retention or auto close, which stays.
+    /// The Stream exists with another Retention, and the create doesn't change it.
     Conflict,
     /// The Stream is closed.
     Closed,
@@ -54,7 +56,7 @@ pub enum CreateOutcome {
     Expired,
 }
 
-/// The answer of a create.
+/// The result of a create.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Created {
     /// What the create found.
@@ -63,11 +65,9 @@ pub struct Created {
     pub retention: Duration,
     /// Whether the create withdrew a retry run's previous run.
     pub flagged: bool,
-    /// The auto close period of the Stream, the stored one if it existed.
-    pub auto_close: Option<Duration>,
 }
 
-/// The withdrawal facts of a Workflow batch or close, and the `Superseded` item they make.
+/// The withdrawal facts of a batch, and the `Superseded` item that they make.
 #[derive(Debug, Clone, Default)]
 pub struct Withdrawal<'a> {
     /// A retry run's previous run.
@@ -110,24 +110,24 @@ pub struct Batch<'a> {
     pub task_token: &'a [u8],
 }
 
-/// The answer of an append.
+/// The result of an append.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Appended {
     /// The offsets of the first and the last entry, `None` for an empty batch with no
     /// `Superseded` item.
     pub offsets: Option<(i64, i64)>,
-    /// The batch was in the Store, so the offsets are the first answer's.
+    /// The Store already had the batch, so the offsets are those of the first result.
     pub resend: bool,
     /// The batch withdrew earlier Records.
     pub flagged: bool,
 }
 
-/// The answer of a close.
+/// The result of a close.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Closed {
     /// The offset of the close Record.
     pub offset: i64,
-    /// Someone closed the Stream before.
+    /// The Stream was already closed.
     pub already: bool,
 }
 
@@ -150,31 +150,12 @@ pub struct StreamState {
     pub expires_ms: i64,
     /// The server time of the read, in ms since 1970.
     pub now_ms: i64,
-    /// The auto close period, if the Stream has one.
-    pub auto_close: Option<Duration>,
-    /// When the Stream was created or last took a Record, in ms since 1970. The auto close
-    /// counts from it.
-    pub last_append_ms: i64,
 }
 
 impl StreamState {
     /// The Stream is a Tombstone.
     pub fn expired(&self) -> bool {
         self.exists && self.expires_ms <= self.now_ms
-    }
-
-    /// When the auto close of an open Stream is due, in ms since 1970.
-    pub fn auto_close_at_ms(&self) -> Option<i64> {
-        if self.closed_at.is_some() || self.expired() {
-            return None;
-        }
-        let period = i64::try_from(self.auto_close?.as_millis()).unwrap_or(i64::MAX);
-        Some(self.last_append_ms.saturating_add(period))
-    }
-
-    /// The auto close period passed with no append, so the next write step closes the Stream.
-    pub fn auto_close_due(&self) -> bool {
-        self.auto_close_at_ms().is_some_and(|at| at <= self.now_ms)
     }
 
     /// The offset below which Retention dropped or hides the Records, as of the read.
@@ -200,9 +181,9 @@ pub struct Entry {
     pub supersession: Option<Vec<u8>>,
 }
 
-/// What a Store does atomically beyond the log. The service checks a capability before a
-/// call that needs it, so a Store that lacks one refuses that call cleanly instead of giving
-/// weaker guarantees in silence.
+/// The rules that a Store applies atomically beyond the log. The service checks a capability before
+/// a call that needs it. So a Store that lacks the capability refuses the call, and doesn't give
+/// weaker guarantees without notice.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct Capabilities(u8);
 
@@ -218,19 +199,15 @@ impl Capabilities {
     pub const CLOSE: Self = Self(1 << 3);
     /// An open Workflow-owned Stream keeps the safety TTL, not the Retention.
     pub const SAFETY_TTL: Self = Self(1 << 4);
-    /// A Stream with an auto close period closes with no result when no append came for that
-    /// long. Each write step applies it before it acts, so no call sees the Stream open late.
-    pub const AUTO_CLOSE: Self = Self(1 << 5);
     /// Every capability.
-    pub const ALL: Self = Self((1 << 6) - 1);
+    pub const ALL: Self = Self((1 << 5) - 1);
 
-    const NAMES: [(Self, &'static str); 6] = [
+    const NAMES: [(Self, &'static str); 5] = [
         (Self::PRODUCER_FENCE, "producer_fence"),
         (Self::WITHDRAWAL, "withdrawal"),
         (Self::RUN_FENCE, "run_fence"),
         (Self::CLOSE, "close"),
         (Self::SAFETY_TTL, "safety_ttl"),
-        (Self::AUTO_CLOSE, "auto_close"),
     ];
 
     /// Both sets.
@@ -276,34 +253,32 @@ fn unsupported(capability: &str) -> StreamError {
 
 /// The calls of a Store. Each one is atomic, as one Lua script is on Redis.
 ///
-/// The required calls are the log contract: a create key, an atomic batch append, an ordered
-/// read with the Stream's state, stable offsets, prefix Retention and a wait for the next
-/// entry. An append applies the rules of the capabilities the Store declares. The optional
-/// calls refuse by default.
+/// The required calls make the log contract. They are a create key, an atomic batch append, an
+/// ordered read with the Stream's state, stable offsets, prefix Retention and a wait for the next
+/// entry. An append applies the rules of the capabilities that the Store declares. The optional
+/// calls fail by default.
 #[async_trait::async_trait]
 pub trait Store: Send + Sync + 'static {
     /// What the Store does atomically beyond the log. It has no default, so a Store that wraps
     /// another one must say what it forwards.
     fn capabilities(&self) -> Capabilities;
 
-    /// The Retention of a Stream that its create gives none.
+    /// The Retention of a Stream whose create sets none.
     fn default_retention(&self) -> Duration;
 
     /// Creates a Stream, or finds it. The calls that write take the Stream's whole ref, since
     /// the server finds a Workflow's Stream by its owner fields. Redis and memory key on the id.
-    /// A retry run's create withdraws its previous run. An `auto_close` needs
-    /// [Capabilities::AUTO_CLOSE].
+    /// A retry run's create withdraws its previous run.
     async fn create(
         &self,
         namespace: &str,
         stream: &StreamRef,
         retention: Option<Duration>,
-        auto_close: Option<Duration>,
         owner: Owner<'_>,
         withdrawal: &Withdrawal<'_>,
     ) -> StreamResult<Created>;
 
-    /// Appends one batch whole, or nothing of it.
+    /// Appends the whole batch, or nothing of it.
     async fn append(
         &self,
         namespace: &str,
@@ -321,7 +296,7 @@ pub trait Store: Send + Sync + 'static {
         count: usize,
     ) -> StreamResult<(StreamState, Vec<Entry>)>;
 
-    /// Waits until the log has an entry after `after`, or `deadline` passes. Answers whether an
+    /// Waits until the log has an entry after `after`, or `deadline` passes. Returns whether an
     /// entry came.
     async fn wait_after(
         &self,
@@ -354,12 +329,6 @@ pub trait Store: Send + Sync + 'static {
         _count: usize,
     ) -> StreamResult<Vec<Entry>> {
         Err(unsupported("last"))
-    }
-
-    /// Closes the Stream if its auto close is due, for a read that found it due. Answers the
-    /// offset of the close Record if the Stream is closed. Needs [Capabilities::AUTO_CLOSE].
-    async fn auto_close(&self, _namespace: &str, _stream_id: &str) -> StreamResult<Option<i64>> {
-        Err(unsupported("auto_close"))
     }
 
     /// The reads of a Store that answers whole reads and describes itself, such as the
@@ -413,17 +382,17 @@ mod tests {
         let some = Capabilities::PRODUCER_FENCE.union(Capabilities::CLOSE);
         some.require(Capabilities::CLOSE).unwrap();
         let error = some
-            .require(Capabilities::CLOSE.union(Capabilities::AUTO_CLOSE))
+            .require(Capabilities::CLOSE.union(Capabilities::SAFETY_TTL))
             .unwrap_err();
         assert_eq!(error.reason, Reason::Unsupported);
-        assert!(error.message.ends_with("auto_close"), "{}", error.message);
-        assert_eq!(Capabilities::ALL.names().len(), 6);
+        assert!(error.message.ends_with("safety_ttl"), "{}", error.message);
+        assert_eq!(Capabilities::ALL.names().len(), 5);
         assert_eq!(
             Capabilities::ALL
-                .without(Capabilities::AUTO_CLOSE)
+                .without(Capabilities::SAFETY_TTL)
                 .names()
                 .len(),
-            5
+            4
         );
     }
 }

@@ -16,8 +16,8 @@ use crate::{
     },
     record::{caller_status, close_record, data_records, supersession},
     store::{
-        Batch, Capabilities, CreateOutcome, FORMAT_VERSION, Owner, ReaderRun, RunOwner, Store,
-        StreamState, TaskFacts, Withdrawal,
+        Batch, Capabilities, CreateOutcome, FORMAT_VERSION, MAX_SEQUENCE, Owner, ReaderRun,
+        RunOwner, Store, StreamState, TaskFacts, Withdrawal,
     },
 };
 use prost::Message;
@@ -26,10 +26,12 @@ use tokio::time::Instant;
 
 /// The longest wait of one read, for new Records and for the create.
 pub const MAX_WAIT: Duration = Duration::from_secs(60);
-/// The most Records one read gives.
+/// The maximum number of Records in one read.
 pub const MAX_RECORDS: usize = 1000;
-/// The most log entries one page scans.
+/// The maximum number of log entries that one page scans.
 const MAX_SCAN: usize = 10 * MAX_RECORDS;
+/// The number of log entries that a filtered page reads at a time, whatever its `max_records`.
+const SCAN_CHUNK: usize = MAX_RECORDS;
 /// How often a read looks again for a Stream that nobody created yet.
 const CREATE_POLL: Duration = Duration::from_millis(100);
 
@@ -71,9 +73,7 @@ fn run_supersession(owner: Option<&Producer>, withdraw_run: &str) -> Vec<u8> {
 }
 
 /// The `Superseded` facts that withdraw a run's orphaned Local Activity Records. They name the
-/// run's Workflow Producer in the batch's task, so a Reader's Workflow rule withdraws the run's
-/// Local Activity Records of the tasks after `completed` and before that task, and of the
-/// failed ones.
+/// run's Workflow Producer in the batch's task, so that a Reader applies the Workflow rule.
 fn orphan_supersession(
     producer: &Producer,
     completed: Option<&WorkflowTaskEpoch>,
@@ -109,8 +109,8 @@ fn outside_producer(producer: Option<&Producer>) -> StreamResult<&Producer> {
     Ok(producer)
 }
 
-/// Checks the Producer of a close. The run itself closes its Stream from the worker after the
-/// server accepted its final completion, so a Workflow Producer may close.
+/// Checks the Producer of a close. A Workflow's close Activity closes as the run's Workflow
+/// Producer, so a Workflow Producer may close.
 fn close_producer(producer: Option<&Producer>) -> StreamResult<&Producer> {
     let producer = producer.ok_or_else(|| StreamError::invalid("The request has no Producer"))?;
     check_producer(producer)?;
@@ -131,14 +131,8 @@ impl StreamService {
                 id: request.stream_id.clone(),
                 ..Default::default()
             });
-        let auto_close = duration(request.auto_close);
-        if auto_close.is_some() {
-            self.store
-                .capabilities()
-                .require(Capabilities::AUTO_CLOSE)?;
-        }
-        // A Workflow's call that runs outside Workflow code, such as a Local Activity, names the
-        // owning run, so the Stream keeps the safety TTL of a Workflow-owned one. A Standalone
+        // A Workflow's call from outside Workflow code, such as from a Local Activity, sets the
+        // owner run. Then the Stream has the safety TTL of a Workflow-owned Stream. A Standalone
         // Activity creates its own Stream as its Producer, with its task token.
         let owner = match &request.owner {
             Some(producer) if !request.task_token.is_empty() => {
@@ -172,7 +166,7 @@ impl StreamService {
             None => Owner::Client,
         };
         if !request.withdraw_run.is_empty() {
-            // The Superseded item names its Producer, and only the owner can be it here.
+            // The `Superseded` item names its Producer, which here can only be the owner.
             if request.owner.is_none() {
                 return Err(StreamError::invalid(
                     "A create with withdraw_run needs the owner run",
@@ -192,7 +186,6 @@ impl StreamService {
                 &request.namespace,
                 &stream,
                 duration(request.retention),
-                auto_close,
                 owner,
                 &withdrawal,
             )
@@ -208,13 +201,13 @@ impl StreamService {
                 return Err(StreamError::new(
                     Reason::AlreadyExists,
                     format!(
-                        "The Stream exists with the Retention {:?} and the auto close {:?}",
-                        created.retention, created.auto_close
+                        "The Stream exists with the Retention {:?}",
+                        created.retention
                     ),
                 ));
             }
         };
-        // The answer keeps the owner fields, since the server finds a Workflow's or an
+        // The response keeps the owner fields of the ref, since the server finds a Workflow's or an
         // Activity's Stream by them.
         Ok(CreateStreamResponse {
             stream: Some(StreamRef {
@@ -233,21 +226,32 @@ impl StreamService {
         stream_id(request.stream.as_ref())?;
         let stream = request.stream.clone().unwrap_or_default();
         let producer = outside_producer(request.producer.as_ref())?;
-        if request.sequence < 1 {
-            return Err(StreamError::invalid("The sequence must be 1 or more"));
+        if !(1..=MAX_SEQUENCE).contains(&request.sequence) {
+            return Err(StreamError::invalid(
+                "The sequence must be from 1 to 2^53 - 1",
+            ));
         }
         // Without the fence and the flag, a copy or a stale batch would reach Readers.
         self.store
             .capabilities()
             .require(Capabilities::PRODUCER_FENCE.union(Capabilities::WITHDRAWAL))?;
         if !request.withdraw_run.is_empty() {
+            // Only a retry run's Local Activity withdraws its previous run, as only the owner's
+            // create does. Any other Producer could withdraw and fence an unrelated run.
+            if producer.kind != ProducerKind::LocalActivity as i32
+                || request.withdraw_run == producer.run_id
+            {
+                return Err(StreamError::invalid(
+                    "Only a Local Activity of a later run withdraws a run",
+                ));
+            }
             self.store.capabilities().require(Capabilities::RUN_FENCE)?;
         }
         let digest = batch_digest(&request.records);
         let records = data_records(producer, request.records)?;
         let bytes = supersession(producer, &request.withdraw_run);
-        // A Local Activity gives its run's task facts, so the batch withdraws the run's
-        // orphaned Local Activity Records: those of tasks that never completed (S110).
+        // A Local Activity sends its run's task facts, so that the batch withdraws the run's
+        // orphaned Local Activity Records. These are the Records of the tasks that never completed.
         let completed = request
             .previous_completed_task
             .filter(|c| c.started_event_id > 0);
@@ -319,7 +323,7 @@ impl StreamService {
             return remote.describe_stream(request).await;
         }
         let id = stream_id(request.stream.as_ref())?;
-        let state = self.state(&request.namespace, id).await?;
+        let (state, _) = self.store.read(&request.namespace, id, 0, 0).await?;
         if !state.exists {
             return Err(StreamError::new(
                 Reason::NotFound,
@@ -337,38 +341,10 @@ impl StreamService {
             status: status as i32,
             last_offset: state.newest,
             retention: Some(proto_duration(state.retention)),
-            auto_close: state.auto_close.map(proto_duration),
         })
     }
 
-    /// The state of a Stream, after its auto close if that is due. The read step writes
-    /// nothing, so a due auto close takes one more step that writes.
-    async fn state(&self, namespace: &str, id: &str) -> StreamResult<StreamState> {
-        let (state, _) = self.store.read(namespace, id, 0, 0).await?;
-        self.after_auto_close(namespace, id, state).await
-    }
-
-    async fn after_auto_close(
-        &self,
-        namespace: &str,
-        id: &str,
-        state: StreamState,
-    ) -> StreamResult<StreamState> {
-        if !state.auto_close_due() {
-            return Ok(state);
-        }
-        match self.store.auto_close(namespace, id).await {
-            // The read may come from a replica that is behind, so the Stream can expire
-            // between the two steps. The read then reports the expiry itself.
-            Err(error) if error.reason == Reason::Expired => {}
-            result => {
-                result?;
-            }
-        }
-        Ok(self.store.read(namespace, id, 0, 0).await?.0)
-    }
-
-    /// A long poll. It ends with the Records it found, a close Record, or nothing after `wait`.
+    /// A long poll that returns the Records it found, the close Record, or nothing after `wait`.
     pub(crate) async fn read_records(
         &self,
         request: ReadRecordsRequest,
@@ -382,7 +358,7 @@ impl StreamService {
         request: ReadRecordsRequest,
         reader: Option<&ReaderRun>,
     ) -> StreamResult<ReadRecordsResponse> {
-        // A replay must read the same range, which the newest Records are not.
+        // A replay must read the same range, and the newest Records change.
         if reader.is_some() && request.last != 0 {
             return Err(StreamError::invalid(
                 "Workflow code reads from an offset, not the last Records",
@@ -425,8 +401,7 @@ impl StreamService {
             .min(MAX_WAIT);
         let deadline = started + wait;
 
-        let state = self.created(namespace, &id, started + create_wait).await?;
-        let mut state = self.after_auto_close(namespace, &id, state).await?;
+        let mut state = self.created(namespace, &id, started + create_wait).await?;
         if state.version > FORMAT_VERSION {
             return Err(StreamError::new(
                 Reason::FormatTooNew,
@@ -450,8 +425,8 @@ impl StreamService {
             topics: request.topics,
             prefixes: request.topic_prefixes,
         };
-        // Where the next scan starts. A scan that finds only other Topics moves it on, so the
-        // wait after it doesn't wake for the same entries.
+        // Where the next scan starts. A scan that finds only other Topics advances it, so that the
+        // next wait doesn't wake for the same entries.
         let mut cursor = from;
         loop {
             check_expiry(&state, cursor)?;
@@ -461,26 +436,24 @@ impl StreamService {
             if let Some(page) = page {
                 return Ok(page);
             }
+            // A scan that stopped at its cap left entries, so the next scan starts with no wait.
+            let more = scanned > cursor && scanned <= state.newest;
             cursor = scanned;
-            let now = Instant::now();
-            if deadline <= now {
+            if deadline <= Instant::now() {
                 return Ok(ReadRecordsResponse {
                     next_offset: cursor,
                     ..Default::default()
                 });
             }
-            // The wait ends when the auto close comes due, so the read gives its close Record.
-            let until = state.auto_close_at_ms().map_or(deadline, |at| {
-                // At least a short pause, so a Store that keeps it open can't spin the loop.
-                let left = Duration::from_millis((at - state.now_ms).max(20) as u64);
-                deadline.min(now + left)
-            });
+            if more {
+                continue;
+            }
             let after = (cursor - 1).max(state.newest);
             self.metrics.read_waits(true);
-            let woke = self.store.wait_after(namespace, &id, after, until).await;
+            let woke = self.store.wait_after(namespace, &id, after, deadline).await;
             self.metrics.read_waits(false);
             woke?;
-            state = self.state(namespace, &id).await?;
+            state = self.store.read(namespace, &id, 0, 0).await?.0;
         }
     }
 
@@ -501,7 +474,6 @@ impl StreamService {
         let state = self
             .created(namespace, &id, Instant::now() + create_wait)
             .await?;
-        let state = self.after_auto_close(namespace, &id, state).await?;
         if state.version > FORMAT_VERSION {
             return Err(StreamError::new(
                 Reason::FormatTooNew,
@@ -536,13 +508,14 @@ impl StreamService {
                 if let Some(record) = entry.record {
                     let record = decode(&record, entry.offset)?;
                     let size = record.encoded_len();
-                    // The close Record ends the page and is not in the byte cap.
+                    // The close Record ends the page and doesn't count toward the byte cap.
                     if record.kind == StreamRecordKind::Close as i32 {
                         close = Some(record);
                     } else if topics.passes(&record.topic)
                         && !withdrawals.iter().any(|s| withdraws(s, &record))
                     {
-                        // One larger Record still comes alone, so the read always gives one.
+                        // A Record over the cap is still returned alone, so that the read always
+                        // returns a Record.
                         if !picked.is_empty() && bytes + size > max_bytes {
                             break 'scan;
                         }
@@ -606,7 +579,7 @@ impl StreamService {
         (max, max_bytes): (usize, usize),
         topics: &TopicFilter,
     ) -> StreamResult<(Option<ReadRecordsResponse>, i64)> {
-        // A read past the close gives the close Record again, so every read ends with it.
+        // A read past the close returns the close Record again, so that every read ends with it.
         if let Some(closed_at) = state.closed_at.filter(|at| from > *at) {
             let (_, entries) = self.store.read(namespace, id, closed_at, 1).await?;
             let mut records = vec![];
@@ -623,18 +596,22 @@ impl StreamService {
             };
             return Ok((Some(page), from));
         }
-        // A read from the start skips what the Retention hides. A read from an offset fails on
-        // it, since the Reader asked for those Records.
+        // A read from the start skips the Records that the Retention hides. A read from an offset
+        // fails on them, since the Reader asked for those Records.
         let retained = state.retained_from();
         let mut start = if from > 0 { from } else { retained };
         let mut records = vec![];
         let mut next = from;
         let (mut done, mut full) = (false, false);
         let mut bytes = 0;
-        // A Topic filter can skip many entries, so one page scans a bounded number of them.
+        // A Topic filter can skip many entries, so one page scans a bounded number of them, and
+        // reads more than `max` at a time.
+        let chunk = if topics.filters() { SCAN_CHUNK } else { max };
         let mut scanned = 0;
         while records.len() < max && !done && !full && scanned < MAX_SCAN {
-            let (_, entries) = self.store.read(namespace, id, start, max).await?;
+            let (chunk_state, entries) = self.store.read(namespace, id, start, chunk).await?;
+            // A trim after the state read leaves a gap before these entries.
+            check_expiry(&chunk_state, if from > 0 { start } else { 0 })?;
             if entries.is_empty() {
                 break;
             }
@@ -666,8 +643,8 @@ impl StreamService {
                         items.push(record);
                     }
                 }
-                // One larger entry still comes alone, so the read always moves on. The next read
-                // starts at an entry that didn't fit.
+                // An entry over the cap is still returned alone, so that the read always makes
+                // progress. The next read starts at the entry that didn't fit.
                 let size: usize = items.iter().map(Message::encoded_len).sum();
                 if !records.is_empty() && bytes + size > max_bytes {
                     (done, full) = (false, true);
@@ -696,14 +673,18 @@ impl StreamService {
     }
 }
 
-/// Which Topics a read gives. A `Superseded` item passes every filter, so the page adds it
-/// before the filter runs.
+/// Which Topics a read returns. A `Superseded` item passes every filter, so the page adds it before
+/// the filter runs.
 pub(crate) struct TopicFilter {
     topics: Vec<String>,
     prefixes: Vec<String>,
 }
 
 impl TopicFilter {
+    fn filters(&self) -> bool {
+        !self.topics.is_empty() || !self.prefixes.is_empty()
+    }
+
     fn passes(&self, topic: &str) -> bool {
         (self.topics.is_empty() && self.prefixes.is_empty())
             || self.topics.iter().any(|t| t == topic)
@@ -718,14 +699,13 @@ fn decode(bytes: &[u8], offset: i64) -> StreamResult<StreamRecord> {
     Ok(record)
 }
 
-/// Fails a read whose Records the Retention or the expiry removed, so a gap never passes in
-/// silence. A read from the start of the Stream has no gap.
+/// Fails a read whose Records the Retention or the expiry removed, so that the Reader always sees
+/// the gap. A read from the start of the Stream has no gap.
 ///
-/// An open Stream that expired gets no more Records, so a read of it fails as well, or the
-/// Reader would wait on it for good.
+/// A Tombstone fails every read. An open Stream that expired gets no more Records, so the Reader
+/// would wait forever. A closed one lost its log and its close Record.
 fn check_expiry(state: &StreamState, from: i64) -> StreamResult<()> {
-    let open_tombstone = state.expired() && state.closed_at.is_none();
-    if open_tombstone || (from > 0 && state.trimmed >= from) {
+    if state.expired() || (from > 0 && state.trimmed >= from) {
         return Err(expired());
     }
     Ok(())

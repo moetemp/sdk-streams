@@ -52,7 +52,7 @@ jobs:
           repo-token: ${{ secrets.GITHUB_TOKEN }}
       - uses: Swatinem/rust-cache@v2
       - run: cargo build --workspace --no-default-features --features fips
-      # Normal and build edges only, since the tests' own dependencies may take `ring`.
+      # Normal and build edges only, since the tests' own dependencies may depend on `ring`.
       - run: |
           tree=$(cargo tree -e normal,build --no-default-features --features fips \
             -i ring --target all 2>/dev/null || true)

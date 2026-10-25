@@ -1,7 +1,7 @@
-//! The native Store: the server's `temporal.api.streamservice.v1.StreamService`, called on the
-//! connection of the client that the bridge builds the runtime for. The server keeps the same
-//! rules as the Lua scripts, so the crate's writers and its checks work on it unchanged. The
-//! server answers whole reads and describes, so the service forwards those.
+//! The native Store, on the server's `temporal.api.streamservice.v1.StreamService`. It calls the
+//! server on the connection of the client that the bridge builds the runtime for. The server
+//! applies the same rules as the Lua scripts, so the crate's writers and checks work on it
+//! unchanged. The server answers whole reads and describes, so the service forwards those.
 
 use crate::{
     MAX_WAIT, Reason, StreamError, StreamResult,
@@ -37,15 +37,19 @@ const CREATE: &str = "/temporal.api.streamservice.v1.StreamService/CreateStream"
 const APPEND: &str = "/temporal.api.streamservice.v1.StreamService/AppendRecords";
 const CLOSE: &str = "/temporal.api.streamservice.v1.StreamService/CloseStream";
 
-/// The Retention the server gives a Stream with none, `stream.defaultRetention`.
+/// The Retention that the server gives a Stream with none, `stream.defaultRetention`.
 const SERVER_RETENTION: Duration = Duration::from_secs(7 * 24 * 60 * 60);
+
+/// The deadline of a create, an append and a close, the Redis Store's `response_timeout`
+/// default. A Local Activity's timeout cancels lang's await but not the call.
+const WRITE_TIMEOUT: Duration = Duration::from_secs(5);
 
 /// A Store on the server's Stream service.
 pub struct ServiceStore {
     /// The client's connection. Its clones share their headers, so an API key rotation on the
     /// client reaches every call.
     connection: Connection,
-    /// The Retention of a create that gives none, or the server's default.
+    /// The Retention of a create that sets none, or the server's default.
     retention: Option<Duration>,
 }
 
@@ -69,8 +73,8 @@ struct RpcStatus {
 }
 
 impl ServiceStore {
-    /// A Store on a client's connection. A create with no Retention takes `retention`, as a
-    /// Redis Store's does, or the server's default.
+    /// A Store on a client's connection. A create with no Retention uses `retention`, as a Redis
+    /// Store's does, or the server's default.
     pub fn new(connection: Connection, retention: Option<Duration>) -> Self {
         Self {
             connection,
@@ -116,13 +120,14 @@ fn from_status(status: tonic::Status) -> StreamError {
         .message()
         .split_once(": ")
         .and_then(|(token, _)| Reason::from_token(token));
+    // A FAILED_PRECONDITION with no Stream reason is the server's own, such as a namespace that
+    // isn't active here during a failover. So it maps to a Store failure, which a retry can pass.
     let reason = detail.or(prefix).unwrap_or(match status.code() {
         tonic::Code::NotFound => Reason::NotFound,
         tonic::Code::AlreadyExists => Reason::AlreadyExists,
-        tonic::Code::FailedPrecondition => Reason::Closed,
         tonic::Code::InvalidArgument => Reason::Invalid,
         tonic::Code::Unimplemented => Reason::Unsupported,
-        // A limit such as the reader cap. Not a Store failure, so the message stays the reason.
+        // A limit, such as the reader cap, isn't a Store failure, so it gets its own reason.
         tonic::Code::ResourceExhausted => Reason::Exhausted,
         _ => Reason::Storage,
     });
@@ -151,13 +156,10 @@ impl ServiceStore {
         request: CreateStreamRequest,
         retention: Option<Duration>,
     ) -> StreamResult<Created> {
-        let auto_close = request
-            .auto_close
-            .as_ref()
-            .map(|d| Duration::new(d.seconds.max(0) as u64, d.nanos.max(0) as u32));
         let namespace = request.namespace.clone();
-        let answer: StreamResult<CreateStreamResponse> =
-            self.call(CREATE, &namespace, request, None).await;
+        let answer: StreamResult<CreateStreamResponse> = self
+            .call(CREATE, &namespace, request, Some(WRITE_TIMEOUT))
+            .await;
         let retention = retention.unwrap_or(SERVER_RETENTION);
         let outcome = match answer {
             Ok(answer) => match StreamStatus::try_from(answer.status).unwrap_or_default() {
@@ -166,21 +168,20 @@ impl ServiceStore {
                 _ if answer.created => CreateOutcome::Created,
                 _ => CreateOutcome::Exists,
             },
-            Err(error) if error.reason == Reason::AlreadyExists => CreateOutcome::Conflict,
+            // The server's conflict names the stored Retention, which a create response lacks.
             Err(error) => return Err(error),
         };
         Ok(Created {
             outcome,
             retention,
             flagged: false,
-            auto_close,
         })
     }
 }
 
 #[async_trait::async_trait]
 impl Store for ServiceStore {
-    // The server keeps every rule.
+    // The server applies every rule.
     fn capabilities(&self) -> Capabilities {
         Capabilities::ALL
     }
@@ -194,7 +195,6 @@ impl Store for ServiceStore {
         namespace: &str,
         stream: &StreamRef,
         retention: Option<Duration>,
-        auto_close: Option<Duration>,
         owner: Owner<'_>,
         withdrawal: &Withdrawal<'_>,
     ) -> StreamResult<Created> {
@@ -212,7 +212,6 @@ impl Store for ServiceStore {
             stream_id: stream.id.clone(),
             retention: retention.map(proto_duration),
             withdraw_run: withdrawal.withdraw_run.to_string(),
-            auto_close: auto_close.map(proto_duration),
             owner: run.map(|run| run.producer).or(activity).cloned(),
             close_with_run: run.is_some_and(|run| run.close_with_run),
             r#ref: Some(stream.clone()),
@@ -259,7 +258,9 @@ impl Store for ServiceStore {
             task_token: batch.task_token.to_vec(),
             ..Default::default()
         };
-        let answer: AppendRecordsResponse = self.call(APPEND, namespace, request, None).await?;
+        let answer: AppendRecordsResponse = self
+            .call(APPEND, namespace, request, Some(WRITE_TIMEOUT))
+            .await?;
         let offsets = (answer.last_offset > 0).then_some((answer.first_offset, answer.last_offset));
         // The server doesn't say whether the batch was a resend or withdrew, which only the
         // metrics read.
@@ -289,16 +290,13 @@ impl Store for ServiceStore {
             task_token: task_token.to_vec(),
             ..Default::default()
         };
-        let _: CloseStreamResponse = self.call(CLOSE, namespace, request, None).await?;
+        let _: CloseStreamResponse = self
+            .call(CLOSE, namespace, request, Some(WRITE_TIMEOUT))
+            .await?;
         Ok(Closed {
             offset: 0,
             already: false,
         })
-    }
-
-    // The server applies the auto close itself.
-    async fn auto_close(&self, _namespace: &str, _stream_id: &str) -> StreamResult<Option<i64>> {
-        Ok(None)
     }
 
     async fn read(
@@ -334,15 +332,15 @@ impl Store for ServiceStore {
 
 #[async_trait::async_trait]
 impl RemoteReads for ServiceStore {
-    // Reads take the direct System Nexus call, which persists nothing, so every caller reads
-    // through the one path that Workflow code uses too.
+    // Reads use the direct System Nexus call, which persists nothing, so every caller reads on the
+    // same path as Workflow code.
     async fn read_records(
         &self,
         request: ReadRecordsRequest,
         reader: Option<&ReaderRun>,
     ) -> StreamResult<ReadRecordsResponse> {
-        // The server keeps the lowest offset that an open reading run read, and Retention keeps
-        // the Records from there.
+        // The server stores the lowest offset that an open reading run read, and Retention doesn't
+        // trim the Records from there.
         let links = reader
             .map(|reader| Link {
                 variant: Some(link::Variant::WorkflowEvent(link::WorkflowEvent {
@@ -524,8 +522,8 @@ fn request_id() -> String {
     format!("streams-{}-{now}-{n}", std::process::id())
 }
 
-/// The crate error of a failed operation: the reason is the application failure's type, else
-/// its first `StreamErrorDetails`, else the `<reason>: ` prefix of the message.
+/// The crate error of a failed operation. The reason is the application failure's type, else its
+/// first `StreamErrorDetails`, else the `<reason>: ` prefix of the message.
 fn from_failure(failure: Failure) -> StreamError {
     let application = match &failure.failure_info {
         Some(FailureInfo::ApplicationFailureInfo(info)) => Some(info),
@@ -581,6 +579,10 @@ mod tests {
         let error = from_status(tonic::Status::failed_precondition("stream_sequence: below"));
         assert_eq!(error.reason, Reason::Sequence);
         let error = from_status(tonic::Status::unavailable("down"));
+        assert_eq!(error.reason, Reason::Storage);
+        let error = from_status(tonic::Status::failed_precondition(
+            "Namespace is not active",
+        ));
         assert_eq!(error.reason, Reason::Storage);
         let error = from_status(tonic::Status::resource_exhausted(
             "The Stream has the most Workflow readers",

@@ -23,7 +23,7 @@ use redis::Value;
 use std::{sync::Arc, time::Duration};
 use tokio::time::Instant;
 
-/// How to reach Redis and how long Streams live there.
+/// The Redis connection options and the Stream TTLs.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RedisStoreOptions {
     /// One `redis://` or `rediss://` URL, or the seed nodes of a cluster. Credentials and TLS
@@ -31,9 +31,9 @@ pub struct RedisStoreOptions {
     pub urls: Vec<String>,
     /// Whether `urls` are the seeds of a Redis Cluster.
     pub cluster: bool,
-    /// The start of every key, so Streams can share a Redis with other data.
+    /// The prefix of every key, so that Streams can share a Redis with other data.
     pub key_prefix: String,
-    /// The Retention of a Stream that its create gives none.
+    /// The Retention of a Stream whose create sets none.
     pub retention: Duration,
     /// How long an open Workflow-owned Stream stays after its last write.
     pub safety_ttl: Duration,
@@ -116,7 +116,7 @@ impl RedisStore {
         })
     }
 
-    /// The Retention of a Stream that its create gives none.
+    /// The Retention of a Stream whose create sets none.
     pub fn default_retention(&self) -> Duration {
         self.retention
     }
@@ -126,14 +126,12 @@ impl RedisStore {
     }
 
     /// Creates a Stream, or finds it. A retry run's create withdraws its previous run. A
-    /// Workflow-owned Stream keeps the run chain that its ref names, for the owner check of a
-    /// close.
+    /// Workflow-owned Stream stores the run chain of its ref, for the owner check of a close.
     pub async fn create(
         &self,
         namespace: &str,
         stream: &StreamRef,
         retention: Option<Duration>,
-        auto_close: Option<Duration>,
         owner: Owner<'_>,
         withdrawal: &Withdrawal<'_>,
     ) -> StreamResult<Created> {
@@ -153,18 +151,11 @@ impl RedisStore {
             .arg(millis(TOMBSTONE))
             .arg(encode_run(withdrawal.withdraw_run))
             .arg(withdrawal.supersession)
-            .arg(
-                auto_close
-                    .filter(|period| !period.is_zero())
-                    // Stored in ms, so a period below 1 ms rounds up and never stores as no wait.
-                    .map(|period| millis(period).max(1).to_string())
-                    .unwrap_or_default(),
-            )
             .arg(encode_run(&stream.workflow_id))
             .invoke_async(&mut self.shared.clone())
             .await
             .mapped()?;
-        let [outcome, stored, flag, period] = strings::<4>(reply, "create")?;
+        let [outcome, stored, flag] = strings::<3>(reply, "create")?;
         let outcome = match outcome.as_str() {
             "created" => CreateOutcome::Created,
             "exists" => CreateOutcome::Exists,
@@ -174,38 +165,11 @@ impl RedisStore {
             other => return Err(bad_reply("create", other)),
         };
         let stored: u64 = stored.parse().map_err(|_| bad_reply("create", &stored))?;
-        let auto_close = match period.as_str() {
-            "" => None,
-            period => Some(Duration::from_millis(
-                period.parse().map_err(|_| bad_reply("create", period))?,
-            )),
-        };
         Ok(Created {
             outcome,
             retention: Duration::from_millis(stored),
             flagged: flag == "1",
-            auto_close,
         })
-    }
-
-    /// Closes the Stream if its auto close is due. Answers the offset of the close Record if
-    /// the Stream is closed.
-    pub async fn auto_close(&self, namespace: &str, stream_id: &str) -> StreamResult<Option<i64>> {
-        let keys = self.keys(namespace, stream_id);
-        let reply: Value = scripts::AUTO_CLOSE_SCRIPT
-            .key(keys.meta())
-            .key(keys.log())
-            .arg(FORMAT_VERSION)
-            .arg(millis(TOMBSTONE))
-            .invoke_async(&mut self.shared.clone())
-            .await
-            .mapped()?;
-        let [outcome, id] = strings::<2>(reply, "auto close")?;
-        match outcome.as_str() {
-            "closed" => Ok(Some(offset_of_entry_id(&id)?)),
-            "open" => Ok(None),
-            other => Err(bad_reply("auto close", other)),
-        }
     }
 
     /// Appends one batch.
@@ -339,8 +303,8 @@ impl RedisStore {
         entries.into_iter().map(entry).collect()
     }
 
-    /// Waits until the log has an entry after `after`, or `deadline` passes. Answers whether an
-    /// entry came. The wait blocks a connection of its own.
+    /// Waits until the log has an entry after `after`, or `deadline` passes. Returns whether an
+    /// entry came. The wait uses a dedicated connection.
     pub async fn wait_after(
         &self,
         namespace: &str,
@@ -395,14 +359,10 @@ impl Store for RedisStore {
         namespace: &str,
         stream: &StreamRef,
         retention: Option<Duration>,
-        auto_close: Option<Duration>,
         owner: Owner<'_>,
         withdrawal: &Withdrawal<'_>,
     ) -> StreamResult<Created> {
-        RedisStore::create(
-            self, namespace, stream, retention, auto_close, owner, withdrawal,
-        )
-        .await
+        RedisStore::create(self, namespace, stream, retention, owner, withdrawal).await
     }
 
     async fn append(
@@ -443,10 +403,6 @@ impl Store for RedisStore {
         deadline: Instant,
     ) -> StreamResult<bool> {
         RedisStore::wait_after(self, namespace, stream_id, after, deadline).await
-    }
-
-    async fn auto_close(&self, namespace: &str, stream_id: &str) -> StreamResult<Option<i64>> {
-        RedisStore::auto_close(self, namespace, stream_id).await
     }
 
     async fn read_back(
@@ -565,8 +521,6 @@ fn read_reply(reply: Value) -> StreamResult<(StreamState, Vec<Entry>)> {
         retention: Duration::from_millis(number(5).max(0) as u64),
         expires_ms: number(6),
         now_ms: seconds * 1000 + micros / 1000,
-        auto_close: field(7).map(|_| Duration::from_millis(number(7).max(0) as u64)),
-        last_append_ms: number(8),
     };
     let Value::Array(entries) = entries else {
         return Err(bad_reply("read", entries));
@@ -614,10 +568,20 @@ fn entry(value: Value) -> StreamResult<Entry> {
 async fn check_server(shared: &Shared) -> StreamResult<()> {
     let mut info = redis::cmd("INFO");
     info.arg("server");
-    for (node, reply) in shared.on_each_primary(info).await.mapped()? {
-        let text: String =
-            redis::from_redis_value(reply).map_err(|error| bad_reply("INFO", error))?;
-        check_version(&node, &text)?;
+    match shared.on_each_primary(info).await {
+        Ok(replies) => {
+            for (node, reply) in replies {
+                let text: String =
+                    redis::from_redis_value(reply).map_err(|error| bad_reply("INFO", error))?;
+                check_version(&node, &text)?;
+            }
+        }
+        // A user with only the Store's commands may not have INFO. Then a Redis before 7.0 fails at
+        // the first read, on the flags of the read script.
+        Err(error) if error.code() == Some("NOPERM") => {
+            tracing::debug!("Could not read the Redis version: {error}");
+        }
+        Err(error) => return Err(errors::stream_error(&error)),
     }
     let mut policy = redis::cmd("CONFIG");
     policy.arg("GET").arg("maxmemory-policy");
@@ -635,7 +599,7 @@ async fn check_server(shared: &Shared) -> StreamResult<()> {
                 }
             }
         }
-        // Managed services often refuse CONFIG. The policy is theirs to document then.
+        // Managed services often refuse CONFIG and document their eviction policy instead.
         Err(error) => tracing::debug!("Could not read maxmemory-policy: {error}"),
     }
     Ok(())

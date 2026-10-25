@@ -1,10 +1,9 @@
-//! The Store rules, on a real Redis, standalone and as a cluster, and on the memory Store. One
-//! suite runs on all of them, so they can't drift. Start the Redis servers with
-//! `scripts/redis-test-servers.sh` and set the two URLs it prints.
+//! The Store rules, on Redis standalone, on a Redis cluster and on the memory Store. One suite runs
+//! on all of them, so that they keep the same rules. Start the Redis servers with
+//! `scripts/redis-test-servers.sh` and set the two URLs that it prints.
 
 mod support;
 
-use prost::Message;
 use prost_types::Timestamp;
 use std::time::Duration;
 use support::{Needs, Run, Target, digest, record, records_of, stores_for, supersession};
@@ -14,7 +13,7 @@ use temporalio_streams::{
         activity_producer_id, client_producer_id, named_client_producer_id, workflow_producer_id,
     },
     proto::{Producer, ProducerEpoch, ProducerKind, StreamRef},
-    store::{Batch, Capabilities, CreateOutcome, Owner, Withdrawal},
+    store::{Batch, CreateOutcome, Owner, Withdrawal},
 };
 
 fn activity(run: &str, attempt: i32, scheduled: i64) -> Producer {
@@ -45,7 +44,7 @@ fn client(attempt: i32) -> Producer {
     }
 }
 
-/// A second client Producer, which every backend takes as sent.
+/// A second client Producer, which every backend accepts as sent.
 fn other_client() -> Producer {
     Producer {
         id: named_client_producer_id("other"),
@@ -99,7 +98,6 @@ async fn a_create_writes_the_key_once_and_keeps_its_retention() {
                 &target.namespace,
                 &target.stream_ref(),
                 day,
-                None,
                 Owner::Client,
                 &none,
             )
@@ -112,7 +110,6 @@ async fn a_create_writes_the_key_once_and_keeps_its_retention() {
                 &target.namespace,
                 &target.stream_ref(),
                 day,
-                None,
                 Owner::Client,
                 &none,
             )
@@ -125,7 +122,6 @@ async fn a_create_writes_the_key_once_and_keeps_its_retention() {
                 &target.namespace,
                 &target.stream_ref(),
                 None,
-                None,
                 Owner::Client,
                 &none,
             )
@@ -136,7 +132,7 @@ async fn a_create_writes_the_key_once_and_keeps_its_retention() {
     }
 }
 
-/// A resend with the last sequence gets the offsets of its first answer, also after another
+/// A resend with the last sequence gets the offsets of its first result, even after another
 /// Producer wrote, and a lower sequence is refused.
 #[tokio::test]
 async fn a_resend_gets_its_first_positions_and_a_lower_sequence_is_refused() {
@@ -161,8 +157,8 @@ async fn a_resend_gets_its_first_positions_and_a_lower_sequence_is_refused() {
     }
 }
 
-/// A resend with the last sequence and other content fails as `seq_divergent` and writes
-/// nothing. With `RAW_KEYS`, a dedupe entry from before the digest takes any resend.
+/// A resend with the last sequence and other content fails as `seq_divergent` and writes nothing.
+/// With `RAW_KEYS`, a dedupe entry with no digest accepts any resend.
 #[tokio::test]
 async fn a_resend_with_other_content_fails_as_divergent() {
     for target in stores_for(Needs::CALLS).await {
@@ -175,7 +171,7 @@ async fn a_resend_with_other_content_fails_as_divergent() {
         if !target.gives.gives(Needs::RAW_KEYS) {
             continue;
         }
-        // A dedupe entry written before the digest has none, so it takes any resend.
+        // A dedupe entry from an older crate has no digest, so it accepts any resend.
         let field = temporalio_streams::ids::fields::dedupe(ProducerKind::Client as i32, &p.id);
         let entry = target.meta(&field).await.unwrap();
         target
@@ -211,7 +207,7 @@ async fn a_lower_epoch_is_fenced_for_each_producer_kind() {
 }
 
 /// A close refuses later appends but not a resend of an earlier batch, and a create finds the
-/// Stream closed. With `STORE_ANSWERS`, a second close answers `already` with the same offset.
+/// Stream closed. With `STORE_ANSWERS`, a second close returns `already` with the same offset.
 #[tokio::test]
 async fn a_close_stops_appends_but_not_a_resend() {
     for target in stores_for(Needs::CALLS).await {
@@ -237,7 +233,6 @@ async fn a_close_stops_appends_but_not_a_resend() {
             .create(
                 &target.namespace,
                 &target.stream_ref(),
-                None,
                 None,
                 Owner::Client,
                 &Withdrawal::default(),
@@ -266,7 +261,6 @@ async fn a_newer_format_refuses_every_write() {
                 &target.namespace,
                 &target.stream_ref(),
                 None,
-                None,
                 Owner::Client,
                 &Withdrawal::default(),
             )
@@ -288,7 +282,6 @@ async fn an_expired_stream_refuses_writes_and_its_create() {
             .create(
                 &target.namespace,
                 &target.stream_ref(),
-                None,
                 None,
                 Owner::Client,
                 &Withdrawal::default(),
@@ -337,7 +330,7 @@ async fn an_empty_batch_of_a_retry_withdraws_the_earlier_attempt() {
             .unwrap();
         assert!(!again.flagged);
         assert_eq!(again.offsets, None);
-        // An empty batch still moves the fence.
+        // An empty batch still raises the fence.
         let stale = append(&target, &activity("r1", 2, 20), 2, &["late"]).await;
         assert_eq!(stale.unwrap_err().reason, Reason::Fenced);
     }
@@ -392,10 +385,7 @@ async fn the_ttl_follows_the_owner_and_the_close() {
             ttl > Duration::from_secs(80 * 86_400).as_millis() as i64,
             "{ttl}"
         );
-        target
-            .close(&run.local_activity("k", 6, 1, 1))
-            .await
-            .unwrap();
+        target.close(&workflow("r1")).await.unwrap();
         let (ttl, meta) = target.ttls().await;
         assert!(
             ttl <= Duration::from_secs(7 * 86_400).as_millis() as i64,
@@ -420,7 +410,6 @@ async fn an_append_trims_by_retention_and_keeps_the_watermark() {
                 &target.namespace,
                 &target.stream_ref(),
                 Some(Duration::from_millis(200)),
-                None,
                 // An open Workflow Stream keeps its key, so only the Retention trims.
                 Owner::Workflow(None),
                 &none,
@@ -490,6 +479,32 @@ async fn a_sequence_below_one_is_refused() {
     }
 }
 
+/// A large sequence keeps its dedupe entry, so a resend gets its first answer and a lower or
+/// divergent batch is refused. With `STORE_ANSWERS`, a sequence past 2^53 - 1 is refused.
+#[tokio::test]
+async fn a_large_sequence_dedupes_and_one_past_2_53_is_refused() {
+    for target in stores_for(Needs::CALLS).await {
+        target.create(Owner::Client).await;
+        let p = client(1);
+        let large = 100_000_000_000_000;
+        let first = append(&target, &p, large, &["x"]).await.unwrap();
+        let resend = append(&target, &p, large, &["x"]).await.unwrap();
+        assert_eq!(resend.offsets, first.offsets);
+        let divergent = append(&target, &p, large, &["other"]).await;
+        assert_eq!(divergent.unwrap_err().reason, Reason::SeqDivergent);
+        let lower = append(&target, &p, large - 1, &["lower"]).await;
+        assert_eq!(lower.unwrap_err().reason, Reason::Sequence);
+        assert_eq!(target.texts().await, ["x"]);
+        let max = (1 << 53) - 1;
+        append(&target, &p, max, &["max"]).await.unwrap();
+        // The service refuses a higher one on every backend, and Redis and memory do on their own.
+        if target.gives.gives(Needs::STORE_ANSWERS) {
+            let past = append(&target, &p, max + 1, &["past"]).await;
+            assert_eq!(past.unwrap_err().reason, Reason::Invalid);
+        }
+    }
+}
+
 /// A Workflow's create makes a Stream that an Activity created Workflow-owned.
 #[tokio::test]
 async fn a_workflow_create_takes_over_a_stream_an_activity_created() {
@@ -519,8 +534,19 @@ async fn a_stale_producer_cant_close_the_stream() {
     }
 }
 
-/// Only the owner closes a Stream: its run chain for a Workflow-owned one, a client for a
-/// client's.
+/// The close Activity's Producer of run `run`.
+fn workflow(run: &str) -> Producer {
+    Producer {
+        kind: ProducerKind::Workflow as i32,
+        id: workflow_producer_id(run),
+        run_id: run.to_string(),
+        epoch: None,
+    }
+}
+
+/// Only the owner closes a Stream. That's the close Activity of its run chain for a Workflow-owned
+/// Stream, and a client for a client's Stream. A Local Activity of the chain can't close it, and a
+/// ref with no chain can't either.
 #[tokio::test]
 async fn only_the_owner_closes_a_stream() {
     for target in stores_for(Needs::UNCHECKED.and(Needs::STORE_ANSWERS)).await {
@@ -544,7 +570,6 @@ async fn only_the_owner_closes_a_stream() {
                 &target.namespace,
                 &owned("agent"),
                 None,
-                None,
                 Owner::Workflow(None),
                 &Withdrawal::default(),
             )
@@ -553,26 +578,18 @@ async fn only_the_owner_closes_a_stream() {
         for (stream, producer) in [
             (owned("agent"), client(1)),
             (owned("agent"), activity("r1", 1, 10)),
-            (owned("another-agent"), la.clone()),
+            (owned("agent"), la.clone()),
+            (owned("another-agent"), workflow("r1")),
+            (owned(""), workflow("r1")),
         ] {
             let refused = target.close_at(&stream, &producer).await.unwrap_err();
             assert_eq!(refused.reason, Reason::NotOwner);
         }
-        assert!(!target.close_at(&owned("agent"), &la).await.unwrap().already);
-        // The run itself closes from the worker after its final completion.
-        let workflow = Producer {
-            kind: ProducerKind::Workflow as i32,
-            id: workflow_producer_id("r1"),
-            run_id: "r1".to_string(),
-            epoch: None,
-        };
-        assert!(
-            target
-                .close_at(&owned("agent"), &workflow)
-                .await
-                .unwrap()
-                .already
-        );
+        let closed = target.close_at(&owned("agent"), &workflow("r1")).await;
+        assert!(!closed.unwrap().already);
+        // The owner check comes first, even on a closed Stream.
+        let refused = target.close_at(&owned("agent"), &la).await.unwrap_err();
+        assert_eq!(refused.reason, Reason::NotOwner);
     }
 }
 
@@ -626,203 +643,5 @@ async fn every_store_keeps_the_meta_fields_of_the_shared_vectors() {
         ] {
             assert!(target.meta(&field).await.is_some(), "{field}");
         }
-    }
-}
-
-/// An auto close closes a quiet Stream on its next write, with a close Record that has no
-/// Producer and a `COMPLETED` status. Each append holds it off for one more period.
-#[tokio::test]
-async fn an_auto_close_closes_a_quiet_stream_on_its_next_write() {
-    for target in stores_for(
-        Needs::RAW_KEYS
-            .and(Needs::SHORT_TIMES)
-            .and(Needs::STORE_ANSWERS),
-    )
-    .await
-    {
-        let none = Withdrawal::default();
-        let period = Some(Duration::from_millis(300));
-        let stream = target.stream_ref();
-        let create = || {
-            target.store.create(
-                &target.namespace,
-                &stream,
-                None,
-                period,
-                Owner::Client,
-                &none,
-            )
-        };
-        let created = create().await.unwrap();
-        assert_eq!(created.outcome, CreateOutcome::Created);
-        assert_eq!(created.auto_close, period);
-        assert_eq!(create().await.unwrap().outcome, CreateOutcome::Exists);
-        let other = target
-            .store
-            .create(
-                &target.namespace,
-                &target.stream_ref(),
-                None,
-                None,
-                Owner::Client,
-                &none,
-            )
-            .await
-            .unwrap();
-        assert_eq!(other.outcome, CreateOutcome::Conflict);
-        assert_eq!(other.auto_close, period);
-
-        // Each append holds the close off for one more period.
-        let p = client(1);
-        append(&target, &p, 1, &["a"]).await.unwrap();
-        tokio::time::sleep(Duration::from_millis(200)).await;
-        append(&target, &p, 2, &["b"]).await.unwrap();
-        tokio::time::sleep(Duration::from_millis(200)).await;
-        let last = append(&target, &p, 3, &["c"]).await.unwrap();
-        let (state, _) = target
-            .store
-            .read(&target.namespace, &target.stream, 0, 0)
-            .await
-            .unwrap();
-        assert_eq!(state.auto_close, period);
-        assert!(!state.auto_close_due());
-
-        tokio::time::sleep(Duration::from_millis(400)).await;
-        let (state, _) = target
-            .store
-            .read(&target.namespace, &target.stream, 0, 0)
-            .await
-            .unwrap();
-        assert!(state.auto_close_due());
-        assert_eq!(state.closed_at, None);
-        // The append that finds the period passed writes the close Record and is refused.
-        assert_eq!(
-            append(&target, &p, 4, &["d"]).await.unwrap_err().reason,
-            Reason::Closed
-        );
-        // A resend still gets its first answer.
-        assert_eq!(
-            append(&target, &p, 3, &["c"]).await.unwrap().offsets,
-            last.offsets
-        );
-        let entries = target.entries().await;
-        let close = entries.last().unwrap();
-        let record =
-            temporalio_streams::proto::StreamRecord::decode(close.record.as_deref().unwrap())
-                .unwrap();
-        assert_eq!(
-            record.kind,
-            temporalio_streams::proto::StreamRecordKind::Close as i32
-        );
-        assert!(record.producer.is_none());
-        assert!(record.close_result.is_none() && record.close_failure.is_none());
-        assert_eq!(
-            record.close_status,
-            temporalio_streams::proto::CloseStatus::Completed as i32
-        );
-        assert_eq!(target.texts().await, ["a", "b", "c"]);
-        let closed = target.close(&p).await.unwrap();
-        assert!(closed.already);
-        assert_eq!(closed.offset, close.offset);
-        assert_eq!(create().await.unwrap().outcome, CreateOutcome::Closed);
-    }
-}
-
-/// An auto close counts from the create, and each step that finds it due applies it once.
-#[tokio::test]
-async fn an_auto_close_counts_from_the_create_and_each_step_applies_it_once() {
-    for target in stores_for(Needs::RAW_KEYS.and(Needs::SHORT_TIMES)).await {
-        let none = Withdrawal::default();
-        target
-            .store
-            .create(
-                &target.namespace,
-                &target.stream_ref(),
-                None,
-                Some(Duration::from_millis(200)),
-                Owner::Workflow(None),
-                &none,
-            )
-            .await
-            .unwrap();
-        assert_eq!(
-            target
-                .store
-                .auto_close(&target.namespace, &target.stream)
-                .await
-                .unwrap(),
-            None
-        );
-        tokio::time::sleep(Duration::from_millis(300)).await;
-        let first = target
-            .store
-            .auto_close(&target.namespace, &target.stream)
-            .await
-            .unwrap();
-        let again = target
-            .store
-            .auto_close(&target.namespace, &target.stream)
-            .await
-            .unwrap();
-        assert!(first.is_some());
-        assert_eq!(first, again);
-        assert_eq!(target.log_len().await, 1);
-        let (state, _) = target
-            .store
-            .read(&target.namespace, &target.stream, 0, 0)
-            .await
-            .unwrap();
-        assert_eq!(state.closed_at, first);
-        // A closed Stream keeps its Retention, not the safety TTL.
-        let (log, _) = target.ttls().await;
-        assert!(
-            log <= Duration::from_secs(7 * 86_400).as_millis() as i64,
-            "{log}"
-        );
-        assert!(
-            target
-                .store
-                .capabilities()
-                .contains(Capabilities::AUTO_CLOSE)
-        );
-    }
-}
-
-/// An auto close period below 1 ms rounds up to 1 ms, and a huge one doesn't overflow.
-#[tokio::test]
-async fn an_auto_close_period_at_the_edges_neither_overflows_nor_rounds_to_zero() {
-    for target in stores_for(Needs::STORE_ANSWERS).await {
-        let none = Withdrawal::default();
-        let created = target
-            .store
-            .create(
-                &target.namespace,
-                &target.stream_ref(),
-                None,
-                Some(Duration::from_micros(500)),
-                Owner::Client,
-                &none,
-            )
-            .await
-            .unwrap();
-        assert_eq!(created.auto_close, Some(Duration::from_millis(1)));
-    }
-    for target in stores_for(Needs::STORE_ANSWERS).await {
-        let none = Withdrawal::default();
-        target
-            .store
-            .create(
-                &target.namespace,
-                &target.stream_ref(),
-                None,
-                Some(Duration::from_secs(u64::MAX / 4)),
-                Owner::Client,
-                &none,
-            )
-            .await
-            .unwrap();
-        append(&target, &client(1), 1, &["a"]).await.unwrap();
-        append(&target, &client(1), 2, &["b"]).await.unwrap();
-        assert_eq!(target.texts().await, ["a", "b"]);
     }
 }

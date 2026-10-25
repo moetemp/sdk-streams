@@ -3,8 +3,8 @@
 use crate::{Reason, StreamError};
 use redis::RedisError;
 
-/// The Stream error a Redis error stands for. The scripts name their own refusals with a
-/// `STREAM_` code. Every other failure is a Store failure, which the caller may retry.
+/// The Stream error of a Redis error. The scripts name their own refusals with a `STREAM_` code.
+/// Every other failure is a Store failure, which the caller may retry.
 pub(crate) fn stream_error(error: &RedisError) -> StreamError {
     let detail = error.detail().unwrap_or_default().to_string();
     let reason = match error.code() {
@@ -43,7 +43,7 @@ mod tests {
     use super::*;
 
     fn server(code: &str, detail: &str) -> RedisError {
-        // Parsed as the wire carries it, so the code and detail split as a real reply's do.
+        // Parse it as a wire reply, so that the code and the detail split as in a real reply.
         redis::parse_redis_value(format!("-{code} {detail}\r\n").as_bytes())
             .unwrap()
             .extract_error()

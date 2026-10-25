@@ -1,5 +1,5 @@
-//! What the Redis tests share: one Store per server, a fresh Stream per case, and the Producers
-//! of a Workflow run.
+//! The helpers that the Store tests share. They give one Store per server, a new Stream per case,
+//! and the Producers of a Workflow run.
 
 #![allow(dead_code)]
 
@@ -31,31 +31,30 @@ pub(crate) use server::server_url;
 
 static NEXT: AtomicU64 = AtomicU64::new(0);
 
-/// What a case needs beyond the Store's calls on its own Stream. A case runs on every backend
-/// that gives all it needs, so one suite covers each backend as far as its guarantees go. Each
-/// case's comment says its guarantee and what it needs.
+/// What a case needs beyond the Store's calls on its own Stream. A case runs on every backend that
+/// has all that it needs. Each case's comment says its guarantee and its needs.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) struct Needs(u8);
 
 impl Needs {
     /// Only the Store's calls on the Stream and reads of its Records.
     pub(crate) const CALLS: Self = Self(0);
-    /// The Store's own answers past the API: a conflict's stored Retention, `resend`, `flagged`,
-    /// and a close's offset and `already`.
+    /// The Store's own results beyond the API. These are a conflict's stored Retention, `resend`,
+    /// `flagged`, and a close's offset and `already`.
     pub(crate) const STORE_ANSWERS: Self = Self(1);
-    /// The keys under the calls: meta fields, TTLs and raw log entries, and the Store's log calls
-    /// `read`, `read_back` and `wait_after`.
+    /// The keys under the calls. These are the meta fields, TTLs and raw log entries, and the
+    /// Store's log calls `read`, `read_back` and `wait_after`.
     pub(crate) const RAW_KEYS: Self = Self(1 << 1);
     /// Producers, owners and runs as sent. The server checks them against its executions, so a
     /// case with made-up runs, or an Activity with no task token, can't run there.
     pub(crate) const UNCHECKED: Self = Self(1 << 2);
-    /// A Retention or an auto close of a few hundred ms.
+    /// A Retention of a few hundred ms.
     pub(crate) const SHORT_TIMES: Self = Self(1 << 3);
     /// The runtime built from the crate's own config, such as a backend name.
     pub(crate) const OWN_CONFIG: Self = Self(1 << 4);
     /// The Store keys on the id only, so the owner fields of a ref don't route a call.
     pub(crate) const ID_KEYS: Self = Self(1 << 5);
-    /// Every need. Redis and memory give it.
+    /// Every need. Redis and memory have all of them.
     pub(crate) const ALL: Self = Self(u8::MAX);
 
     /// Both needs.
@@ -91,8 +90,8 @@ pub(crate) enum Backend {
     Native(Arc<ServiceStore>),
 }
 
-/// What the native backend gives: the Store's calls only. The server keeps its own keys, checks
-/// Producers and runs against its executions, answers no more than the API, and has its own
+/// What the native backend gives, which is the Store's calls only. The server keeps its own keys,
+/// checks Producers and runs against its executions, returns no more than the API, and has its own
 /// Retention floor.
 const NATIVE_GIVES: Needs = Needs::CALLS;
 
@@ -299,7 +298,6 @@ impl Target {
             .create(
                 &self.namespace,
                 &self.stream_ref(),
-                None,
                 None,
                 owner,
                 &Withdrawal::default(),

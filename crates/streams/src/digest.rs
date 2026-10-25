@@ -1,13 +1,13 @@
-//! The content digest of a batch. Each dedupe entry keeps it, so a resend with the same
-//! `sequence` and other content fails instead of going missing. The server computes the same
-//! bytes, and `testdata/digests.json` pins them for every SDK.
+//! The content digest of a batch. Each dedupe entry stores it, so that a resend with the same
+//! `sequence` and other content fails instead of being dropped without an error. The server
+//! computes the same digest, and `testdata/digests.json` has the expected values.
 
 use crate::proto::AppendRecord;
 use sha2::{Digest, Sha256};
 
 /// SHA-256 over the Records in order, as 64 lowercase hex characters. Each part has its length
-/// before it, so two batches never give the same bytes. The metadata goes in key order, since a
-/// map has no order on the wire.
+/// before it, so that two different batches never hash the same bytes. The metadata is hashed in
+/// key order, since a map has no order on the wire.
 pub fn batch_digest(records: &[AppendRecord]) -> String {
     let mut hasher = Sha256::new();
     for record in records {

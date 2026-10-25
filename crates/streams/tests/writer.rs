@@ -1,4 +1,4 @@
-//! The buffered writers of Activities and clients, through the byte calls, on a real Redis.
+//! The writers of Activities and clients, through the byte calls, on each backend.
 
 mod support;
 
@@ -146,7 +146,7 @@ impl Case {
         opened.writer_id
     }
 
-    /// An awaited publish: the Records are in the Store when it returns.
+    /// An awaited publish. The Records are in the Store when it returns.
     async fn write(&self, writer_id: u64, texts: &[&str]) -> Result<(i64, i64), StreamError> {
         let written: WriteRecordsResponse = self
             .call(
@@ -227,7 +227,7 @@ async fn writes_split_at_the_batch_size_and_keep_one_sequence() {
         assert_eq!(case.visible().await, ["1", "2", "3", "4", "5"]);
         assert_eq!(read.records[0].offset, first);
         assert_eq!(read.records[2].offset, last);
-        // Opening the same Producer epoch again gives the same writer, so it keeps the sequence.
+        // Opening the same Producer epoch again returns the same writer, so it keeps the sequence.
         assert_eq!(case.open(client(), |_| {}).await, writer);
     }
 }
@@ -271,6 +271,56 @@ async fn an_activity_retry_withdraws_the_earlier_attempt_even_with_nothing_to_wr
         case.write(first, &["a1"]).await.unwrap();
         case.open(activity(2), |_| {}).await;
         assert!(case.visible().await.is_empty());
+    }
+}
+
+/// An Activity retry opens its writer on a closed or expired Stream, so a retry that only reads
+/// the Stream still runs. Its first write fails with the real reason.
+#[tokio::test]
+async fn an_activity_retry_opens_on_a_closed_or_expired_stream() {
+    for case in cases().await {
+        let first = case.open(activity(1), |_| {}).await;
+        case.write(first, &["a1"]).await.unwrap();
+        let close = CloseStreamRequest {
+            namespace: case.namespace.clone(),
+            stream: Some(StreamRef {
+                id: case.stream.clone(),
+                ..Default::default()
+            }),
+            producer: Some(client()),
+            ..Default::default()
+        };
+        let _: temporalio_streams::proto::CloseStreamResponse =
+            case.call("CloseStream", close).await.unwrap();
+        let retry = case.open(activity(2), |_| {}).await;
+        let error = case.write(retry, &["a2"]).await.unwrap_err();
+        assert_eq!(reason(&error), "stream_closed");
+
+        let short = format!("{}-short", case.stream);
+        let _: CreateStreamResponse = case
+            .call(
+                "CreateStream",
+                CreateStreamRequest {
+                    namespace: case.namespace.clone(),
+                    stream_id: short.clone(),
+                    retention: millis(300),
+                    ..Default::default()
+                },
+            )
+            .await
+            .unwrap();
+        let on_short = |request: &mut OpenWriterRequest| {
+            request.stream = Some(StreamRef {
+                id: short.clone(),
+                ..Default::default()
+            });
+        };
+        let first = case.open(activity(1), on_short).await;
+        case.write(first, &["a1"]).await.unwrap();
+        tokio::time::sleep(Duration::from_millis(500)).await;
+        let retry = case.open(activity(2), on_short).await;
+        let error = case.write(retry, &["a2"]).await.unwrap_err();
+        assert_eq!(reason(&error), "stream_expired");
     }
 }
 
@@ -417,8 +467,7 @@ async fn a_write_of_a_retry_attempt_withdraws_the_earlier_attempt() {
     }
 }
 
-/// A memory Store whose first append goes in but whose answer is lost, as on a dropped
-/// connection.
+/// A memory Store that writes the first append but loses its result, as on a dropped connection.
 struct LosesFirstAnswer {
     inner: Arc<MemoryStore>,
     lost: AtomicBool,
@@ -439,12 +488,11 @@ impl Store for LosesFirstAnswer {
         namespace: &str,
         stream: &StreamRef,
         retention: Option<Duration>,
-        auto_close: Option<Duration>,
         owner: Owner<'_>,
         withdrawal: &Withdrawal<'_>,
     ) -> StreamResult<Created> {
         self.inner
-            .create(namespace, stream, retention, auto_close, owner, withdrawal)
+            .create(namespace, stream, retention, owner, withdrawal)
             .await
     }
 

@@ -1,5 +1,5 @@
-//! A Store that lacks a capability: every call that needs it is refused cleanly, by name, with
-//! nothing written. The memory Store stands in for such a Store with one capability masked.
+//! A Store that lacks a capability refuses every call that needs it, by name, and writes nothing.
+//! The tests use the memory Store with one capability masked.
 
 mod support;
 
@@ -47,12 +47,11 @@ impl Store for Masked {
         namespace: &str,
         stream: &StreamRef,
         retention: Option<Duration>,
-        auto_close: Option<Duration>,
         owner: Owner<'_>,
         withdrawal: &Withdrawal<'_>,
     ) -> StreamResult<Created> {
         self.inner
-            .create(namespace, stream, retention, auto_close, owner, withdrawal)
+            .create(namespace, stream, retention, owner, withdrawal)
             .await
     }
 
@@ -100,10 +99,6 @@ impl Store for Masked {
         self.inner
             .close(namespace, stream, producer, task_token, record)
             .await
-    }
-
-    async fn auto_close(&self, namespace: &str, stream_id: &str) -> StreamResult<Option<i64>> {
-        self.inner.auto_close(namespace, stream_id).await
     }
 }
 
@@ -265,33 +260,12 @@ async fn a_workflow_create_without_the_safety_ttl_is_refused_before_it_writes() 
 }
 
 #[tokio::test]
-async fn a_create_with_an_auto_close_is_refused_by_a_store_without_it() {
-    let case = case(Capabilities::AUTO_CLOSE);
-    let auto_close = Some(prost_types::Duration {
-        seconds: 60,
-        nanos: 0,
-    });
-    let request = CreateStreamRequest {
-        namespace: NAMESPACE.to_string(),
-        stream_id: case.stream.clone(),
-        auto_close,
-        ..Default::default()
-    };
-    let error = case.call("CreateStream", request).await.unwrap_err();
-    assert_eq!(refused_capability(&error), "auto_close");
-    assert!(!case.created());
-    // A create with no auto close needs no such capability.
-    case.create().await;
-    assert!(case.created());
-}
-
-#[tokio::test]
 async fn a_retry_run_without_the_run_fence_is_refused_before_it_writes() {
     let case = case(Capabilities::RUN_FENCE);
     let error = case.create_owned("previous-run").await.unwrap_err();
     assert_eq!(refused_capability(&error), "run_fence");
     assert!(!case.created());
-    // A run that is no retry needs no run fence.
+    // A run that isn't a retry needs no run fence.
     case.create_owned("").await.unwrap();
     assert!(case.created());
 }
@@ -303,7 +277,7 @@ async fn every_store_and_wrapper_says_what_it_can_do() {
         Duration::from_secs(7200),
     ));
     assert_eq!(memory.capabilities(), Capabilities::ALL);
-    // A wrapper forwards what its Store can do. Only the mask comes off.
+    // A wrapper forwards the capabilities of its Store, less the masked ones.
     let wrapper = Masked {
         inner: memory.clone(),
         without: Capabilities::default(),

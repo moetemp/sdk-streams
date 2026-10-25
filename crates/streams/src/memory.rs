@@ -1,6 +1,6 @@
-//! The memory Store, for tests. It keeps the same fields as the Redis layout and runs the steps
-//! of the Lua scripts in the same order, so both Stores give the same answers. Each call holds
-//! one lock, as one script runs alone on Redis.
+//! The memory Store, for tests. It keeps the same fields as the Redis layout and runs the steps of
+//! the Lua scripts in the same order, so that both Stores return the same results. Each call holds
+//! one lock, since Redis runs one script at a time.
 
 use crate::{
     Reason, StreamError, StreamResult,
@@ -10,7 +10,7 @@ use crate::{
     proto::{Producer, ProducerKind, StreamRef},
     store::{
         Appended, Batch, Capabilities, Closed, CreateOutcome, Created, Entry, FORMAT_VERSION,
-        Owner, Store, StreamState, TOMBSTONE, Withdrawal,
+        MAX_SEQUENCE, Owner, Store, StreamState, TOMBSTONE, Withdrawal,
     },
 };
 use parking_lot::Mutex;
@@ -20,10 +20,7 @@ use std::{
 };
 use tokio::{sync::Notify, time::Instant};
 
-/// The close Record of an auto close, as `AUTO_CLOSE_RECORD` in `lib.lua`.
-const AUTO_CLOSE_RECORD: &[u8] = b"\x08\x03\x48\x01";
-
-/// The most sequence numbers of one millisecond, as an offset packs them in 20 bits.
+/// The number of sequence numbers in one millisecond, since an offset packs them in 20 bits.
 const SEQ_LIMIT: u64 = 1 << crate::offset::SEQ_BITS;
 
 #[derive(Clone, Default)]
@@ -32,7 +29,7 @@ struct Fields {
     supersession: Option<Vec<u8>>,
 }
 
-/// One Stream: the meta hash and the log, each with the time it expires, as Redis keys have.
+/// One Stream's meta hash and log, each with an expiry time, as Redis keys have.
 #[derive(Default)]
 struct Keys {
     meta: HashMap<String, String>,
@@ -132,7 +129,7 @@ impl Keys {
         self.meta.insert(field.to_string(), value.into());
     }
 
-    /// The `check_live` step: the create key, the format version and the expiry.
+    /// The `check_live` step, which checks the create key, the format version and the expiry.
     fn check_live(&self, now: i64) -> StreamResult<()> {
         let Some(v) = self.get("v") else {
             return Err(refuse(Reason::NotFound, "nobody created the Stream"));
@@ -156,16 +153,13 @@ impl Keys {
     /// The `check_owner` step of a close, as in `lib.lua`.
     fn check_owner(&self, kind: i32, chain: &str) -> StreamResult<()> {
         if self.get("own").map(String::as_str) == Some("wf") {
-            if kind != ProducerKind::Workflow as i32 && kind != ProducerKind::LocalActivity as i32 {
+            if kind != ProducerKind::Workflow as i32 {
                 return Err(refuse(
                     Reason::NotOwner,
-                    "only the owner run chain closes a Workflow-owned Stream",
+                    "only the close Activity of the owner run chain closes a Workflow-owned Stream",
                 ));
             }
-            if self
-                .get("oc")
-                .is_some_and(|owner| !chain.is_empty() && chain != owner)
-            {
+            if self.get("oc").is_some_and(|owner| chain != owner) {
                 return Err(refuse(
                     Reason::NotOwner,
                     "the ref names another run chain than the owner",
@@ -246,35 +240,8 @@ impl Keys {
         Ok(())
     }
 
-    /// The `auto_close` step: closes an open Stream whose period passed since its last append.
-    /// Answers true when the Stream is closed after the step.
-    fn auto_close(&mut self, now: i64, tombstone: i64) -> bool {
-        if self.get("closed").is_some() {
-            return true;
-        }
-        let Some(period) = self.get("ac").and_then(|ac| ac.parse::<i64>().ok()) else {
-            return false;
-        };
-        let last: i64 = self.get("la").and_then(|la| la.parse().ok()).unwrap_or(0);
-        if now < last.saturating_add(period) || self.check_ids_fit(now, 1).is_err() {
-            return false;
-        }
-        self.trim(now);
-        let id = self.add(
-            now,
-            Fields {
-                record: Some(AUTO_CLOSE_RECORD.to_vec()),
-                supersession: None,
-            },
-        );
-        self.set("closed", "1");
-        self.set("close_id", id.clone());
-        self.set("newest", id);
-        self.refresh(now, 0, tombstone);
-        true
-    }
-
-    /// `XADD *`: the next id after the newest one, in this millisecond or a later one.
+    /// Adds an entry as `XADD *` does, with the next id after the newest one, in this millisecond
+    /// or a later one.
     fn add(&mut self, now: i64, fields: Fields) -> String {
         let now = now.max(0) as u64;
         let (last_ms, last_seq) = self.last_id;
@@ -307,7 +274,7 @@ impl MemoryStore {
         StreamKeys::new(&self.prefix, namespace, stream_id).meta()
     }
 
-    /// Runs `step` on one Stream's keys after the expired keys go, as Redis drops them.
+    /// Runs `step` on one Stream's keys after it drops the expired keys, as Redis does.
     fn with<T>(
         &self,
         namespace: &str,
@@ -327,7 +294,7 @@ impl MemoryStore {
             keys.log_expires = 0;
         }
         let result = step(keys, now);
-        // Redis forgets a Stream, its newest id too, once both keys are gone.
+        // Once both keys are gone, Redis has no state of the Stream, not even its newest id.
         if keys.meta.is_empty() && keys.log.is_none() {
             streams.remove(&key);
         }
@@ -385,7 +352,7 @@ impl MemoryStore {
     }
 }
 
-/// The refusal of a Stream that a Standalone Activity owns, which only the server keeps.
+/// The refusal of a Stream that a Standalone Activity owns, since only the server supports one.
 pub(crate) fn activity_owner() -> StreamError {
     StreamError::new(
         Reason::Unsupported,
@@ -426,17 +393,11 @@ impl Store for MemoryStore {
         namespace: &str,
         stream: &StreamRef,
         retention: Option<Duration>,
-        auto_close: Option<Duration>,
         owner: Owner<'_>,
         withdrawal: &Withdrawal<'_>,
     ) -> StreamResult<Created> {
         let stream_id = stream.id.as_str();
         let retention = millis(retention.filter(|r| !r.is_zero()).unwrap_or(self.retention));
-        let period = auto_close
-            .filter(|period| !period.is_zero())
-            // Stored in ms, so a period below 1 ms rounds up and never stores as no wait.
-            .map(|period| millis(period).max(1).to_string())
-            .unwrap_or_default();
         let owner = match owner {
             Owner::Workflow(_) => "wf",
             Owner::Client => "client",
@@ -453,27 +414,22 @@ impl Store for MemoryStore {
                 if owner == "wf" && !chain.is_empty() {
                     keys.set("oc", chain.clone());
                 }
-                if !period.is_empty() {
-                    keys.set("ac", period.clone());
-                    keys.set("la", now.to_string());
-                }
                 keys.withdraw_run(&withdrawn_run);
                 keys.refresh(now, safety, tombstone);
-                return Ok((CreateOutcome::Created, retention, false, period.clone()));
+                return Ok((CreateOutcome::Created, retention, false));
             };
             let stored_ms: i64 = stored.parse().unwrap_or(0);
-            let stored_period = keys.get("ac").cloned().unwrap_or_default();
             match keys.check_live(now) {
                 Err(error) if error.reason == Reason::Expired => {
-                    return Ok((CreateOutcome::Expired, stored_ms, false, stored_period));
+                    return Ok((CreateOutcome::Expired, stored_ms, false));
                 }
                 Err(error) => return Err(error),
                 Ok(()) => {}
             }
-            if keys.auto_close(now, tombstone) {
-                return Ok((CreateOutcome::Closed, stored_ms, false, stored_period));
+            if keys.get("closed").is_some() {
+                return Ok((CreateOutcome::Closed, stored_ms, false));
             }
-            let outcome = if stored_ms != retention || stored_period != period {
+            let outcome = if stored_ms != retention {
                 CreateOutcome::Conflict
             } else {
                 CreateOutcome::Exists
@@ -498,18 +454,16 @@ impl Store for MemoryStore {
                 keys.refresh(now, safety, tombstone);
                 flagged = true;
             }
-            Ok((outcome, stored_ms, flagged, stored_period))
+            Ok((outcome, stored_ms, flagged))
         });
-        let (outcome, stored, flagged, period) = created?;
-        // A create that finds an auto close due writes the close Record.
-        if flagged || outcome == CreateOutcome::Closed {
+        let (outcome, stored, flagged) = created?;
+        if flagged {
             self.appended.notify_waiters();
         }
         Ok(Created {
             outcome,
             retention: Duration::from_millis(stored.max(0) as u64),
             flagged,
-            auto_close: period.parse().ok().map(Duration::from_millis),
         })
     }
 
@@ -543,8 +497,11 @@ impl Store for MemoryStore {
             .unwrap_or_default();
         let (open_field, gone_field) = (format!("oa|{run}"), format!("ow|{run}"));
         let appended = self.with(namespace, stream_id, |keys, now| {
-            if sequence < 1 {
-                return Err(refuse(Reason::Invalid, "the sequence must be 1 or more"));
+            if !(1..=MAX_SEQUENCE).contains(&sequence) {
+                return Err(refuse(
+                    Reason::Invalid,
+                    "the sequence must be from 1 to 2^53 - 1",
+                ));
             }
             keys.check_live(now)?;
             if let Some(last) = keys.get(&format!("d{suffix}")) {
@@ -552,7 +509,7 @@ impl Store for MemoryStore {
                 if (4..=5).contains(&parts.len()) && parts[0] == epoch {
                     let last_sequence: i64 = parts[1].parse().unwrap_or(0);
                     if sequence == last_sequence {
-                        // An entry written before the digest has none, and takes any resend.
+                        // An entry from an older crate has no digest, and accepts any resend.
                         let last_digest = parts.get(4).copied().unwrap_or_default();
                         if !last_digest.is_empty() && last_digest != batch.digest {
                             return Err(refuse(
@@ -573,7 +530,7 @@ impl Store for MemoryStore {
                     }
                 }
             }
-            if keys.auto_close(now, tombstone) {
+            if keys.get("closed").is_some() {
                 return Err(refuse(Reason::Closed, "the Stream is closed"));
             }
             if !run.is_empty() && keys.get(&format!("wr|{run}")).is_some() {
@@ -620,7 +577,7 @@ impl Store for MemoryStore {
 
             keys.trim(now);
             let (mut first, mut last) = (String::new(), String::new());
-            // The orphans go in an entry of their own, as in `append.lua`.
+            // The orphan item has an entry of its own, as in `append.lua`.
             let mut orphan = String::new();
             if let (false, Some(facts)) = (withdrawn.is_empty(), facts) {
                 orphan = keys.add(
@@ -687,22 +644,12 @@ impl Store for MemoryStore {
                     keys.set(&gone_field, all.join(" "));
                 }
             }
-            if records > 0 && keys.get("ac").is_some() {
-                keys.set("la", now.to_string());
-            }
             if !last.is_empty() {
                 keys.set("newest", last.clone());
             }
             keys.refresh(now, safety, tombstone);
             Ok((false, first, last, flagged || !withdrawn.is_empty()))
         });
-        // A refusal may come from an auto close that this step wrote, so waiters look again.
-        if appended
-            .as_ref()
-            .is_err_and(|error| error.reason == Reason::Closed)
-        {
-            self.appended.notify_waiters();
-        }
         let (resend, first, last, flagged) = appended?;
         if !resend && !last.is_empty() {
             self.appended.notify_waiters();
@@ -731,7 +678,7 @@ impl Store for MemoryStore {
         let closed = self.with(namespace, stream_id, |keys, now| {
             keys.check_live(now)?;
             keys.check_owner(producer.kind, &chain)?;
-            if keys.auto_close(now, tombstone) {
+            if keys.get("closed").is_some() {
                 let id = keys.get("close_id").cloned().unwrap_or_default();
                 return Ok((id, true));
             }
@@ -766,8 +713,9 @@ impl Store for MemoryStore {
             Ok((id, false))
         });
         let (id, already) = closed?;
-        // An auto close that this step wrote also answers `already`.
-        self.appended.notify_waiters();
+        if !already {
+            self.appended.notify_waiters();
+        }
         Ok(Closed {
             offset: offset_of_entry_id(&id)?,
             already,
@@ -805,10 +753,6 @@ impl Store for MemoryStore {
                 retention: Duration::from_millis(number("ret").max(0) as u64),
                 expires_ms: number("exp"),
                 now_ms: now,
-                auto_close: keys
-                    .get("ac")
-                    .map(|_| Duration::from_millis(number("ac").max(0) as u64)),
-                last_append_ms: number("la"),
             };
             let mut entries = vec![];
             if let Some(log) = keys.log.as_ref() {
@@ -822,24 +766,6 @@ impl Store for MemoryStore {
             }
             Ok((state, entries))
         })
-    }
-
-    async fn auto_close(&self, namespace: &str, stream_id: &str) -> StreamResult<Option<i64>> {
-        let tombstone = millis(TOMBSTONE);
-        let closed = self.with(namespace, stream_id, |keys, now| {
-            keys.check_live(now)?;
-            let was_open = keys.get("closed").is_none();
-            if !keys.auto_close(now, tombstone) {
-                return Ok((None, false));
-            }
-            let id = keys.get("close_id").cloned().unwrap_or_default();
-            Ok((Some(id), was_open))
-        });
-        let (id, wrote) = closed?;
-        if wrote {
-            self.appended.notify_waiters();
-        }
-        id.map(|id| offset_of_entry_id(&id)).transpose()
     }
 
     async fn read_back(
@@ -908,7 +834,7 @@ mod tests {
         let mut keys = Keys::default();
         assert_eq!(keys.add(5, Fields::default()), "5-0");
         assert_eq!(keys.add(5, Fields::default()), "5-1");
-        // A clock that steps back keeps the ids increasing.
+        // The ids keep increasing when the clock steps back.
         assert_eq!(keys.add(3, Fields::default()), "5-2");
         assert_eq!(keys.add(9, Fields::default()), "9-0");
     }
