@@ -149,3 +149,5 @@
   `la` on a Stream that an older crate created.
 - The crate pins `temporalio-common` at sdk-rust Brook c8 `320e725f`, which reverts the cache-off
   eviction reason. The crate uses nothing that the revert touches.
+- A read of a closed Stream whose Retention passed fails with `stream_expired`, as a read of an
+  open one does. It no longer waits out its `wait` and answers nothing.

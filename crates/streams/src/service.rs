@@ -625,11 +625,10 @@ fn decode(bytes: &[u8], offset: i64) -> StreamResult<StreamRecord> {
 /// Fails a read whose Records the Retention or the expiry removed, so a gap never passes in
 /// silence. A read from the start of the Stream has no gap.
 ///
-/// An open Stream that expired gets no more Records, so a read of it fails as well, or the
-/// Reader would wait on it for good.
+/// A Tombstone fails every read. An open one gets no more Records, so the Reader would wait on
+/// it for good, and a closed one has lost its log with the close Record.
 fn check_expiry(state: &StreamState, from: i64) -> StreamResult<()> {
-    let open_tombstone = state.expired() && state.closed_at.is_none();
-    if open_tombstone || (from > 0 && state.trimmed >= from) {
+    if state.expired() || (from > 0 && state.trimmed >= from) {
         return Err(expired());
     }
     Ok(())

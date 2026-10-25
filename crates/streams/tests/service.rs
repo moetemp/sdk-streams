@@ -582,6 +582,53 @@ async fn a_read_of_an_expired_open_stream_fails_instead_of_waiting() {
     }
 }
 
+/// A read of a closed Stream whose Retention passed fails as expired, from any offset, instead
+/// of waiting out its wait. A last read fails the same way.
+#[tokio::test]
+async fn a_read_of_an_expired_closed_stream_fails_instead_of_waiting() {
+    for case in cases_for(Needs::SHORT_TIMES).await {
+        case.create(millis(300)).await.unwrap();
+        let first = case
+            .append(client(1), 1, vec![record("", "1")])
+            .await
+            .unwrap();
+        case.close(client(1)).await.unwrap();
+        tokio::time::sleep(Duration::from_millis(500)).await;
+        let describe = case.describe().await.unwrap();
+        assert_eq!(describe.status, StreamStatus::Closed as i32);
+        for request in [
+            ReadRecordsRequest::default(),
+            ReadRecordsRequest {
+                from_offset: first.first_offset,
+                ..Default::default()
+            },
+            ReadRecordsRequest {
+                from_offset: describe.last_offset + 1,
+                ..Default::default()
+            },
+        ] {
+            let started = Instant::now();
+            let error = case
+                .read(ReadRecordsRequest {
+                    wait: millis(1500),
+                    ..request
+                })
+                .await
+                .unwrap_err();
+            assert_eq!(reason(&error), "stream_expired");
+            assert!(started.elapsed() < Duration::from_secs(1));
+        }
+        let last = case
+            .read(ReadRecordsRequest {
+                last: 5,
+                ..Default::default()
+            })
+            .await
+            .unwrap_err();
+        assert_eq!(reason(&last), "stream_expired");
+    }
+}
+
 /// A prefix filter reads the Topics under it and keeps the `Superseded` items.
 #[tokio::test]
 async fn a_prefix_filter_reads_the_topics_under_it_and_keeps_superseded_items() {
