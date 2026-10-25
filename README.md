@@ -38,6 +38,13 @@ which needs CMake and Go.
   files.
 - `protos/temporal/sdk/streams/v1/runtime.proto` has the crate's own calls, such as the writer
   calls.
+- `nexus/stream-service.wit` is the Stream service as a System Nexus service, with the messages of
+  the proto above. Each SDK copies it and generates its bindings with nexgen. A test checks that
+  every line is at most 100 columns.
+- `nexus/stream-writer.wit` is the crate's writer calls (`OpenWriter`, `WriteRecords`,
+  `CloseWriter`, `FreeWriter`, `CloseWriters`) as an internal, client-only interface, with the
+  messages of `runtime.proto`. It isn't a Temporal API, and no server serves it. Each SDK copies
+  it next to the Stream service WIT and generates a `Writer` for Activities and clients.
 - `protos/api_include` is a copy of the Temporal API protos, for imports only.
   `scripts/sync-api-protos.sh` refreshes it from the sdk-rust release tag of the `temporalio-common`
   version in `Cargo.lock`, and CI fails when the copy differs.

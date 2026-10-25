@@ -1,0 +1,422 @@
+// Draft. The Stream service as a System Nexus service, for the Brook API proposal. Each record maps
+// to a message of the protos under ../protos/temporal/api (stream/v1, streamservice/v1 and the
+// Stream enums in enums/v1). This file is the source. Each SDK copies it and generates its bindings
+// with nexgen. The file has no per-language names, since a hand-written facade in each language
+// wraps the generated code.
+package temporal:nexus@1.0.0;
+
+world system {
+  export stream-service;
+}
+
+/// @nexus.endpoint "__temporal_system"
+/// @nexus.service-name "temporal.api.streamservice.v1.StreamService"
+/// @nexus.experimental
+interface stream-service {
+  use nexus:temporal-types/model@1.0.0.{
+    duration,
+    failure,
+    payload,
+    placeholder,
+  };
+
+  /// @nexus.proto "google.protobuf.Timestamp"
+  record timestamp {
+    seconds: option<s64>,
+    nanos: option<s32>,
+  }
+
+  // A Stream that a Workflow creates has the id <workflow id>:<first run id>:<name>. Each part is
+  // percent-encoded. So a caller that knows the first run id can build the id with no call.
+  /// @nexus.doc "Identifies one Stream. The id is opaque to callers."
+  /// @nexus.proto "temporal.api.stream.v1.StreamRef"
+  record stream-ref {
+    /// @nexus.doc "The Stream id. 1 to 4096 bytes after encoding."
+    id: string,
+    /// @nexus.doc "The owning Workflow run chain or Standalone Activity. Empty on a client ref."
+    owner: option<execution>,
+    /// @nexus.doc "Registered backend name, empty for the default. The Store never reads it."
+    backend: option<string>,
+  }
+
+  /// @nexus.proto "temporal.api.enums.v1.ExecutionType"
+  enum execution-type {
+    execution-type-unspecified,
+    execution-type-workflow,
+    execution-type-activity,
+    execution-type-nexus-operation,
+  }
+
+  /// @nexus.doc "A Workflow run chain or a Standalone Activity run."
+  /// @nexus.proto "temporal.api.common.v1.Execution"
+  record execution {
+    %type: option<execution-type>,
+    /// @nexus.doc "The Workflow id, or the Standalone Activity's id."
+    business-id: option<string>,
+    /// @nexus.doc "The run chain's first run id, or the Standalone Activity's run id."
+    run-id: option<string>,
+  }
+
+  /// @nexus.proto "temporal.api.enums.v1.StreamProducerKind"
+  enum stream-producer-kind {
+    stream-producer-kind-unspecified,
+    stream-producer-kind-workflow,
+    stream-producer-kind-local-activity,
+    stream-producer-kind-activity,
+    stream-producer-kind-client,
+    stream-producer-kind-standalone-activity,
+  }
+
+  // Epochs compare field by field, in the order of the fields. A field that a kind does not use is
+  // empty and compares as zero. A timestamp compares seconds, then nanos. A Workflow epoch has
+  // task-started-event-id, task-attempt and task-started-time. A Local Activity epoch has the same
+  // three of the dispatching Workflow Task, then attempt. An Activity epoch has
+  // attempt-scheduled-time, then attempt. A client epoch has attempt.
+  /// @nexus.doc "The ordered attempt of a Producer. A higher epoch supersedes a lower one."
+  /// @nexus.proto "temporal.api.stream.v1.ProducerEpoch"
+  record producer-epoch {
+    /// @nexus.doc "The started event id of the Workflow Task."
+    task-started-event-id: option<s64>,
+    /// @nexus.doc "The attempt of the Workflow Task."
+    task-attempt: option<s32>,
+    /// @nexus.doc "When the Workflow Task attempt started. It tells a reused started id apart."
+    task-started-time: option<timestamp>,
+    /// @nexus.doc "When the server scheduled this Activity attempt. A reset makes it later."
+    attempt-scheduled-time: option<timestamp>,
+    /// @nexus.doc "The Activity, Local Activity or client attempt."
+    attempt: option<s32>,
+  }
+
+  /// @nexus.doc "The Producer of a batch."
+  /// @nexus.proto "temporal.api.stream.v1.Producer"
+  record producer {
+    kind: option<stream-producer-kind>,
+    /// @nexus.doc "Stable across attempts. The proposal gives the form per kind."
+    id: string,
+    epoch: option<producer-epoch>,
+    /// @nexus.doc "The run of the Producer, so nobody parses the id. Empty for a client."
+    run-id: option<string>,
+  }
+
+  /// @nexus.doc "A Workflow Task attempt of the run."
+  /// @nexus.proto "temporal.api.stream.v1.WorkflowTaskEpoch"
+  record workflow-task-epoch {
+    started-event-id: option<s64>,
+    attempt: option<s32>,
+    started-time: option<timestamp>,
+  }
+
+  /// @nexus.doc "One Record to append."
+  /// @nexus.proto "temporal.api.stream.v1.AppendRecord"
+  record append-record {
+    /// @nexus.doc "The Topic of the Record inside the Stream. Empty is the default Topic."
+    topic: string,
+    /// @nexus.doc "The value. It goes through the payload codec."
+    body: payload,
+  }
+
+  /// @nexus.proto "temporal.api.enums.v1.StreamRecordKind"
+  enum stream-record-kind {
+    stream-record-kind-unspecified,
+    stream-record-kind-data,
+    stream-record-kind-superseded,
+    stream-record-kind-close,
+  }
+
+  // An Activity or Local Activity item withdraws the Records of its Producer with a lower epoch. A
+  // Workflow item, with this task t in epoch and the previous completed task c, withdraws the
+  // Records of the run and of its Local Activities whose task-started-event-id is in failed-tasks
+  // or strictly between c and t. It also withdraws those at the started event id of c or of t with
+  // a lower epoch than c or t. No task in that range can have completed. A SUPERSEDED Record passes
+  // every Topic filter.
+  /// @nexus.doc "Which earlier Records a SUPERSEDED Record withdraws."
+  /// @nexus.proto "temporal.api.stream.v1.Supersession"
+  record supersession {
+    producer-kind: option<stream-producer-kind>,
+    producer-id: string,
+    epoch: option<producer-epoch>,
+    /// @nexus.doc "Workflow only. The previous completed Workflow Task of the run."
+    previous-completed-task: option<workflow-task-epoch>,
+    /// @nexus.doc "Workflow only. Started event ids of failed or timed out Workflow Tasks."
+    failed-tasks: list<s64>,
+    /// @nexus.doc "Workflow retry only. The previous run, all of whose Records are withdrawn."
+    withdraw-run: option<string>,
+    /// @nexus.doc "The withdrawing Producer's run, so no Reader parses ids. Empty for a client."
+    run-id: option<string>,
+  }
+
+  /// @nexus.doc "How a Stream closed. Only the owner's end on the server terminates or times out."
+  /// @nexus.proto "temporal.api.enums.v1.StreamCloseStatus"
+  enum stream-close-status {
+    stream-close-status-unspecified,
+    stream-close-status-completed,
+    stream-close-status-failed,
+    stream-close-status-canceled,
+    stream-close-status-terminated,
+    stream-close-status-timed-out,
+  }
+
+  // An offset is the Redis entry id packed as ms << 20 | seq. It is ordered and unique in one
+  // Stream, and sparse. Offsets have gaps, so they don't count Records. A read names its Stream, so
+  // the read checks the offset against that Stream.
+  /// @nexus.doc "One Record that a read gives."
+  /// @nexus.proto "temporal.api.stream.v1.StreamRecord"
+  record stream-record {
+    kind: option<stream-record-kind>,
+    /// @nexus.doc "The place of this Record in the Stream. Ordered and unique, with gaps."
+    offset: option<s64>,
+    /// @nexus.doc "Empty on CLOSE and SUPERSEDED Records."
+    topic: option<string>,
+    producer: option<producer>,
+    /// @nexus.doc "Set on a data Record."
+    body: option<payload>,
+    /// @nexus.doc "Set on a SUPERSEDED Record, which the read builds from a flagged batch."
+    supersession: option<supersession>,
+    /// @nexus.doc "Set on a close Record with an outcome."
+    close-result: option<payload>,
+    close-failure: option<failure>,
+    /// @nexus.doc "Set on a close Record, together with the result or the failure."
+    close-status: option<stream-close-status>,
+  }
+
+  /// @nexus.doc "Create a Stream idempotently. ALREADY_EXISTS for another Retention."
+  /// @nexus.proto "temporal.api.streamservice.v1.CreateStreamRequest"
+  record create-stream-request {
+    /// @nexus.doc "Required on Redis and memory. On native, empty asks the server for an id."
+    stream-id: string,
+    /// @nexus.doc "The age after which a Record is dropped. Empty is the Store default."
+    retention: option<duration>,
+    /// @nexus.doc "Retry run only. The previous run, whose Records this withdraws."
+    withdraw-run: option<string>,
+    /// @nexus.doc "The Workflow run that owns the Stream. The Workflow transport sets it."
+    owner: option<producer>,
+    // Native only. Brook's Stores don't read it.
+    /// @nexus.omit
+    close-with-run: placeholder,
+    /// @nexus.doc "The Stream's ref, with the owner fields."
+    %ref: option<stream-ref>,
+    /// @nexus.omit
+    namespace: placeholder,
+    // Native only. Brook's Stores don't read it.
+    /// @nexus.omit
+    task-token: placeholder,
+  }
+
+  /// @nexus.proto "temporal.api.enums.v1.StreamStatus"
+  enum stream-status {
+    stream-status-unspecified,
+    stream-status-open,
+    stream-status-closed,
+    stream-status-expired,
+  }
+
+  // The meta key of each Stream has a format version v. Lua refuses a write to a Stream with a
+  // higher v with FAILED_PRECONDITION and the detail stream_format_too_new.
+  /// @nexus.doc
+  ///   "Append. FAILED_PRECONDITION if closed, fenced or format too new. NOT_FOUND if absent."
+  /// @nexus.proto "temporal.api.streamservice.v1.AppendRecordsRequest"
+  record append-records-request {
+    %stream: option<stream-ref>,
+    /// @nexus.doc "Required outside a Workflow. In a Workflow the transport sets it."
+    producer: option<producer>,
+    /// @nexus.doc "The batch number in this epoch, 1 or more. It is part of the dedupe key."
+    sequence: option<s64>,
+    records: list<append-record>,
+    /// @nexus.doc "Local Activity only. The run's last completed Workflow Task."
+    previous-completed-task: option<workflow-task-epoch>,
+    /// @nexus.doc "Local Activity only. The run's failed or timed out Workflow Tasks."
+    failed-tasks: list<s64>,
+    /// @nexus.doc "Retry run only. The previous run, whose Records this withdraws."
+    withdraw-run: option<string>,
+    /// @nexus.omit
+    namespace: placeholder,
+    // Native only. Brook's Stores don't read them.
+    /// @nexus.omit
+    defer-withdrawal: placeholder,
+    /// @nexus.omit
+    task-token: placeholder,
+  }
+
+  /// @nexus.proto "temporal.api.streamservice.v1.AppendRecordsResponse"
+  record append-records-response {
+    first-offset: option<s64>,
+    last-offset: option<s64>,
+  }
+
+  /// @nexus.doc "Close a Stream. Readers drain what is left, then end. Later appends are refused."
+  /// @nexus.proto "temporal.api.streamservice.v1.CloseStreamRequest"
+  record close-stream-request {
+    %stream: option<stream-ref>,
+    producer: option<producer>,
+    %result: option<payload>,
+    failure: option<failure>,
+    /// @nexus.doc "Empty is completed, or failed with a failure. A caller may set canceled."
+    status: option<stream-close-status>,
+    /// @nexus.doc "Workflow only. The previous completed Workflow Task of the run."
+    previous-completed-task: option<workflow-task-epoch>,
+    /// @nexus.doc "Workflow only. The run's failed or timed out Workflow Tasks."
+    failed-tasks: list<s64>,
+    /// @nexus.omit
+    namespace: placeholder,
+    // Native only. Brook's Stores don't read them.
+    /// @nexus.omit
+    withdraw-run: placeholder,
+    /// @nexus.omit
+    task-token: placeholder,
+  }
+
+  /// @nexus.proto "temporal.api.streamservice.v1.CloseStreamResponse"
+  record close-stream-response {
+  }
+
+  /// @nexus.proto "temporal.api.enums.v1.StreamReadStart"
+  enum stream-read-start {
+    stream-read-start-unspecified,
+    stream-read-start-beginning,
+    stream-read-start-end,
+  }
+
+  /// @nexus.doc "Read Records from an offset, from every Topic in one order or from some."
+  /// @nexus.proto "temporal.api.streamservice.v1.ReadRecordsRequest"
+  record read-records-request {
+    %stream: option<stream-ref>,
+    /// @nexus.doc "Start offset. Empty uses start. INVALID_ARGUMENT past the newest offset + 1."
+    from-offset: option<s64>,
+    /// @nexus.doc "Where to start when from-offset is empty. Unspecified is the beginning."
+    start: option<stream-read-start>,
+    /// @nexus.doc "Topics to read, by exact match. With topic-prefixes, empty reads every Topic."
+    topics: list<string>,
+    /// @nexus.doc "Also read the Topics that start with one of these."
+    topic-prefixes: list<string>,
+    /// @nexus.doc "At most this many Records. 1 to 1000."
+    max-records: option<s32>,
+    /// @nexus.doc "How long to wait for a new Record before an empty answer. At most 60 s."
+    wait: option<duration>,
+    /// @nexus.doc "How long to wait for an uncreated Stream. Empty fails at once. At most 60 s."
+    create-wait: option<duration>,
+    /// @nexus.doc "Read the newest this many Records, oldest first. No from-offset. No wait."
+    last: option<s32>,
+    /// @nexus.doc "The maximum Record bytes in a page. A larger Record is still returned alone."
+    max-bytes: option<s64>,
+    /// @nexus.omit
+    namespace: placeholder,
+    // Native only. Brook's Stores refuse to-offset and wake-only.
+    /// @nexus.omit
+    to-offset: placeholder,
+    /// @nexus.omit
+    wake-only: placeholder,
+    /// @nexus.omit
+    floor-from: placeholder,
+  }
+
+  /// @nexus.proto "temporal.api.streamservice.v1.ReadRecordsResponse"
+  record read-records-response {
+    records: list<stream-record>,
+    /// @nexus.doc "The from-offset of the next read, which is the newest offset read + 1."
+    next-offset: option<s64>,
+    /// @nexus.doc "True after the close Record. No later read gives a Record."
+    done: option<bool>,
+    // Native only. Brook's Stores never set it.
+    /// @nexus.omit
+    continue-as-new-suggested: placeholder,
+  }
+
+  /// @nexus.proto "temporal.api.streamservice.v1.DescribeStreamRequest"
+  record describe-stream-request {
+    %stream: option<stream-ref>,
+    /// @nexus.omit
+    namespace: placeholder,
+  }
+
+  /// @nexus.proto "temporal.api.streamservice.v1.DescribeStreamResponse"
+  record describe-stream-response {
+    status: option<stream-status>,
+    /// @nexus.doc "The offset of the newest Record. Empty when the Stream has no Record."
+    last-offset: option<s64>,
+    retention: option<duration>,
+  }
+
+  // A handle's serialized form is its stream-ref, so a handle passes through Workflow input,
+  // Activity input and Signals as the ref. Each method sets the ref of its request and takes the
+  // other fields as arguments. A handle never changes, since offsets are values that the methods
+  // return.
+  /// @nexus.doc "A handle on one Stream. Build it from a stream-ref, or get it from a create."
+  resource %stream {
+    constructor(%stream: stream-ref);
+
+    /// @nexus.doc "Append Records. The answer has the first and the last offset."
+    /// @nexus.operation "append-records"
+    append-records: func(
+      producer: option<producer>,
+      sequence: option<s64>,
+      records: list<append-record>,
+      previous-completed-task: option<workflow-task-epoch>,
+      failed-tasks: list<s64>,
+      withdraw-run: option<string>,
+    ) -> append-records-response;
+
+    /// @nexus.doc "Close the Stream. Readers drain what is left, then end."
+    /// @nexus.operation "close-stream"
+    close: func(
+      producer: option<producer>,
+      %result: option<payload>,
+      failure: option<failure>,
+      previous-completed-task: option<workflow-task-epoch>,
+      failed-tasks: list<s64>,
+    );
+
+    /// @nexus.doc "Read one page of Records. The iterator of the same name reads them all."
+    /// @nexus.operation "read-records"
+    read-records: func(
+      from-offset: option<s64>,
+      start: option<stream-read-start>,
+      topics: list<string>,
+      topic-prefixes: list<string>,
+      max-records: option<s32>,
+      wait: option<duration>,
+      create-wait: option<duration>,
+    ) -> read-records-response;
+
+    /// @nexus.doc "Describe the Stream's status, newest offset and Retention."
+    /// @nexus.operation "describe-stream"
+    describe: func() -> describe-stream-response;
+  }
+
+  // The bindings build the handle from the stream field of the response. The other fields are
+  // separate, since they describe this create, not the Stream.
+  /// @nexus.proto "temporal.api.streamservice.v1.CreateStreamResponse"
+  record create-stream-result {
+    %stream: own<%stream>,
+    /// @nexus.doc "False when the Stream existed with the same Retention."
+    created: option<bool>,
+    /// @nexus.doc "Closed when an earlier create and close used the id."
+    status: option<stream-status>,
+  }
+
+  /// @nexus.operation name="CreateStream"
+  create-stream: func(request: create-stream-request) -> create-stream-result;
+
+  /// @nexus.doc "Append one batch. Workflow code makes the call from a Local Activity."
+  /// @nexus.operation name="AppendRecords"
+  append-records: func(request: append-records-request) -> append-records-response;
+
+  /// @nexus.operation name="CloseStream"
+  close-stream: func(request: close-stream-request) -> close-stream-response;
+
+  // The long poll advances from-offset, so nexgen also generates an async iterator over its pages.
+  // A WIT stream can't cross a Nexus call, so the read is a request and a response on the wire.
+  /// @nexus.doc
+  ///   "A long poll. NOT_FOUND for an uncreated Stream. Workflow code reads from a Local Activity."
+  /// @nexus.operation name="ReadRecords"
+  /// @nexus.long-poll
+  ///   wait-field="wait"
+  ///   max-wait-ms="60000"
+  ///   result-field="records"
+  ///   done-field="done"
+  ///   offset-field="from-offset"
+  ///   next-offset-field="next-offset"
+  read-records: func(request: read-records-request) -> read-records-response;
+
+  /// @nexus.operation name="DescribeStream"
+  describe-stream: func(request: describe-stream-request) -> describe-stream-response;
+}
