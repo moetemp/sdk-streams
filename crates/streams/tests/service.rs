@@ -629,6 +629,43 @@ async fn a_read_of_an_expired_closed_stream_fails_instead_of_waiting() {
     }
 }
 
+/// A filtered read scans on past the scan cap with no wait while entries are left, so a match
+/// after 10,000 entries of other Topics comes at once. A read with no wait answers an empty page
+/// that moved `next_offset`, and the next read from there finds the match.
+#[tokio::test]
+async fn a_filtered_read_scans_past_the_cap_without_waiting() {
+    for case in cases_for(Needs::CALLS).await {
+        case.create(None).await.unwrap();
+        for sequence in 1..=11 {
+            let batch = (0..1000).map(|i| record("a", &i.to_string())).collect();
+            case.append(client(1), sequence, batch).await.unwrap();
+        }
+        case.append(client(1), 12, vec![record("b", "match")])
+            .await
+            .unwrap();
+        let filtered = |wait| ReadRecordsRequest {
+            topics: vec!["b".to_string()],
+            wait,
+            ..Default::default()
+        };
+        let started = Instant::now();
+        let read = case.read(filtered(millis(10_000))).await.unwrap();
+        assert_eq!(texts(&read), ["match"]);
+        assert!(started.elapsed() < Duration::from_secs(5));
+        let first = case.read(filtered(None)).await.unwrap();
+        assert!(first.records.is_empty() && !first.done);
+        assert!(first.next_offset > 0);
+        let next = case
+            .read(ReadRecordsRequest {
+                from_offset: first.next_offset,
+                ..filtered(None)
+            })
+            .await
+            .unwrap();
+        assert_eq!(texts(&next), ["match"]);
+    }
+}
+
 /// A prefix filter reads the Topics under it and keeps the `Superseded` items.
 #[tokio::test]
 async fn a_prefix_filter_reads_the_topics_under_it_and_keeps_superseded_items() {

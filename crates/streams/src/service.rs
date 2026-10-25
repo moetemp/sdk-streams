@@ -30,6 +30,8 @@ pub const MAX_WAIT: Duration = Duration::from_secs(60);
 pub const MAX_RECORDS: usize = 1000;
 /// The most log entries one page scans.
 const MAX_SCAN: usize = 10 * MAX_RECORDS;
+/// The log entries a filtered page reads at a time, whatever its `max_records`.
+const SCAN_CHUNK: usize = MAX_RECORDS;
 /// How often a read looks again for a Stream that nobody created yet.
 const CREATE_POLL: Duration = Duration::from_millis(100);
 
@@ -373,12 +375,17 @@ impl StreamService {
             if let Some(page) = page {
                 return Ok(page);
             }
+            // A scan that stopped at its cap left entries to scan, and they need no wait.
+            let more = scanned > cursor && scanned <= state.newest;
             cursor = scanned;
             if deadline <= Instant::now() {
                 return Ok(ReadRecordsResponse {
                     next_offset: cursor,
                     ..Default::default()
                 });
+            }
+            if more {
+                continue;
             }
             let after = (cursor - 1).max(state.newest);
             self.metrics.read_waits(true);
@@ -535,10 +542,12 @@ impl StreamService {
         let mut next = from;
         let (mut done, mut full) = (false, false);
         let mut bytes = 0;
-        // A Topic filter can skip many entries, so one page scans a bounded number of them.
+        // A Topic filter can skip many entries, so one page scans a bounded number of them, and
+        // reads more than `max` at a time.
+        let chunk = if topics.filters() { SCAN_CHUNK } else { max };
         let mut scanned = 0;
         while records.len() < max && !done && !full && scanned < MAX_SCAN {
-            let (_, entries) = self.store.read(namespace, id, start, max).await?;
+            let (_, entries) = self.store.read(namespace, id, start, chunk).await?;
             if entries.is_empty() {
                 break;
             }
@@ -608,6 +617,10 @@ pub(crate) struct TopicFilter {
 }
 
 impl TopicFilter {
+    fn filters(&self) -> bool {
+        !self.topics.is_empty() || !self.prefixes.is_empty()
+    }
+
     fn passes(&self, topic: &str) -> bool {
         (self.topics.is_empty() && self.prefixes.is_empty())
             || self.topics.iter().any(|t| t == topic)

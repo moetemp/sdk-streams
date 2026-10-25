@@ -151,3 +151,7 @@
   eviction reason. The crate uses nothing that the revert touches.
 - A read of a closed Stream whose Retention passed fails with `stream_expired`, as a read of an
   open one does. It no longer waits out its `wait` and answers nothing.
+- A read whose scan stops at the 10,000-entry cap scans on at once while entries up to the
+  newest one are left, instead of waiting for a new append. A read with no `wait` still answers
+  an empty page with a moved `next_offset`. A filtered page reads the log 1,000 entries at a
+  time, whatever its `max_records`.
