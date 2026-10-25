@@ -34,10 +34,11 @@ slot. `CreateStream` writes `:meta`, and the first entry makes `:log`.
 | `wr\|<run>` | Set when a Workflow retry withdrew the run |
 
 `<kind>` is the `ProducerKind` number, and `<run>` is the percent-encoded run id. The digest is
-the batch's content digest (`testdata/digests.json`). A resend with the last `sequence` and the
-same digest gets the stored ids. Another digest is refused with `seq_divergent`. An entry with no
-digest, written by an older crate, takes any resend. An epoch key is
-the epoch's fields as fixed-width hex, in the order of comparison, so two keys compare as
+the batch's content digest (`testdata/digests.json`). A `sequence` is from 1 to 2^53 - 1, which
+a script compares exactly, and the entry keeps its digits as sent. A resend with the last
+`sequence` and the same digest gets the stored ids. Another digest is refused with
+`seq_divergent`. An entry with no digest, written by an older crate, takes any resend. An epoch
+key is the epoch's fields as fixed-width hex, in the order of comparison, so two keys compare as
 strings.
 
 ## Log entries
@@ -65,10 +66,11 @@ skips the rule. A Stream that the run never writes again keeps its orphans.
 
 ## Close
 
-Only the owner closes a Stream. A Workflow-owned Stream closes from its run chain, as a Local
-Activity or as the run itself, and a close whose ref names another chain than `oc` is refused.
-Any other Stream closes only from a client. The script refuses others with `stream_not_owner`
-before it writes.
+Only the owner closes a Stream. A Workflow-owned Stream closes only from the close Activity of
+its run chain, which closes as the run's Workflow Producer (kind 1). A Local Activity can't close
+it, since it writes before its Workflow Task commits. When `oc` is set, a close whose ref names
+another chain, or no chain, is refused. Any other Stream closes only from a client. The script
+refuses others with `stream_not_owner` before it writes.
 
 ## TTLs
 
@@ -78,9 +80,20 @@ otherwise. Each append drops the Records older than the Retention, and a read hi
 
 ## Access
 
-A Producer needs `+evalsha` and `+script|load` on `~<prefix>:{<namespace>:*`. A Reader needs
-`+evalsha_ro` or `+evalsha`, `+xread` and the read keys, and `+xrevrange` for a read of the last
-Records. A cluster also needs `+cluster|slots`.
+Redis checks the ACL of the script call and of each command the script runs. The crate sends
+`EVALSHA`, and `SCRIPT LOAD` when Redis doesn't have the script yet. `EVALSHA` counts as a write
+to its keys, so each role needs read and write access to `~<prefix>:{<namespace>:*`, a Reader
+too. These are the commands of each role.
+
+- A Producer, which creates, appends and closes, needs `+evalsha`, `+script|load`, `+time`,
+  `+hget`, `+hset`, `+hdel`, `+exists`, `+pexpireat`, `+xadd`, `+xtrim` and `+xrevrange`.
+- A Reader, which reads and describes, needs `+evalsha`, `+script|load`, `+time`, `+hmget` and
+  `+xrange`, with `+xread` for a read that waits and `+xrevrange` for a read of the last Records.
+
+A process with both roles needs both sets, and a cluster also needs `+cluster|slots`. On connect,
+the Store runs `INFO server` to check the Redis version and `CONFIG GET maxmemory-policy` to warn
+about eviction. Neither is required. Without `+info` the Store skips the version check, and it
+ignores a refused `CONFIG`. `tests/acl.rs` runs each role with exactly these commands.
 
 ## Known limits
 

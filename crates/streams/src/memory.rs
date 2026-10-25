@@ -10,7 +10,7 @@ use crate::{
     proto::{Producer, ProducerKind, StreamRef},
     store::{
         Appended, Batch, Capabilities, Closed, CreateOutcome, Created, Entry, FORMAT_VERSION,
-        Owner, Store, StreamState, TOMBSTONE, Withdrawal,
+        MAX_SEQUENCE, Owner, Store, StreamState, TOMBSTONE, Withdrawal,
     },
 };
 use parking_lot::Mutex;
@@ -153,16 +153,13 @@ impl Keys {
     /// The `check_owner` step of a close, as in `lib.lua`.
     fn check_owner(&self, kind: i32, chain: &str) -> StreamResult<()> {
         if self.get("own").map(String::as_str) == Some("wf") {
-            if kind != ProducerKind::Workflow as i32 && kind != ProducerKind::LocalActivity as i32 {
+            if kind != ProducerKind::Workflow as i32 {
                 return Err(refuse(
                     Reason::NotOwner,
-                    "only the owner run chain closes a Workflow-owned Stream",
+                    "only the close Activity of the owner run chain closes a Workflow-owned Stream",
                 ));
             }
-            if self
-                .get("oc")
-                .is_some_and(|owner| !chain.is_empty() && chain != owner)
-            {
+            if self.get("oc").is_some_and(|owner| chain != owner) {
                 return Err(refuse(
                     Reason::NotOwner,
                     "the ref names another run chain than the owner",
@@ -499,8 +496,11 @@ impl Store for MemoryStore {
             .unwrap_or_default();
         let (open_field, gone_field) = (format!("oa|{run}"), format!("ow|{run}"));
         let appended = self.with(namespace, stream_id, |keys, now| {
-            if sequence < 1 {
-                return Err(refuse(Reason::Invalid, "the sequence must be 1 or more"));
+            if !(1..=MAX_SEQUENCE).contains(&sequence) {
+                return Err(refuse(
+                    Reason::Invalid,
+                    "the sequence must be from 1 to 2^53 - 1",
+                ));
             }
             keys.check_live(now)?;
             if let Some(last) = keys.get(&format!("d{suffix}")) {

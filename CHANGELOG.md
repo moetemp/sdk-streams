@@ -52,9 +52,6 @@
 - A Workflow batch with withdrawal facts and no Records goes in also after a close, and a read
   that reaches the close Record gives the `Superseded` items written after it just before the
   close Record. So a task that completes after a close still withdraws a failed task's Records.
-- A Workflow batch with withdrawal facts and no Records goes in also after a close, and a read
-  that reaches the close Record gives the `Superseded` items written after it just before the
-  close Record. So a task that completes after a close still withdraws a failed task's Records.
   A Workflow batch with Records that a close refuses is followed by one with only the facts.
 - Added `nexus/stream-service.wit`, the source of the Stream service WIT that each SDK copies,
   with each line at most 100 columns.
@@ -128,11 +125,11 @@
   `testdata/digests.json` pins the digest for the server and every SDK.
 - `Store::create`, `Store::append` and `Store::close` take the Stream's whole `StreamRef`, so a
   Store can check the owner fields. Redis and memory key on its id.
-- Only the owner closes a Stream. A Workflow-owned Stream closes from a Local Activity or a
-  Workflow Producer, and a ref that names another run chain is refused. A Stream that a client
-  created closes only from a client. Others fail with `FAILED_PRECONDITION` and the reason
-  `stream_not_owner`. A Workflow Producer may close, for the worker's close after the run's final
-  completion.
+- Only the owner closes a Stream. A Workflow-owned Stream closes only from the close Activity of
+  its run chain, as the run's Workflow Producer, and a ref that names another run chain is
+  refused. A Local Activity can't close it, since it writes before its Workflow Task commits. A
+  Stream that a client created closes only from a client. Others fail with `FAILED_PRECONDITION`
+  and the reason `stream_not_owner`.
 - Took the api a3 Stream service protos: the Activity owner fields of `StreamRef`, `CloseStatus`
   and `StreamRecord.close_status`, `task_token` on create, append and close,
   `CloseStreamRequest.status`, `ReadRecordsRequest.last`, `max_bytes` and `floor_from`, and
@@ -198,8 +195,8 @@
   `auto_close` (4). The WIT drops `auto-close` from the create and the describe. Gone are the
   `auto_close` capability, `Store::auto_close`, the `auto_close` argument of `Store::create`, the
   auto close script and the `ac` and `la` meta fields. A create is idempotent for one Retention
-  only. A read writes nothing, so a Reader needs read access only. The scripts ignore `ac` and
-  `la` on a Stream that an older crate created.
+  only. A read writes nothing. The scripts ignore `ac` and `la` on a Stream that an older crate
+  created.
 - The crate pins `temporalio-common` at sdk-rust Brook c8 `320e725f`, which reverts the cache-off
   eviction reason. The crate uses nothing that the revert touches.
 - The native Store sends no `auto_close` on create and has no `Store::auto_close`, as the server
@@ -208,3 +205,31 @@
   The Stream service proto equals the api a4 copy byte for byte.
 - The crate pins `temporalio-common` and `temporalio-client` at sdk-rust Jetty c10 `191c8b8b`,
   which takes Brook c8's revert of the cache-off eviction reason.
+- A read of a closed Stream whose Retention passed fails with `stream_expired`, as a read of an
+  open one does. It no longer waits out its `wait` and answers nothing.
+- A read whose scan stops at the 10,000-entry cap scans on at once while entries up to the
+  newest one are left, instead of waiting for a new append. A read with no `wait` still answers
+  an empty page with a moved `next_offset`. A filtered page reads the log 1,000 entries at a
+  time, whatever its `max_records`.
+- A page checks the state that each log read gives. A trim between two reads of one page fails a
+  read from an offset with `stream_expired`, so the gap doesn't pass in silence.
+- `OpenWriter` of an Activity attempt above 1 takes a closed or an expired Stream, as it takes a
+  Stream that nobody created. A retry that only reads the Stream still runs, and its first write
+  fails with `stream_closed` or `stream_expired`.
+- A batch `sequence` is from 1 to 2^53 - 1, and the append script keeps it in the dedupe entry
+  as sent. A sequence of 1e14 or more lost its dedupe entry on Redis before, so a resend went in
+  twice. A higher one fails with `stream_invalid`.
+- `AppendRecords` takes `withdraw_run` only from a Local Activity of another run than the one it
+  names, as `CreateStream` takes it only with an owner. A client or an Activity that names a run
+  fails with `stream_invalid`, instead of withdrawing and fencing that run.
+- A close of a Workflow-owned Stream whose ref has no `workflow_id` fails with `stream_not_owner`
+  when the Stream keeps its run chain. It skipped the chain check before.
+- `docs/redis.md` lists the Redis commands of a Producer and of a Reader, and `tests/acl.rs` runs
+  each role with exactly those. A Reader needs write access to the keys too, since `EVALSHA`
+  counts as a write. `RedisStore::connect` skips the version check when the user may not run
+  `INFO`, instead of failing.
+- `testdata/withdrawals.json` has the cases of a `Superseded` item with no epoch, as a retry run's
+  create writes, of a Local Activity's newer epoch, and of more Local Activity Records under a
+  Workflow item. A case with no `epoch` key has none, and `gen_vectors.py` reads it so.
+- The crate pins `temporalio-common` and `temporalio-client` at sdk-rust Jetty c10 `2de24aef`,
+  which takes Brook c8's Core CHANGELOG fix and Core tests.

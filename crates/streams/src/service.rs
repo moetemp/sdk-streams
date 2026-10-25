@@ -16,8 +16,8 @@ use crate::{
     },
     record::{caller_status, close_record, data_records, supersession},
     store::{
-        Batch, Capabilities, CreateOutcome, FORMAT_VERSION, Owner, ReaderRun, RunOwner, Store,
-        StreamState, TaskFacts, Withdrawal,
+        Batch, Capabilities, CreateOutcome, FORMAT_VERSION, MAX_SEQUENCE, Owner, ReaderRun,
+        RunOwner, Store, StreamState, TaskFacts, Withdrawal,
     },
 };
 use prost::Message;
@@ -30,6 +30,8 @@ pub const MAX_WAIT: Duration = Duration::from_secs(60);
 pub const MAX_RECORDS: usize = 1000;
 /// The most log entries one page scans.
 const MAX_SCAN: usize = 10 * MAX_RECORDS;
+/// The log entries a filtered page reads at a time, whatever its `max_records`.
+const SCAN_CHUNK: usize = MAX_RECORDS;
 /// How often a read looks again for a Stream that nobody created yet.
 const CREATE_POLL: Duration = Duration::from_millis(100);
 
@@ -109,8 +111,8 @@ fn outside_producer(producer: Option<&Producer>) -> StreamResult<&Producer> {
     Ok(producer)
 }
 
-/// Checks the Producer of a close. The run itself closes its Stream from the worker after the
-/// server accepted its final completion, so a Workflow Producer may close.
+/// Checks the Producer of a close. A Workflow's close Activity closes as the run's Workflow
+/// Producer, so a Workflow Producer may close.
 fn close_producer(producer: Option<&Producer>) -> StreamResult<&Producer> {
     let producer = producer.ok_or_else(|| StreamError::invalid("The request has no Producer"))?;
     check_producer(producer)?;
@@ -226,14 +228,25 @@ impl StreamService {
         stream_id(request.stream.as_ref())?;
         let stream = request.stream.clone().unwrap_or_default();
         let producer = outside_producer(request.producer.as_ref())?;
-        if request.sequence < 1 {
-            return Err(StreamError::invalid("The sequence must be 1 or more"));
+        if !(1..=MAX_SEQUENCE).contains(&request.sequence) {
+            return Err(StreamError::invalid(
+                "The sequence must be from 1 to 2^53 - 1",
+            ));
         }
         // Without the fence and the flag, a copy or a stale batch would reach Readers.
         self.store
             .capabilities()
             .require(Capabilities::PRODUCER_FENCE.union(Capabilities::WITHDRAWAL))?;
         if !request.withdraw_run.is_empty() {
+            // Only a retry run's Local Activity withdraws its previous run, as only the owner's
+            // create does. Any other Producer could withdraw and fence a run it doesn't follow.
+            if producer.kind != ProducerKind::LocalActivity as i32
+                || request.withdraw_run == producer.run_id
+            {
+                return Err(StreamError::invalid(
+                    "Only a Local Activity of a later run withdraws a run",
+                ));
+            }
             self.store.capabilities().require(Capabilities::RUN_FENCE)?;
         }
         let digest = batch_digest(&request.records);
@@ -425,12 +438,17 @@ impl StreamService {
             if let Some(page) = page {
                 return Ok(page);
             }
+            // A scan that stopped at its cap left entries to scan, and they need no wait.
+            let more = scanned > cursor && scanned <= state.newest;
             cursor = scanned;
             if deadline <= Instant::now() {
                 return Ok(ReadRecordsResponse {
                     next_offset: cursor,
                     ..Default::default()
                 });
+            }
+            if more {
+                continue;
             }
             let after = (cursor - 1).max(state.newest);
             self.metrics.read_waits(true);
@@ -587,10 +605,14 @@ impl StreamService {
         let mut next = from;
         let (mut done, mut full) = (false, false);
         let mut bytes = 0;
-        // A Topic filter can skip many entries, so one page scans a bounded number of them.
+        // A Topic filter can skip many entries, so one page scans a bounded number of them, and
+        // reads more than `max` at a time.
+        let chunk = if topics.filters() { SCAN_CHUNK } else { max };
         let mut scanned = 0;
         while records.len() < max && !done && !full && scanned < MAX_SCAN {
-            let (_, entries) = self.store.read(namespace, id, start, max).await?;
+            let (chunk_state, entries) = self.store.read(namespace, id, start, chunk).await?;
+            // A trim since the read's state would leave a gap before these entries.
+            check_expiry(&chunk_state, if from > 0 { start } else { 0 })?;
             if entries.is_empty() {
                 break;
             }
@@ -660,6 +682,10 @@ pub(crate) struct TopicFilter {
 }
 
 impl TopicFilter {
+    fn filters(&self) -> bool {
+        !self.topics.is_empty() || !self.prefixes.is_empty()
+    }
+
     fn passes(&self, topic: &str) -> bool {
         (self.topics.is_empty() && self.prefixes.is_empty())
             || self.topics.iter().any(|t| t == topic)
@@ -677,11 +703,10 @@ fn decode(bytes: &[u8], offset: i64) -> StreamResult<StreamRecord> {
 /// Fails a read whose Records the Retention or the expiry removed, so a gap never passes in
 /// silence. A read from the start of the Stream has no gap.
 ///
-/// An open Stream that expired gets no more Records, so a read of it fails as well, or the
-/// Reader would wait on it for good.
+/// A Tombstone fails every read. An open one gets no more Records, so the Reader would wait on
+/// it for good, and a closed one has lost its log with the close Record.
 fn check_expiry(state: &StreamState, from: i64) -> StreamResult<()> {
-    let open_tombstone = state.expired() && state.closed_at.is_none();
-    if open_tombstone || (from > 0 && state.trimmed >= from) {
+    if state.expired() || (from > 0 && state.trimmed >= from) {
         return Err(expired());
     }
     Ok(())

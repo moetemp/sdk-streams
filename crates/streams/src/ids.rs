@@ -17,7 +17,7 @@ use crate::{
 /// The longest Stream id, in bytes after encoding.
 pub const MAX_STREAM_ID_BYTES: usize = 4096;
 
-/// The key prefix when the plugin sets none.
+/// The key prefix when the backend sets none.
 pub const DEFAULT_KEY_PREFIX: &str = "temporal-streams";
 
 /// Percent-encodes every byte but the unreserved ones, as Python's `quote(text, safe="")` does.

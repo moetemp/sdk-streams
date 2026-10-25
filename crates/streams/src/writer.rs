@@ -219,7 +219,8 @@ pub(crate) struct Writers {
 impl Writers {
     /// Opens a writer, or adds a handle to the one this Producer epoch has on the Stream. A
     /// writer of an Activity attempt above 1 first sends an empty batch, so the new epoch
-    /// withdraws the earlier attempt's Records also when it publishes nothing.
+    /// withdraws the earlier attempt's Records also when it publishes nothing. On a closed or
+    /// expired Stream the open still succeeds, and the first write fails with the reason.
     pub(crate) async fn open(
         &self,
         service: &Arc<StreamService>,
@@ -269,9 +270,14 @@ impl Writers {
         ) && epoch.attempt > 1;
         if retry {
             match writer.send(vec![], next_sequence()).await {
-                // A Stream with no key has nothing to withdraw yet.
+                // A Stream with no key has nothing to withdraw yet. A closed or expired one takes
+                // no more Records, and a retry that only reads it must still run.
                 Ok(_) => {}
-                Err(error) if error.reason == Reason::NotFound => {}
+                Err(error)
+                    if matches!(
+                        error.reason,
+                        Reason::NotFound | Reason::Closed | Reason::Expired
+                    ) => {}
                 Err(error) => return Err(error),
             }
         }

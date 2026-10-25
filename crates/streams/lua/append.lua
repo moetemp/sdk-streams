@@ -8,7 +8,8 @@
 -- Answers {'ok' or 'resend', first id, last id, '1' when flagged}.
 local meta, log = KEYS[1], KEYS[2]
 local version, kind, producer = tonumber(ARGV[1]), ARGV[2], ARGV[3]
-local run, epoch, sequence = ARGV[4], ARGV[5], tonumber(ARGV[6])
+local run, epoch, sequence_text = ARGV[4], ARGV[5], ARGV[6]
+local sequence = tonumber(sequence_text)
 local withdrawn_run, supersession = ARGV[7], ARGV[8]
 local safety, tombstone = tonumber(ARGV[9]), tonumber(ARGV[10])
 local task, completed, failed, task_supersession = ARGV[11], ARGV[12], ARGV[13], ARGV[14]
@@ -19,8 +20,9 @@ local records = #ARGV - 15
 local orphans = kind == '2' and completed ~= '-' and run ~= ''
 local open_field, gone_field = 'oa|' .. run, 'ow|' .. run
 
-if not sequence or sequence < 1 then
-  return refuse('INVALID', 'the sequence must be 1 or more')
+-- A Lua number past 2^53 - 1 loses digits, so the dedupe entry keeps the sequence as sent.
+if not string.match(sequence_text, '^[1-9]%d*$') or sequence > 9007199254740991 then
+  return refuse('INVALID', 'the sequence must be from 1 to 2^53 - 1')
 end
 local now = now_ms()
 local refused = check_live(meta, version, now)
@@ -113,7 +115,7 @@ end
 
 redis.call('HSET', meta, 'e' .. suffix, epoch)
 redis.call('HSET', meta, 'd' .. suffix,
-  epoch .. '|' .. sequence .. '|' .. first_id .. '|' .. last_id .. '|' .. digest)
+  epoch .. '|' .. sequence_text .. '|' .. first_id .. '|' .. last_id .. '|' .. digest)
 if records > 0 then
   redis.call('HSET', meta, 'h' .. suffix, epoch)
 elseif flagged then

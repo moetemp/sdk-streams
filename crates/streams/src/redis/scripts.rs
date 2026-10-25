@@ -19,7 +19,7 @@ pub(crate) const CLOSE: &str = concat!(
     include_str!("../../lua/lib.lua"),
     include_str!("../../lua/close.lua")
 );
-/// Read only, so it also runs on a replica and under a user that may only read.
+/// Read only, so it also runs on a replica.
 pub(crate) const READ: &str = concat!(
     "#!lua flags=no-writes\n",
     include_str!("../../lua/read.lua")

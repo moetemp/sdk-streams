@@ -385,10 +385,7 @@ async fn the_ttl_follows_the_owner_and_the_close() {
             ttl > Duration::from_secs(80 * 86_400).as_millis() as i64,
             "{ttl}"
         );
-        target
-            .close(&run.local_activity("k", 6, 1, 1))
-            .await
-            .unwrap();
+        target.close(&workflow("r1")).await.unwrap();
         let (ttl, meta) = target.ttls().await;
         assert!(
             ttl <= Duration::from_secs(7 * 86_400).as_millis() as i64,
@@ -482,6 +479,29 @@ async fn a_sequence_below_one_is_refused() {
     }
 }
 
+/// A large sequence keeps its dedupe entry, so a resend gets its first answer and a lower or
+/// divergent batch is refused. A sequence past 2^53 - 1 is refused.
+#[tokio::test]
+async fn a_large_sequence_dedupes_and_one_past_2_53_is_refused() {
+    for target in stores_for(Needs::CALLS).await {
+        target.create(Owner::Client).await;
+        let p = client(1);
+        let large = 100_000_000_000_000;
+        let first = append(&target, &p, large, &["x"]).await.unwrap();
+        let resend = append(&target, &p, large, &["x"]).await.unwrap();
+        assert_eq!(resend.offsets, first.offsets);
+        let divergent = append(&target, &p, large, &["other"]).await;
+        assert_eq!(divergent.unwrap_err().reason, Reason::SeqDivergent);
+        let lower = append(&target, &p, large - 1, &["lower"]).await;
+        assert_eq!(lower.unwrap_err().reason, Reason::Sequence);
+        assert_eq!(target.texts().await, ["x"]);
+        let max = (1 << 53) - 1;
+        append(&target, &p, max, &["max"]).await.unwrap();
+        let past = append(&target, &p, max + 1, &["past"]).await;
+        assert_eq!(past.unwrap_err().reason, Reason::Invalid);
+    }
+}
+
 /// A Workflow's create makes a Stream that an Activity created Workflow-owned.
 #[tokio::test]
 async fn a_workflow_create_takes_over_a_stream_an_activity_created() {
@@ -511,8 +531,19 @@ async fn a_stale_producer_cant_close_the_stream() {
     }
 }
 
-/// Only the owner closes a Stream: its run chain for a Workflow-owned one, a client for a
-/// client's.
+/// The close Activity's Producer of run `run`.
+fn workflow(run: &str) -> Producer {
+    Producer {
+        kind: ProducerKind::Workflow as i32,
+        id: workflow_producer_id(run),
+        run_id: run.to_string(),
+        epoch: None,
+    }
+}
+
+/// Only the owner closes a Stream: the close Activity of its run chain for a Workflow-owned one,
+/// a client for a client's. A Local Activity of the chain can't close it, and a ref with no
+/// chain can't either.
 #[tokio::test]
 async fn only_the_owner_closes_a_stream() {
     for target in stores_for(Needs::UNCHECKED.and(Needs::STORE_ANSWERS)).await {
@@ -544,26 +575,18 @@ async fn only_the_owner_closes_a_stream() {
         for (stream, producer) in [
             (owned("agent"), client(1)),
             (owned("agent"), activity("r1", 1, 10)),
-            (owned("another-agent"), la.clone()),
+            (owned("agent"), la.clone()),
+            (owned("another-agent"), workflow("r1")),
+            (owned(""), workflow("r1")),
         ] {
             let refused = target.close_at(&stream, &producer).await.unwrap_err();
             assert_eq!(refused.reason, Reason::NotOwner);
         }
-        assert!(!target.close_at(&owned("agent"), &la).await.unwrap().already);
-        // The run itself closes from the worker after its final completion.
-        let workflow = Producer {
-            kind: ProducerKind::Workflow as i32,
-            id: workflow_producer_id("r1"),
-            run_id: "r1".to_string(),
-            epoch: None,
-        };
-        assert!(
-            target
-                .close_at(&owned("agent"), &workflow)
-                .await
-                .unwrap()
-                .already
-        );
+        let closed = target.close_at(&owned("agent"), &workflow("r1")).await;
+        assert!(!closed.unwrap().already);
+        // The owner check comes first, also on a closed Stream.
+        let refused = target.close_at(&owned("agent"), &la).await.unwrap_err();
+        assert_eq!(refused.reason, Reason::NotOwner);
     }
 }
 
