@@ -52,7 +52,7 @@ The build needs `protoc`.
 
 - Format and lint: `cargo fmt --all -- --check`, then
   `cargo clippy --workspace --tests -- -D warnings`.
-- Tests: `cargo test --workspace`. With no Redis set, the Store and service tests run on the
+- Tests: `cargo test --workspace`. With no Redis set, the Store, service and writer tests run on the
   memory Store only.
 - FIPS: `cargo tree -e normal,build --no-default-features --features fips -i ring` prints
   nothing.

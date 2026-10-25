@@ -23,6 +23,7 @@ mod server {
 }
 mod service;
 pub mod store;
+mod writer;
 
 pub use error::{Reason, StreamError, StreamResult};
 pub use runtime::{
