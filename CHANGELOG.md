@@ -233,3 +233,6 @@
   Workflow item. A case with no `epoch` key has none, and `gen_vectors.py` reads it so.
 - The crate pins `temporalio-common` and `temporalio-client` at sdk-rust Jetty c10 `2de24aef`,
   which takes Brook c8's Core CHANGELOG fix and Core tests.
+- A native `FAILED_PRECONDITION` with no Stream reason, such as a namespace that isn't active on
+  this cluster, maps to `stream_storage`, which a retry can pass. It mapped to `stream_closed`
+  before, so a write during a failover failed for good.

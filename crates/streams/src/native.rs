@@ -116,10 +116,11 @@ fn from_status(status: tonic::Status) -> StreamError {
         .message()
         .split_once(": ")
         .and_then(|(token, _)| Reason::from_token(token));
+    // A FAILED_PRECONDITION with no Stream reason is the server's own, such as a namespace that
+    // isn't active here during a failover, so it stays a Store failure that a retry can pass.
     let reason = detail.or(prefix).unwrap_or(match status.code() {
         tonic::Code::NotFound => Reason::NotFound,
         tonic::Code::AlreadyExists => Reason::AlreadyExists,
-        tonic::Code::FailedPrecondition => Reason::Closed,
         tonic::Code::InvalidArgument => Reason::Invalid,
         tonic::Code::Unimplemented => Reason::Unsupported,
         // A limit such as the reader cap. Not a Store failure, so the message stays the reason.
@@ -569,6 +570,10 @@ mod tests {
         let error = from_status(tonic::Status::failed_precondition("stream_sequence: below"));
         assert_eq!(error.reason, Reason::Sequence);
         let error = from_status(tonic::Status::unavailable("down"));
+        assert_eq!(error.reason, Reason::Storage);
+        let error = from_status(tonic::Status::failed_precondition(
+            "Namespace is not active",
+        ));
         assert_eq!(error.reason, Reason::Storage);
         let error = from_status(tonic::Status::resource_exhausted(
             "The Stream has the most Workflow readers",
