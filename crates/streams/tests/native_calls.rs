@@ -14,7 +14,7 @@ use temporalio_streams::{
     proto::{
         AppendRecordsRequest, AppendRecordsResponse, CloseStreamRequest, CloseStreamResponse,
         CreateStreamRequest, CreateStreamResponse, Producer, ProducerEpoch, ProducerKind,
-        StreamRef,
+        StreamErrorDetails, StreamRef,
     },
 };
 
@@ -155,4 +155,32 @@ fn deadline(header: &str) -> Duration {
         "n" => Duration::from_nanos(value),
         other => panic!("unknown unit {other}"),
     }
+}
+
+/// A create with another Retention fails with the server's conflict, which names the stored
+/// Retention, not the one the create asked for.
+#[tokio::test]
+async fn a_create_conflict_names_the_stored_retention() {
+    let (ext, _) = runtime(|_| {
+        Err(Status::already_exists(
+            "stream_already_exists: The Stream exists with the Retention 1h0m0s",
+        ))
+    })
+    .await;
+    let request = CreateStreamRequest {
+        namespace: "ns".to_string(),
+        stream_id: "s".to_string(),
+        retention: Some(prost_types::Duration {
+            seconds: 7200,
+            nanos: 0,
+        }),
+        ..Default::default()
+    };
+    let error = ext
+        .call("CreateStream", &request.encode_to_vec())
+        .await
+        .unwrap_err();
+    let details = StreamErrorDetails::decode(error.details().as_slice()).unwrap();
+    assert_eq!(details.reason, "stream_already_exists");
+    assert_eq!(error.message, "The Stream exists with the Retention 1h0m0s");
 }

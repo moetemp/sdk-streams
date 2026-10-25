@@ -362,6 +362,31 @@ async fn a_create_with_no_retention_takes_the_config_default() {
     assert_eq!(described.retention.unwrap().seconds, 3 * 60 * 60);
 }
 
+/// A create with another Retention fails with `stream_already_exists`, and the message names
+/// the stored Retention.
+#[tokio::test]
+async fn a_create_conflict_names_the_stored_retention() {
+    let Some(case) = case().await else {
+        return;
+    };
+    let create = |hours: i64| CreateStreamRequest {
+        namespace: case.namespace.clone(),
+        stream_id: case.stream.clone(),
+        retention: Some(prost_types::Duration {
+            seconds: hours * 60 * 60,
+            nanos: 0,
+        }),
+        ..Default::default()
+    };
+    let _: CreateStreamResponse = case.call("CreateStream", create(1)).await.unwrap();
+    let error = case
+        .call::<_, CreateStreamResponse>("CreateStream", create(2))
+        .await
+        .unwrap_err();
+    assert_eq!(reason(&error), "stream_already_exists");
+    assert!(error.message.contains("1h0m0s"), "{}", error.message);
+}
+
 #[tokio::test]
 async fn a_workflow_stream_is_found_by_its_owner_ref_on_every_call() {
     let Some(case) = case().await else {

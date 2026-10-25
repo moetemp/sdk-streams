@@ -238,3 +238,5 @@
   before, so a write during a failover failed for good.
 - A native create, append and close send a 5 s deadline, the Redis Store's `response_timeout`
   default, instead of the client's 30 s default for a call with none.
+- A native create with another Retention fails with the server's `stream_already_exists`, whose
+  message names the stored Retention. The message named the requested one before.

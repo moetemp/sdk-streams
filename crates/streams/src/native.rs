@@ -168,7 +168,7 @@ impl ServiceStore {
                 _ if answer.created => CreateOutcome::Created,
                 _ => CreateOutcome::Exists,
             },
-            Err(error) if error.reason == Reason::AlreadyExists => CreateOutcome::Conflict,
+            // The server's conflict names the stored Retention, which a create answer lacks.
             Err(error) => return Err(error),
         };
         Ok(Created {
