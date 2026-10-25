@@ -1,5 +1,6 @@
-//! The Store rules, on the memory Store. One suite runs on every Store, so that they keep the same
-//! rules.
+//! The Store rules, on Redis standalone, on a Redis cluster and on the memory Store. One suite runs
+//! on all of them, so that they keep the same rules. Start the Redis servers with
+//! `scripts/redis-test-servers.sh` and set the two URLs that it prints.
 
 mod support;
 

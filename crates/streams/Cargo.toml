@@ -26,14 +26,24 @@ async-trait = "0.1"
 # Only with `fips`. The crate doesn't call it. Its `fips` feature puts the one `aws-lc-rs` of the
 # build in FIPS mode.
 aws-lc-rs = { version = "1", features = ["fips"], optional = true }
+crc16 = "0.4"
 parking_lot = "0.12"
 prost = { workspace = true }
 prost-types = { workspace = true }
+# TLS uses the rustls provider that the process installs, the same one Core uses.
+redis = { version = "1.7", default-features = false, features = [
+    "cluster-async",
+    "connection-manager",
+    "script",
+    "streams",
+    "tokio-rustls-comp",
+] }
 sha2 = "0.10"
 temporalio-common = { workspace = true }
 thiserror = { workspace = true }
 tonic = { workspace = true }
 tokio = { version = "1.47", default-features = false, features = ["rt", "sync", "time"] }
+tracing = "0.1"
 
 [build-dependencies]
 tonic-prost-build = { workspace = true }

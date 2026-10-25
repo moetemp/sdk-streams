@@ -3,28 +3,31 @@
 
 #![allow(dead_code)]
 
+mod server;
+
 use prost::Message;
 use prost_types::Timestamp;
-use std::{
-    sync::{
-        Arc,
-        atomic::{AtomicU64, Ordering},
-    },
-    time::Duration,
+use redis::AsyncCommands;
+use std::sync::{
+    Arc,
+    atomic::{AtomicU64, Ordering},
 };
 use temporalio_common::protos::temporal::api::{common::v1::Execution, enums::v1::ExecutionType};
 use temporalio_streams::{
     StreamResult,
     digest::batch_digest,
     epoch::withdraws,
-    ids::local_activity_producer_id,
+    ids::{StreamKeys, local_activity_producer_id},
     memory::MemoryStore,
     proto::{
         AppendRecord, Producer, ProducerEpoch, StreamProducerKind, StreamRecord, StreamRecordKind,
         StreamRef, Supersession,
     },
+    redis::{RedisStore, RedisStoreOptions},
     store::{Appended, Batch, Closed, Entry, Owner, Store, Withdrawal},
 };
+
+pub(crate) use server::server_url;
 
 static NEXT: AtomicU64 = AtomicU64::new(0);
 
@@ -77,6 +80,11 @@ pub(crate) struct Target {
 
 /// The Store under a target, for the steps a test takes under the Store's calls.
 pub(crate) enum Backend {
+    Redis {
+        store: Arc<RedisStore>,
+        url: String,
+        cluster: bool,
+    },
     Memory(Arc<MemoryStore>),
 }
 
@@ -91,14 +99,51 @@ fn unique() -> String {
     )
 }
 
+/// A Store on each server that is set, standalone first, then the cluster, then the memory
+/// Store, for a case that needs all that they give.
+pub(crate) async fn stores() -> Vec<Target> {
+    stores_for(Needs::ALL).await
+}
+
 /// The Stores of every backend that gives `needs`.
 pub(crate) async fn stores_for(needs: Needs) -> Vec<Target> {
+    let mut targets = stores_with(|options| options).await;
+    targets.retain(|target| target.gives.gives(needs));
+    targets
+}
+
+/// Like [stores], with the Redis options changed.
+pub(crate) async fn stores_with(
+    change: impl Fn(RedisStoreOptions) -> RedisStoreOptions,
+) -> Vec<Target> {
     let mut targets = vec![];
+    for (variable, cluster) in [
+        ("STREAMS_REDIS_URL", false),
+        ("STREAMS_REDIS_CLUSTER_URL", true),
+    ] {
+        let Some(url) = server_url(variable) else {
+            continue;
+        };
+        let mut options = RedisStoreOptions::new(url.clone());
+        options.cluster = cluster;
+        options.key_prefix = "streams-test".to_string();
+        let store = Arc::new(RedisStore::connect(change(options)).await.unwrap());
+        let unique = unique();
+        targets.push(Target {
+            store: store.clone(),
+            backend: Backend::Redis {
+                store,
+                url,
+                cluster,
+            },
+            namespace: format!("ns-{unique}"),
+            stream: format!("wf:{unique}"),
+            gives: Needs::ALL,
+        });
+    }
     // The memory Store runs the same cases, so both Stores keep one set of rules.
-    let memory = Arc::new(MemoryStore::new(
-        Duration::from_secs(7 * 24 * 60 * 60),
-        Duration::from_secs(90 * 24 * 60 * 60),
-    ));
+    let defaults = RedisStoreOptions::new(String::new());
+    let memory = Arc::new(MemoryStore::new(defaults.retention, defaults.safety_ttl));
     let unique = unique();
     targets.push(Target {
         store: memory.clone(),
@@ -107,7 +152,6 @@ pub(crate) async fn stores_for(needs: Needs) -> Vec<Target> {
         stream: format!("wf:{unique}"),
         gives: Needs::ALL,
     });
-    targets.retain(|target| target.gives.gives(needs));
     targets
 }
 
@@ -220,6 +264,10 @@ impl Target {
         }
     }
 
+    pub(crate) fn keys(&self) -> StreamKeys {
+        StreamKeys::new("streams-test", &self.namespace, &self.stream)
+    }
+
     pub(crate) async fn create(&self, owner: Owner) {
         self.store
             .create(
@@ -233,9 +281,41 @@ impl Target {
             .unwrap();
     }
 
+    /// A plain connection to the node of the Stream's slot, to change the stored state under
+    /// the scripts.
+    async fn raw(&self, url: &str, cluster: bool) -> redis::aio::ConnectionManager {
+        let url = if cluster {
+            let client = redis::cluster::ClusterClient::new(vec![url]).unwrap();
+            let mut conn = client.get_async_connection().await.unwrap();
+            let slot: u16 = redis::cmd("CLUSTER")
+                .arg("KEYSLOT")
+                .arg(self.keys().meta())
+                .query_async::<i64>(&mut conn)
+                .await
+                .unwrap() as u16;
+            let shards: redis::Value = redis::cmd("CLUSTER")
+                .arg("SLOTS")
+                .query_async(&mut conn)
+                .await
+                .unwrap();
+            node_of(&shards, slot).expect("a node serves the slot")
+        } else {
+            url.to_string()
+        };
+        redis::Client::open(url)
+            .unwrap()
+            .get_connection_manager()
+            .await
+            .unwrap()
+    }
+
     /// Sets one meta field under the Store's calls.
     pub(crate) async fn set_meta(&self, field: &str, value: &str) {
         match &self.backend {
+            Backend::Redis { url, cluster, .. } => {
+                let mut conn = self.raw(url, *cluster).await;
+                let _: () = conn.hset(self.keys().meta(), field, value).await.unwrap();
+            }
             Backend::Memory(store) => {
                 store.test_set_meta(&self.namespace, &self.stream, field, value)
             }
@@ -245,6 +325,10 @@ impl Target {
     /// One meta field.
     pub(crate) async fn meta(&self, field: &str) -> Option<String> {
         match &self.backend {
+            Backend::Redis { url, cluster, .. } => {
+                let mut conn = self.raw(url, *cluster).await;
+                conn.hget(self.keys().meta(), field).await.unwrap()
+            }
             Backend::Memory(store) => store.test_meta(&self.namespace, &self.stream, field),
         }
     }
@@ -252,6 +336,12 @@ impl Target {
     /// The ms left on the log and on the meta, as `PTTL` gives them.
     pub(crate) async fn ttls(&self) -> (i64, i64) {
         match &self.backend {
+            Backend::Redis { url, cluster, .. } => {
+                let mut conn = self.raw(url, *cluster).await;
+                let log: i64 = conn.pttl(self.keys().log()).await.unwrap();
+                let meta: i64 = conn.pttl(self.keys().meta()).await.unwrap();
+                (log, meta)
+            }
             Backend::Memory(store) => store.test_ttls(&self.namespace, &self.stream),
         }
     }
@@ -259,6 +349,17 @@ impl Target {
     /// Adds a log entry with an explicit id, as `XADD <id>`.
     pub(crate) async fn add_raw_entry(&self, id: &str) {
         match &self.backend {
+            Backend::Redis { url, cluster, .. } => {
+                let mut conn = self.raw(url, *cluster).await;
+                let _: String = redis::cmd("XADD")
+                    .arg(self.keys().log())
+                    .arg(id)
+                    .arg("x")
+                    .arg("y")
+                    .query_async(&mut conn)
+                    .await
+                    .unwrap();
+            }
             Backend::Memory(store) => store.test_add_entry(&self.namespace, &self.stream, id),
         }
     }
@@ -266,6 +367,10 @@ impl Target {
     /// The number of log entries.
     pub(crate) async fn log_len(&self) -> usize {
         match &self.backend {
+            Backend::Redis { url, cluster, .. } => {
+                let mut conn = self.raw(url, *cluster).await;
+                conn.xlen(self.keys().log()).await.unwrap()
+            }
             Backend::Memory(store) => store.test_log_len(&self.namespace, &self.stream),
         }
     }
@@ -364,4 +469,39 @@ impl Target {
             .close(&self.namespace, stream, producer, &record)
             .await
     }
+}
+
+fn node_of(slots: &redis::Value, slot: u16) -> Option<String> {
+    let redis::Value::Array(ranges) = slots else {
+        return None;
+    };
+    for range in ranges {
+        let redis::Value::Array(parts) = range else {
+            continue;
+        };
+        let number = |value: &redis::Value| match value {
+            redis::Value::Int(n) => Some(*n),
+            _ => None,
+        };
+        let (Some(start), Some(end)) = (number(&parts[0]), number(&parts[1])) else {
+            continue;
+        };
+        if (start..=end).contains(&(slot as i64)) {
+            let redis::Value::Array(node) = &parts[2] else {
+                continue;
+            };
+            let host = match &node[0] {
+                redis::Value::BulkString(bytes) => String::from_utf8(bytes.clone()).ok()?,
+                _ => return None,
+            };
+            let port = number(&node[1])?;
+            let host = if host.is_empty() {
+                "127.0.0.1".to_string()
+            } else {
+                host
+            };
+            return Some(format!("redis://{host}:{port}/0"));
+        }
+    }
+    None
 }

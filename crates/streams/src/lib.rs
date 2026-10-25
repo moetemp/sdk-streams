@@ -13,6 +13,11 @@ pub mod ids;
 pub mod memory;
 pub mod offset;
 pub mod protos;
+pub mod redis;
+#[cfg(test)]
+mod server {
+    include!("../tests/support/server.rs");
+}
 pub mod store;
 
 pub use error::{Reason, StreamError, StreamResult};
