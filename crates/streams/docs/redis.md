@@ -65,10 +65,11 @@ skips the rule. A Stream that the run never writes again keeps its orphans.
 
 ## Close
 
-Only the owner closes a Stream. A Workflow-owned Stream closes from its run chain, as a Local
-Activity or as the run itself, and a close whose ref names another chain than `oc` is refused.
-Any other Stream closes only from a client. The script refuses others with `stream_not_owner`
-before it writes.
+Only the owner closes a Stream. A Workflow-owned Stream closes only from the close Activity of
+its run chain, which closes as the run's Workflow Producer (kind 1). A Local Activity can't close
+it, since it writes before its Workflow Task commits. A close whose ref names another chain than
+`oc` is refused. Any other Stream closes only from a client. The script refuses others with
+`stream_not_owner` before it writes.
 
 ## TTLs
 

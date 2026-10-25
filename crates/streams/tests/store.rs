@@ -384,10 +384,7 @@ async fn the_ttl_follows_the_owner_and_the_close() {
             ttl > Duration::from_secs(80 * 86_400).as_millis() as i64,
             "{ttl}"
         );
-        target
-            .close(&run.local_activity("k", 6, 1, 1))
-            .await
-            .unwrap();
+        target.close(&workflow("r1")).await.unwrap();
         let (ttl, meta) = target.ttls().await;
         assert!(
             ttl <= Duration::from_secs(7 * 86_400).as_millis() as i64,
@@ -510,8 +507,18 @@ async fn a_stale_producer_cant_close_the_stream() {
     }
 }
 
-/// Only the owner closes a Stream: its run chain for a Workflow-owned one, a client for a
-/// client's.
+/// The close Activity's Producer of run `run`.
+fn workflow(run: &str) -> Producer {
+    Producer {
+        kind: ProducerKind::Workflow as i32,
+        id: workflow_producer_id(run),
+        run_id: run.to_string(),
+        epoch: None,
+    }
+}
+
+/// Only the owner closes a Stream: the close Activity of its run chain for a Workflow-owned one,
+/// a client for a client's. A Local Activity of the chain can't close it.
 #[tokio::test]
 async fn only_the_owner_closes_a_stream() {
     for target in stores_for(Needs::UNCHECKED.and(Needs::STORE_ANSWERS)).await {
@@ -543,26 +550,17 @@ async fn only_the_owner_closes_a_stream() {
         for (stream, producer) in [
             (owned("agent"), client(1)),
             (owned("agent"), activity("r1", 1, 10)),
-            (owned("another-agent"), la.clone()),
+            (owned("agent"), la.clone()),
+            (owned("another-agent"), workflow("r1")),
         ] {
             let refused = target.close_at(&stream, &producer).await.unwrap_err();
             assert_eq!(refused.reason, Reason::NotOwner);
         }
-        assert!(!target.close_at(&owned("agent"), &la).await.unwrap().already);
-        // The run itself closes from the worker after its final completion.
-        let workflow = Producer {
-            kind: ProducerKind::Workflow as i32,
-            id: workflow_producer_id("r1"),
-            run_id: "r1".to_string(),
-            epoch: None,
-        };
-        assert!(
-            target
-                .close_at(&owned("agent"), &workflow)
-                .await
-                .unwrap()
-                .already
-        );
+        let closed = target.close_at(&owned("agent"), &workflow("r1")).await;
+        assert!(!closed.unwrap().already);
+        // The owner check comes first, also on a closed Stream.
+        let refused = target.close_at(&owned("agent"), &la).await.unwrap_err();
+        assert_eq!(refused.reason, Reason::NotOwner);
     }
 }
 

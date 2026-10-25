@@ -930,6 +930,66 @@ fn local_activity_write(
     }
 }
 
+/// Only the close Activity, as the run's Workflow Producer, closes a Workflow's Stream. A Local
+/// Activity of the chain can't, also when a later write withdrew its task.
+#[tokio::test]
+async fn only_the_close_activity_closes_a_workflow_stream() {
+    for case in cases_for(Needs::UNCHECKED).await {
+        let run = format!("{}-run", case.stream);
+        let chain = StreamRef {
+            id: case.stream.clone(),
+            workflow_id: format!("{}-wf", case.stream),
+            ..Default::default()
+        };
+        let _: CreateStreamResponse = call(
+            &case.ext,
+            "CreateStream",
+            CreateStreamRequest {
+                namespace: case.namespace.clone(),
+                stream_id: case.stream.clone(),
+                owner: Some(workflow_owner(&run)),
+                r#ref: Some(chain.clone()),
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+        let orphan = local_activity_write(&case, &run, "call-1", 5, 2, "orphan");
+        let _: AppendRecordsResponse = call(&case.ext, "AppendRecords", orphan.clone())
+            .await
+            .unwrap();
+        let mut next = local_activity_write(&case, &run, "call-2", 8, 2, "next");
+        next.failed_tasks = vec![5];
+        let _: AppendRecordsResponse = call(&case.ext, "AppendRecords", next.clone())
+            .await
+            .unwrap();
+        let close = |producer: Option<Producer>| CloseStreamRequest {
+            namespace: case.namespace.clone(),
+            stream: Some(chain.clone()),
+            producer,
+            ..Default::default()
+        };
+        for producer in [orphan.producer, next.producer] {
+            let error = call::<_, CloseStreamResponse>(&case.ext, "CloseStream", close(producer))
+                .await
+                .unwrap_err();
+            assert_eq!(reason(&error), "stream_not_owner");
+        }
+        assert_eq!(
+            case.describe().await.unwrap().status,
+            StreamStatus::Open as i32
+        );
+        let _: CloseStreamResponse =
+            call(&case.ext, "CloseStream", close(Some(workflow_owner(&run))))
+                .await
+                .unwrap();
+        assert_eq!(
+            case.describe().await.unwrap().status,
+            StreamStatus::Closed as i32
+        );
+    }
+}
+
 /// A Local Activity of a task that never completed is withdrawn by the run's next write.
 #[tokio::test]
 async fn a_local_activity_of_a_task_that_never_completed_is_withdrawn_by_the_next_write() {

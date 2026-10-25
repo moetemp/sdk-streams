@@ -153,10 +153,10 @@ impl Keys {
     /// The `check_owner` step of a close, as in `lib.lua`.
     fn check_owner(&self, kind: i32, chain: &str) -> StreamResult<()> {
         if self.get("own").map(String::as_str) == Some("wf") {
-            if kind != ProducerKind::Workflow as i32 && kind != ProducerKind::LocalActivity as i32 {
+            if kind != ProducerKind::Workflow as i32 {
                 return Err(refuse(
                     Reason::NotOwner,
-                    "only the owner run chain closes a Workflow-owned Stream",
+                    "only the close Activity of the owner run chain closes a Workflow-owned Stream",
                 ));
             }
             if self

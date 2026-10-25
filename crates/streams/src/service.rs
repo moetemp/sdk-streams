@@ -109,8 +109,8 @@ fn outside_producer(producer: Option<&Producer>) -> StreamResult<&Producer> {
     Ok(producer)
 }
 
-/// Checks the Producer of a close. The run itself closes its Stream from the worker after the
-/// server accepted its final completion, so a Workflow Producer may close.
+/// Checks the Producer of a close. A Workflow's close Activity closes as the run's Workflow
+/// Producer, so a Workflow Producer may close.
 fn close_producer(producer: Option<&Producer>) -> StreamResult<&Producer> {
     let producer = producer.ok_or_else(|| StreamError::invalid("The request has no Producer"))?;
     check_producer(producer)?;
