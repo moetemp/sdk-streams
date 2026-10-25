@@ -155,3 +155,5 @@
   newest one are left, instead of waiting for a new append. A read with no `wait` still answers
   an empty page with a moved `next_offset`. A filtered page reads the log 1,000 entries at a
   time, whatever its `max_records`.
+- A page checks the state that each log read gives. A trim between two reads of one page fails a
+  read from an offset with `stream_expired`, so the gap doesn't pass in silence.

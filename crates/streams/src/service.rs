@@ -547,7 +547,9 @@ impl StreamService {
         let chunk = if topics.filters() { SCAN_CHUNK } else { max };
         let mut scanned = 0;
         while records.len() < max && !done && !full && scanned < MAX_SCAN {
-            let (_, entries) = self.store.read(namespace, id, start, chunk).await?;
+            let (chunk_state, entries) = self.store.read(namespace, id, start, chunk).await?;
+            // A trim since the read's state would leave a gap before these entries.
+            check_expiry(&chunk_state, if from > 0 { start } else { 0 })?;
             if entries.is_empty() {
                 break;
             }
