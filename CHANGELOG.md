@@ -236,3 +236,5 @@
 - A native `FAILED_PRECONDITION` with no Stream reason, such as a namespace that isn't active on
   this cluster, maps to `stream_storage`, which a retry can pass. It mapped to `stream_closed`
   before, so a write during a failover failed for good.
+- A native create, append and close send a 5 s deadline, the Redis Store's `response_timeout`
+  default, instead of the client's 30 s default for a call with none.

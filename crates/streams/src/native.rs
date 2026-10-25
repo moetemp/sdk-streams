@@ -40,6 +40,10 @@ const CLOSE: &str = "/temporal.api.streamservice.v1.StreamService/CloseStream";
 /// The Retention the server gives a Stream with none, `stream.defaultRetention`.
 const SERVER_RETENTION: Duration = Duration::from_secs(7 * 24 * 60 * 60);
 
+/// The deadline of a create, an append and a close, the Redis Store's `response_timeout`
+/// default. A Local Activity's timeout cancels lang's await but not the call.
+const WRITE_TIMEOUT: Duration = Duration::from_secs(5);
+
 /// A Store on the server's Stream service.
 pub struct ServiceStore {
     /// The client's connection. Its clones share their headers, so an API key rotation on the
@@ -153,8 +157,9 @@ impl ServiceStore {
         retention: Option<Duration>,
     ) -> StreamResult<Created> {
         let namespace = request.namespace.clone();
-        let answer: StreamResult<CreateStreamResponse> =
-            self.call(CREATE, &namespace, request, None).await;
+        let answer: StreamResult<CreateStreamResponse> = self
+            .call(CREATE, &namespace, request, Some(WRITE_TIMEOUT))
+            .await;
         let retention = retention.unwrap_or(SERVER_RETENTION);
         let outcome = match answer {
             Ok(answer) => match StreamStatus::try_from(answer.status).unwrap_or_default() {
@@ -253,7 +258,9 @@ impl Store for ServiceStore {
             task_token: batch.task_token.to_vec(),
             ..Default::default()
         };
-        let answer: AppendRecordsResponse = self.call(APPEND, namespace, request, None).await?;
+        let answer: AppendRecordsResponse = self
+            .call(APPEND, namespace, request, Some(WRITE_TIMEOUT))
+            .await?;
         let offsets = (answer.last_offset > 0).then_some((answer.first_offset, answer.last_offset));
         // The server doesn't say whether the batch was a resend or withdrew, which only the
         // metrics read.
@@ -283,7 +290,9 @@ impl Store for ServiceStore {
             task_token: task_token.to_vec(),
             ..Default::default()
         };
-        let _: CloseStreamResponse = self.call(CLOSE, namespace, request, None).await?;
+        let _: CloseStreamResponse = self
+            .call(CLOSE, namespace, request, Some(WRITE_TIMEOUT))
+            .await?;
         Ok(Closed {
             offset: 0,
             already: false,
