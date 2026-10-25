@@ -11,16 +11,24 @@ pub mod epoch;
 mod error;
 pub mod ids;
 pub mod memory;
+mod metrics;
 pub mod offset;
 pub mod protos;
+mod record;
 pub mod redis;
+mod runtime;
 #[cfg(test)]
 mod server {
     include!("../tests/support/server.rs");
 }
+mod service;
 pub mod store;
 
 pub use error::{Reason, StreamError, StreamResult};
+pub use runtime::{
+    MEMORY_RUNTIME_NAME, MemoryStreamRuntime, REDIS_RUNTIME_NAME, RedisStreamRuntime,
+    RuntimeOptions, StreamRuntime,
+};
 
 /// The protos that lang and the crate exchange.
 pub mod proto {

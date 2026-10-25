@@ -14,14 +14,14 @@ use std::sync::{
 };
 use temporalio_common::protos::temporal::api::{common::v1::Execution, enums::v1::ExecutionType};
 use temporalio_streams::{
-    StreamResult,
+    MemoryStreamRuntime, RuntimeOptions, StreamResult, StreamRuntime,
     digest::batch_digest,
     epoch::withdraws,
     ids::{StreamKeys, local_activity_producer_id},
     memory::MemoryStore,
     proto::{
-        AppendRecord, Producer, ProducerEpoch, StreamProducerKind, StreamRecord, StreamRecordKind,
-        StreamRef, Supersession,
+        AppendRecord, Producer, ProducerEpoch, RedisStreamConfig, StreamProducerKind, StreamRecord,
+        StreamRecordKind, StreamRef, Supersession,
     },
     redis::{RedisStore, RedisStoreOptions},
     store::{Appended, Batch, Closed, Entry, Owner, Store, Withdrawal},
@@ -504,4 +504,62 @@ fn node_of(slots: &redis::Value, slot: u16) -> Option<String> {
         }
     }
     None
+}
+
+/// One runtime under test, the namespace its cases use, and what its backend gives.
+pub(crate) struct Runtime {
+    pub(crate) ext: Arc<StreamRuntime>,
+    /// The namespace of a backend that has fixed ones, such as the server. `None` lets the case
+    /// make one of its own.
+    pub(crate) namespace: Option<String>,
+    pub(crate) gives: Needs,
+}
+
+/// A runtime on each backend that is set and gives `needs`, Redis and memory first.
+pub(crate) async fn runtimes(needs: Needs) -> Vec<Runtime> {
+    let mut runtimes: Vec<_> = stream_runtimes(|_| {}, true)
+        .into_iter()
+        .map(|ext| Runtime {
+            ext,
+            namespace: None,
+            gives: Needs::ALL,
+        })
+        .collect();
+    runtimes.retain(|runtime| runtime.gives.gives(needs));
+    runtimes
+}
+
+/// A runtime on each Redis server that is set, with the config changed by `change`, and on
+/// the memory Store when `memory` is true.
+pub(crate) fn stream_runtimes(
+    change: impl Fn(&mut RedisStreamConfig),
+    memory: bool,
+) -> Vec<Arc<StreamRuntime>> {
+    let mut runtimes = vec![];
+    for (variable, cluster) in [
+        ("STREAMS_REDIS_URL", false),
+        ("STREAMS_REDIS_CLUSTER_URL", true),
+    ] {
+        let Some(url) = server_url(variable) else {
+            continue;
+        };
+        let mut config = RedisStreamConfig {
+            urls: vec![url],
+            cluster,
+            key_prefix: "streams-test".to_string(),
+            ..Default::default()
+        };
+        change(&mut config);
+        let options = RuntimeOptions::from_config(config).unwrap();
+        runtimes.push(StreamRuntime::new(options, None));
+    }
+    if memory {
+        let defaults = RedisStoreOptions::new(String::new());
+        runtimes.push(MemoryStreamRuntime::create(
+            defaults.retention,
+            defaults.safety_ttl,
+            None,
+        ));
+    }
+    runtimes
 }

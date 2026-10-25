@@ -52,7 +52,8 @@ The build needs `protoc`.
 
 - Format and lint: `cargo fmt --all -- --check`, then
   `cargo clippy --workspace --tests -- -D warnings`.
-- Tests: `cargo test --workspace`. With no Redis set, the Store tests run on the memory Store only.
+- Tests: `cargo test --workspace`. With no Redis set, the Store and service tests run on the
+  memory Store only.
 - FIPS: `cargo tree -e normal,build --no-default-features --features fips -i ring` prints
   nothing.
 - Redis: run `crates/streams/scripts/redis-test-servers.sh`, then the test command with the two
