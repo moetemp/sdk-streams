@@ -2113,6 +2113,7 @@ dependencies = [
 name = "temporalio-streams"
 version = "0.1.0"
 dependencies = [
+ "async-trait",
  "aws-lc-rs",
  "prost",
  "prost-wkt-types",
@@ -2120,6 +2121,7 @@ dependencies = [
  "sha2",
  "temporalio-common",
  "thiserror",
+ "tokio",
  "tonic",
  "tonic-prost-build",
 ]

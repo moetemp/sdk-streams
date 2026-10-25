@@ -1,0 +1,352 @@
+//! The calls that every Store gives the Stream service. The Redis Store is for production and the
+//! memory Store is for tests. Both apply the rules of the Lua scripts.
+
+use crate::{
+    Reason, StreamError, StreamResult,
+    proto::{Producer, StreamRef, WorkflowTaskEpoch},
+};
+use std::time::Duration;
+use temporalio_common::protos::temporal::api::enums::v1::ExecutionType;
+use tokio::time::Instant;
+
+/// The format version this crate writes. A Stream with a higher one refuses writes.
+pub const FORMAT_VERSION: u32 = 1;
+/// The maximum size of a stored Record, in bytes.
+pub const MAX_RECORD_BYTES: usize = 1536 * 1024;
+/// The maximum size of a stored append, in bytes.
+pub const MAX_BATCH_BYTES: usize = 4 * 1024 * 1024;
+/// The highest batch `sequence`. A Lua number is exact for integers only up to this value.
+pub const MAX_SEQUENCE: i64 = (1 << 53) - 1;
+/// How long the meta key stays after the log key expires, so that a read can tell an expired Stream
+/// from a missing one.
+pub const TOMBSTONE: Duration = Duration::from_secs(30 * 24 * 60 * 60);
+
+/// The Workflow id of the run chain that a ref names as its owner, empty for any other owner. A
+/// Store keeps it on a Workflow-owned Stream and checks a close's ref against it.
+pub fn owner_chain(stream: &StreamRef) -> &str {
+    stream
+        .owner
+        .as_ref()
+        .filter(|owner| owner.r#type == ExecutionType::Workflow as i32)
+        .map_or("", |owner| owner.business_id.as_str())
+}
+
+/// Who created a Stream, which decides its TTL while it is open.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Owner {
+    /// Until it closes, the Stream expires `safety_ttl` after its last write.
+    Workflow,
+    /// The Stream expires one Retention after its last write.
+    Client,
+}
+
+/// What a create found.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CreateOutcome {
+    /// The create wrote the key.
+    Created,
+    /// The Stream exists with the same Retention.
+    Exists,
+    /// The Stream exists with another Retention, and the create doesn't change it.
+    Conflict,
+    /// The Stream is closed.
+    Closed,
+    /// The Stream expired, and its Tombstone is still there.
+    Expired,
+}
+
+/// The result of a create.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Created {
+    /// What the create found.
+    pub outcome: CreateOutcome,
+    /// The Retention of the Stream, the stored one if it existed.
+    pub retention: Duration,
+    /// Whether the create withdrew a retry run's previous run.
+    pub flagged: bool,
+}
+
+/// The withdrawal facts of a batch, and the `Superseded` item that they make.
+#[derive(Debug, Clone, Default)]
+pub struct Withdrawal<'a> {
+    /// A retry run's previous run.
+    pub withdraw_run: &'a str,
+    /// The encoded Supersession, which the log keeps when the batch withdraws something.
+    pub supersession: &'a [u8],
+    /// The run's task facts of a Local Activity batch, which withdraw the run's orphaned Local
+    /// Activity Records.
+    pub tasks: Option<TaskFacts<'a>>,
+}
+
+/// The run's Workflow Task facts that a Local Activity batch gives. A task of the run after
+/// `completed` and before the batch's own task, or one in `failed_tasks`, never completed, so
+/// its Local Activity Records are orphans.
+#[derive(Debug, Clone, Copy, Default)]
+pub struct TaskFacts<'a> {
+    /// The run's last completed Workflow Task, `None` before the first one.
+    pub completed: Option<&'a WorkflowTaskEpoch>,
+    /// The started event ids of the run's failed Workflow Tasks.
+    pub failed_tasks: &'a [i64],
+    /// The encoded Workflow-kind Supersession that withdraws the orphans.
+    pub supersession: &'a [u8],
+}
+
+/// One batch of one Producer.
+#[derive(Debug, Clone)]
+pub struct Batch<'a> {
+    /// The Producer, with its epoch.
+    pub producer: &'a Producer,
+    /// The batch number in this epoch.
+    pub sequence: i64,
+    /// The encoded Records.
+    pub records: &'a [Vec<u8>],
+    /// The [crate::digest::batch_digest] of the batch, which the dedupe entry keeps.
+    pub digest: &'a str,
+    /// What the batch withdraws.
+    pub withdrawal: Withdrawal<'a>,
+}
+
+/// The result of an append.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Appended {
+    /// The offsets of the first and the last entry, `None` for an empty batch with no
+    /// `Superseded` item.
+    pub offsets: Option<(i64, i64)>,
+    /// The Store already had the batch, so the offsets are those of the first result.
+    pub resend: bool,
+    /// The batch withdrew earlier Records.
+    pub flagged: bool,
+}
+
+/// The result of a close.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Closed {
+    /// The offset of the close Record.
+    pub offset: i64,
+    /// The Stream was already closed.
+    pub already: bool,
+}
+
+/// The state of a Stream as one read saw it.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct StreamState {
+    /// The meta key exists, live or as a Tombstone.
+    pub exists: bool,
+    /// The format version.
+    pub version: u32,
+    /// The offset of the close Record, if the Stream is closed.
+    pub closed_at: Option<i64>,
+    /// The offset of the newest entry written, zero if none.
+    pub newest: i64,
+    /// The offset of the newest entry that Retention dropped, zero if none.
+    pub trimmed: i64,
+    /// The Retention.
+    pub retention: Duration,
+    /// When the Stream stops taking writes, in ms since 1970.
+    pub expires_ms: i64,
+    /// The server time of the read, in ms since 1970.
+    pub now_ms: i64,
+}
+
+impl StreamState {
+    /// The Stream is a Tombstone.
+    pub fn expired(&self) -> bool {
+        self.exists && self.expires_ms <= self.now_ms
+    }
+
+    /// The offset below which Retention dropped or hides the Records, as of the read.
+    pub fn retained_from(&self) -> i64 {
+        let cut = self.now_ms - self.retention.as_millis() as i64;
+        let hidden = if cut > 0 {
+            cut << crate::offset::SEQ_BITS
+        } else {
+            0
+        };
+        hidden.max(self.trimmed + 1)
+    }
+}
+
+/// One log entry.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Entry {
+    /// Its offset.
+    pub offset: i64,
+    /// The encoded Record, absent on an entry that only withdraws.
+    pub record: Option<Vec<u8>>,
+    /// The encoded Supersession of a flagged batch.
+    pub supersession: Option<Vec<u8>>,
+}
+
+/// The rules that a Store applies atomically beyond the log. The service checks a capability before
+/// a call that needs it. So a Store that lacks the capability refuses the call, and doesn't give
+/// weaker guarantees without notice.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct Capabilities(u8);
+
+impl Capabilities {
+    /// Each append checks the Producer's epoch and its last `sequence` before it writes.
+    pub const PRODUCER_FENCE: Self = Self(1);
+    /// Each append flags the first batch of a Producer's newer epoch, which withdraws the
+    /// Records of its earlier ones.
+    pub const WITHDRAWAL: Self = Self(1 << 1);
+    /// A retry run's first write withdraws the previous run and fences its Producers.
+    pub const RUN_FENCE: Self = Self(1 << 2);
+    /// A close writes the close Record and every later append is refused.
+    pub const CLOSE: Self = Self(1 << 3);
+    /// An open Workflow-owned Stream keeps the safety TTL, not the Retention.
+    pub const SAFETY_TTL: Self = Self(1 << 4);
+    /// Every capability.
+    pub const ALL: Self = Self((1 << 5) - 1);
+
+    const NAMES: [(Self, &'static str); 5] = [
+        (Self::PRODUCER_FENCE, "producer_fence"),
+        (Self::WITHDRAWAL, "withdrawal"),
+        (Self::RUN_FENCE, "run_fence"),
+        (Self::CLOSE, "close"),
+        (Self::SAFETY_TTL, "safety_ttl"),
+    ];
+
+    /// Both sets.
+    pub const fn union(self, other: Self) -> Self {
+        Self(self.0 | other.0)
+    }
+
+    /// This set without the other one.
+    pub const fn without(self, other: Self) -> Self {
+        Self(self.0 & !other.0)
+    }
+
+    /// Whether every capability of `other` is in this set.
+    pub const fn contains(self, other: Self) -> bool {
+        self.0 & other.0 == other.0
+    }
+
+    /// The names of the capabilities in this set.
+    pub fn names(self) -> Vec<&'static str> {
+        Self::NAMES
+            .iter()
+            .filter(|(capability, _)| self.contains(*capability))
+            .map(|(_, name)| *name)
+            .collect()
+    }
+
+    /// Refuses a call that needs a capability this set lacks, and names the missing ones.
+    pub fn require(self, needed: Self) -> StreamResult<()> {
+        let missing = needed.without(self);
+        if missing == Self::default() {
+            return Ok(());
+        }
+        Err(unsupported(&missing.names().join(", ")))
+    }
+}
+
+fn unsupported(capability: &str) -> StreamError {
+    StreamError::new(
+        Reason::Unsupported,
+        format!("The Store lacks the capability {capability}"),
+    )
+}
+
+/// The calls of a Store. Each one is atomic, as one Lua script is on Redis.
+///
+/// The required calls make the log contract. They are a create key, an atomic batch append, an
+/// ordered read with the Stream's state, stable offsets, prefix Retention and a wait for the next
+/// entry. An append applies the rules of the capabilities that the Store declares. The optional
+/// calls fail by default.
+#[async_trait::async_trait]
+pub trait Store: Send + Sync + 'static {
+    /// What the Store does atomically beyond the log. It has no default, so a Store that wraps
+    /// another one must say what it forwards.
+    fn capabilities(&self) -> Capabilities;
+
+    /// The Retention of a Stream whose create sets none.
+    fn default_retention(&self) -> Duration;
+
+    /// Creates a Stream, or finds it. The calls that write take the Stream's whole ref, since
+    /// the server finds a Workflow's Stream by its owner. Redis and memory key on the id.
+    /// With [Capabilities::RUN_FENCE], a retry run's create withdraws its previous run.
+    async fn create(
+        &self,
+        namespace: &str,
+        stream: &StreamRef,
+        retention: Option<Duration>,
+        owner: Owner,
+        withdrawal: &Withdrawal<'_>,
+    ) -> StreamResult<Created>;
+
+    /// Appends the whole batch, or nothing of it. The batch's Records get consecutive offsets that
+    /// end at the last offset of [Appended::offsets], so a caller knows the offset of each one.
+    async fn append(
+        &self,
+        namespace: &str,
+        stream: &StreamRef,
+        batch: &Batch<'_>,
+    ) -> StreamResult<Appended>;
+
+    /// Reads the Stream's state and up to `count` entries from `from`, inclusive. Zero reads
+    /// from the start of the log.
+    async fn read(
+        &self,
+        namespace: &str,
+        stream_id: &str,
+        from: i64,
+        count: usize,
+    ) -> StreamResult<(StreamState, Vec<Entry>)>;
+
+    /// Waits until the log has an entry after `after`, or `deadline` passes. Returns whether an
+    /// entry came.
+    async fn wait_after(
+        &self,
+        namespace: &str,
+        stream_id: &str,
+        after: i64,
+        deadline: Instant,
+    ) -> StreamResult<bool>;
+
+    /// Closes a Stream with an encoded close Record. Needs [Capabilities::CLOSE].
+    async fn close(
+        &self,
+        _namespace: &str,
+        _stream: &StreamRef,
+        _producer: &Producer,
+        _record: &[u8],
+    ) -> StreamResult<Closed> {
+        Err(unsupported("close"))
+    }
+
+    /// Reads up to `count` entries at or before `before`, newest first, for a read of the newest
+    /// Records.
+    async fn read_back(
+        &self,
+        _namespace: &str,
+        _stream_id: &str,
+        _before: i64,
+        _count: usize,
+    ) -> StreamResult<Vec<Entry>> {
+        Err(unsupported("last"))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_missing_capability_is_refused_by_name() {
+        let some = Capabilities::PRODUCER_FENCE.union(Capabilities::CLOSE);
+        some.require(Capabilities::CLOSE).unwrap();
+        let error = some
+            .require(Capabilities::CLOSE.union(Capabilities::SAFETY_TTL))
+            .unwrap_err();
+        assert_eq!(error.reason, Reason::Unsupported);
+        assert!(error.message.ends_with("safety_ttl"), "{}", error.message);
+        assert_eq!(Capabilities::ALL.names().len(), 5);
+        assert_eq!(
+            Capabilities::ALL
+                .without(Capabilities::SAFETY_TTL)
+                .names()
+                .len(),
+            4
+        );
+    }
+}

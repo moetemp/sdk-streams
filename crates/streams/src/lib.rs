@@ -12,6 +12,7 @@ mod error;
 pub mod ids;
 pub mod offset;
 pub mod protos;
+pub mod store;
 
 pub use error::{Reason, StreamError, StreamResult};
 
