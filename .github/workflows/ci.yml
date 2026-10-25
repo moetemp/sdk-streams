@@ -1,0 +1,60 @@
+name: CI
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  lint:
+    name: fmt, clippy and the API proto copy
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@1.94.0
+        with:
+          components: clippy, rustfmt
+      - uses: arduino/setup-protoc@v3
+        with:
+          repo-token: ${{ secrets.GITHUB_TOKEN }}
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo fmt --all -- --check
+      - run: cargo clippy --workspace --tests -- -D warnings
+      - run: >-
+          cargo clippy --workspace --no-default-features --features tls-aws-lc --tests
+          -- -D warnings
+      - name: The API proto copy matches the sdk-rust release
+        run: scripts/sync-api-protos.sh && git diff --exit-code
+
+  test:
+    name: unit tests and shared vectors
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@1.94.0
+      - uses: arduino/setup-protoc@v3
+        with:
+          repo-token: ${{ secrets.GITHUB_TOKEN }}
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo test --workspace
+
+  fips:
+    name: FIPS build takes no ring
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@1.94.0
+      - uses: arduino/setup-protoc@v3
+        with:
+          repo-token: ${{ secrets.GITHUB_TOKEN }}
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo build --workspace --no-default-features --features fips
+      # Normal and build edges only, since the tests' own dependencies may depend on `ring`.
+      - run: |
+          tree=$(cargo tree -e normal,build --no-default-features --features fips \
+            -i ring --target all 2>/dev/null || true)
+          if [ -n "$tree" ]; then echo "$tree"; exit 1; fi
+

@@ -1,0 +1,61 @@
+syntax = "proto3";
+
+package temporal.api.enums.v1;
+
+option go_package = "go.temporal.io/api/enums/v1;enums";
+option java_package = "io.temporal.api.enums.v1";
+option java_multiple_files = true;
+option java_outer_classname = "StreamProto";
+option ruby_package = "Temporalio::Api::Enums::V1";
+option csharp_namespace = "Temporalio.Api.Enums.V1";
+
+// Experimental. Might change in the future.
+enum StreamProducerKind {
+    STREAM_PRODUCER_KIND_UNSPECIFIED = 0;
+    STREAM_PRODUCER_KIND_WORKFLOW = 1;
+    STREAM_PRODUCER_KIND_LOCAL_ACTIVITY = 2;
+    STREAM_PRODUCER_KIND_ACTIVITY = 3;
+    STREAM_PRODUCER_KIND_CLIENT = 4;
+    STREAM_PRODUCER_KIND_STANDALONE_ACTIVITY = 5;
+}
+
+// Experimental. Might change in the future.
+enum StreamRecordKind {
+    STREAM_RECORD_KIND_UNSPECIFIED = 0;
+    STREAM_RECORD_KIND_DATA = 1;
+    // Lua flags the first batch of a higher epoch. The read makes this Record from the flag.
+    STREAM_RECORD_KIND_SUPERSEDED = 2;
+    STREAM_RECORD_KIND_CLOSE = 3;
+}
+
+// Experimental. Might change in the future.
+// How a Stream closed, so a reader tells a terminated or timed out owner from a failed one
+// without parsing the failure.
+// (-- api-linter: core::0216::synonyms=disabled
+//     aip.dev/not-precedent: Named consistently with WorkflowExecutionStatus. --)
+enum StreamCloseStatus {
+    STREAM_CLOSE_STATUS_UNSPECIFIED = 0;
+    STREAM_CLOSE_STATUS_COMPLETED = 1;
+    STREAM_CLOSE_STATUS_FAILED = 2;
+    STREAM_CLOSE_STATUS_CANCELED = 3;
+    // TERMINATED and TIMED_OUT come only from the owner's end, never from a caller.
+    STREAM_CLOSE_STATUS_TERMINATED = 4;
+    STREAM_CLOSE_STATUS_TIMED_OUT = 5;
+}
+
+// Experimental. Might change in the future.
+// (-- api-linter: core::0216::synonyms=disabled
+//     aip.dev/not-precedent: Named consistently with WorkflowExecutionStatus. --)
+enum StreamStatus {
+    STREAM_STATUS_UNSPECIFIED = 0;
+    STREAM_STATUS_OPEN = 1;
+    STREAM_STATUS_CLOSED = 2;
+    STREAM_STATUS_EXPIRED = 3;
+}
+
+// Experimental. Might change in the future.
+enum StreamReadStart {
+    STREAM_READ_START_UNSPECIFIED = 0;
+    STREAM_READ_START_BEGINNING = 1;
+    STREAM_READ_START_END = 2;
+}

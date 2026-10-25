@@ -1,0 +1,38 @@
+[package]
+name = "temporalio-streams"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.88.0"
+authors = ["Temporal Technologies Inc. <sdk@temporal.io>"]
+license-file = { workspace = true }
+description = "The Stream runtime for Temporal SDKs: the Stream service on Redis"
+homepage = "https://temporal.io/"
+repository = "https://github.com/moetemp/sdk-streams"
+keywords = ["temporal", "workflow", "streams"]
+categories = ["development-tools"]
+
+[features]
+default = ["tls-ring"]
+# The TLS providers of the sdk-rust crates. A FIPS build uses `tls-aws-lc` with no default features,
+# so that no crate in the build depends on `ring`.
+tls-ring = ["temporalio-common/tls-ring"]
+tls-aws-lc = ["temporalio-common/tls-aws-lc"]
+# Turns on `tls-aws-lc` and the FIPS mode of `aws-lc-rs`, so that the shared rustls provider links
+# `aws-lc-fips-sys`.
+fips = ["tls-aws-lc", "dep:aws-lc-rs"]
+
+[dependencies]
+# Only with `fips`. The crate doesn't call it. Its `fips` feature puts the one `aws-lc-rs` of the
+# build in FIPS mode.
+aws-lc-rs = { version = "1", features = ["fips"], optional = true }
+prost = { workspace = true }
+prost-types = { workspace = true }
+temporalio-common = { workspace = true }
+thiserror = { workspace = true }
+tonic = { workspace = true }
+
+[build-dependencies]
+tonic-prost-build = { workspace = true }
+
+[lints]
+workspace = true
