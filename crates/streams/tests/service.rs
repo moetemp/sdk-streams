@@ -630,8 +630,8 @@ async fn a_read_of_an_expired_closed_stream_fails_instead_of_waiting() {
 }
 
 /// A filtered read scans on past the scan cap with no wait while entries are left, so a match
-/// after 10,000 entries of other Topics comes at once. A read with no wait answers an empty page
-/// that moved `next_offset`, and the next read from there finds the match.
+/// after 10,000 entries of other Topics comes at once. A read with no wait answers the match, or
+/// an empty page that moved `next_offset`, and the next read from there finds it.
 #[tokio::test]
 async fn a_filtered_read_scans_past_the_cap_without_waiting() {
     for case in cases_for(Needs::CALLS).await {
@@ -652,17 +652,25 @@ async fn a_filtered_read_scans_past_the_cap_without_waiting() {
         let read = case.read(filtered(millis(10_000))).await.unwrap();
         assert_eq!(texts(&read), ["match"]);
         assert!(started.elapsed() < Duration::from_secs(5));
-        let first = case.read(filtered(None)).await.unwrap();
-        assert!(first.records.is_empty() && !first.done);
-        assert!(first.next_offset > 0);
-        let next = case
-            .read(ReadRecordsRequest {
-                from_offset: first.next_offset,
-                ..filtered(None)
-            })
-            .await
-            .unwrap();
-        assert_eq!(texts(&next), ["match"]);
+        // Redis and memory stop at the cap, and the server scans to the end.
+        let (mut from_offset, mut empty) = (0, 0);
+        let found = loop {
+            let page = case
+                .read(ReadRecordsRequest {
+                    from_offset,
+                    ..filtered(None)
+                })
+                .await
+                .unwrap();
+            if !page.records.is_empty() {
+                break page;
+            }
+            assert!(!page.done && page.next_offset > from_offset);
+            empty += 1;
+            assert!(empty < 2, "{empty} empty pages with no wait");
+            from_offset = page.next_offset;
+        };
+        assert_eq!(texts(&found), ["match"]);
     }
 }
 
