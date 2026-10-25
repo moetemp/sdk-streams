@@ -666,6 +666,20 @@ async fn a_filtered_read_scans_past_the_cap_without_waiting() {
     }
 }
 
+/// A sequence past 2^53 - 1 fails with `stream_invalid` on every backend, since the Lua scripts
+/// can't compare it exactly.
+#[tokio::test]
+async fn a_sequence_past_2_53_fails_on_every_backend() {
+    for case in cases_for(Needs::CALLS).await {
+        case.create(None).await.unwrap();
+        let error = case
+            .append(client(1), 1 << 53, vec![record("", "past")])
+            .await
+            .unwrap_err();
+        assert_eq!(reason(&error), "stream_invalid");
+    }
+}
+
 /// A prefix filter reads the Topics under it and keeps the `Superseded` items.
 #[tokio::test]
 async fn a_prefix_filter_reads_the_topics_under_it_and_keeps_superseded_items() {

@@ -480,7 +480,7 @@ async fn a_sequence_below_one_is_refused() {
 }
 
 /// A large sequence keeps its dedupe entry, so a resend gets its first answer and a lower or
-/// divergent batch is refused. A sequence past 2^53 - 1 is refused.
+/// divergent batch is refused. With `STORE_ANSWERS`, a sequence past 2^53 - 1 is refused.
 #[tokio::test]
 async fn a_large_sequence_dedupes_and_one_past_2_53_is_refused() {
     for target in stores_for(Needs::CALLS).await {
@@ -497,8 +497,11 @@ async fn a_large_sequence_dedupes_and_one_past_2_53_is_refused() {
         assert_eq!(target.texts().await, ["x"]);
         let max = (1 << 53) - 1;
         append(&target, &p, max, &["max"]).await.unwrap();
-        let past = append(&target, &p, max + 1, &["past"]).await;
-        assert_eq!(past.unwrap_err().reason, Reason::Invalid);
+        // The service refuses a higher one on every backend, and Redis and memory do on their own.
+        if target.gives.gives(Needs::STORE_ANSWERS) {
+            let past = append(&target, &p, max + 1, &["past"]).await;
+            assert_eq!(past.unwrap_err().reason, Reason::Invalid);
+        }
     }
 }
 
