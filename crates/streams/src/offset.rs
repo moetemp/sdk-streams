@@ -3,7 +3,7 @@
 
 use crate::{StreamError, StreamResult};
 
-/// The bits of the entry id's sequence part.
+/// The number of bits of the entry id's sequence part.
 pub const SEQ_BITS: u32 = 20;
 
 const SEQ_MASK: i64 = (1 << SEQ_BITS) - 1;
@@ -24,7 +24,7 @@ pub fn offset_of_entry_id(id: &str) -> StreamResult<i64> {
     Ok(((ms as i64) << SEQ_BITS) | seq as i64)
 }
 
-/// Unpacks an offset to the Redis entry id it names. The offset must be above zero.
+/// Unpacks an offset into its Redis entry id. The offset must be above zero.
 pub fn entry_id_of_offset(offset: i64) -> String {
     debug_assert!(offset > 0);
     format!("{}-{}", offset >> SEQ_BITS, offset & SEQ_MASK)

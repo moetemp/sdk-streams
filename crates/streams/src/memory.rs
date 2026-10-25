@@ -1,6 +1,6 @@
-//! The memory Store, for tests. It keeps the same fields as the Redis layout and runs the steps
-//! of the Lua scripts in the same order, so both Stores give the same answers. Each call holds
-//! one lock, as one script runs alone on Redis.
+//! The memory Store, for tests. It keeps the same fields as the Redis layout and runs the steps of
+//! the Lua scripts in the same order, so that both Stores return the same results. Each call holds
+//! one lock, since Redis runs one script at a time.
 
 use crate::{
     Reason, StreamError, StreamResult,
@@ -20,7 +20,7 @@ use std::{
 };
 use tokio::{sync::Notify, time::Instant};
 
-/// The most sequence numbers of one millisecond, as an offset packs them in 20 bits.
+/// The number of sequence numbers in one millisecond, since an offset packs them in 20 bits.
 const SEQ_LIMIT: u64 = 1 << crate::offset::SEQ_BITS;
 
 #[derive(Clone, Default)]
@@ -29,7 +29,7 @@ struct Fields {
     supersession: Option<Vec<u8>>,
 }
 
-/// One Stream: the meta hash and the log, each with the time it expires, as Redis keys have.
+/// One Stream's meta hash and log, each with an expiry time, as Redis keys have.
 #[derive(Default)]
 struct Keys {
     meta: HashMap<String, String>,
@@ -129,7 +129,7 @@ impl Keys {
         self.meta.insert(field.to_string(), value.into());
     }
 
-    /// The `check_live` step: the create key, the format version and the expiry.
+    /// The `check_live` step, which checks the create key, the format version and the expiry.
     fn check_live(&self, now: i64) -> StreamResult<()> {
         let Some(v) = self.get("v") else {
             return Err(refuse(Reason::NotFound, "nobody created the Stream"));
@@ -240,7 +240,8 @@ impl Keys {
         Ok(())
     }
 
-    /// `XADD *`: the next id after the newest one, in this millisecond or a later one.
+    /// Adds an entry as `XADD *` does, with the next id after the newest one, in this millisecond
+    /// or a later one.
     fn add(&mut self, now: i64, fields: Fields) -> String {
         let now = now.max(0) as u64;
         let (last_ms, last_seq) = self.last_id;
@@ -273,7 +274,7 @@ impl MemoryStore {
         StreamKeys::new(&self.prefix, namespace, stream_id).meta()
     }
 
-    /// Runs `step` on one Stream's keys after the expired keys go, as Redis drops them.
+    /// Runs `step` on one Stream's keys after it drops the expired keys, as Redis does.
     fn with<T>(
         &self,
         namespace: &str,
@@ -293,7 +294,7 @@ impl MemoryStore {
             keys.log_expires = 0;
         }
         let result = step(keys, now);
-        // Redis forgets a Stream, its newest id too, once both keys are gone.
+        // Once both keys are gone, Redis has no state of the Stream, not even its newest id.
         if keys.meta.is_empty() && keys.log.is_none() {
             streams.remove(&key);
         }
@@ -508,7 +509,7 @@ impl Store for MemoryStore {
                 if (4..=5).contains(&parts.len()) && parts[0] == epoch {
                     let last_sequence: i64 = parts[1].parse().unwrap_or(0);
                     if sequence == last_sequence {
-                        // An entry written before the digest has none, and takes any resend.
+                        // An entry from an older crate has no digest, and accepts any resend.
                         let last_digest = parts.get(4).copied().unwrap_or_default();
                         if !last_digest.is_empty() && last_digest != batch.digest {
                             return Err(refuse(
@@ -576,7 +577,7 @@ impl Store for MemoryStore {
 
             keys.trim(now);
             let (mut first, mut last) = (String::new(), String::new());
-            // The orphans go in an entry of their own, as in `append.lua`.
+            // The orphan item has an entry of its own, as in `append.lua`.
             let mut orphan = String::new();
             if let (false, Some(facts)) = (withdrawn.is_empty(), facts) {
                 orphan = keys.add(
@@ -833,7 +834,7 @@ mod tests {
         let mut keys = Keys::default();
         assert_eq!(keys.add(5, Fields::default()), "5-0");
         assert_eq!(keys.add(5, Fields::default()), "5-1");
-        // A clock that steps back keeps the ids increasing.
+        // The ids keep increasing when the clock steps back.
         assert_eq!(keys.add(3, Fields::default()), "5-2");
         assert_eq!(keys.add(9, Fields::default()), "9-0");
     }

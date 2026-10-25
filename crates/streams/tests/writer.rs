@@ -1,4 +1,4 @@
-//! The buffered writers of Activities and clients, through the byte calls, on a real Redis.
+//! The writers of Activities and clients, through the byte calls, on each backend.
 
 mod support;
 
@@ -146,7 +146,7 @@ impl Case {
         opened.writer_id
     }
 
-    /// An awaited publish: the Records are in the Store when it returns.
+    /// An awaited publish. The Records are in the Store when it returns.
     async fn write(&self, writer_id: u64, texts: &[&str]) -> Result<(i64, i64), StreamError> {
         let written: WriteRecordsResponse = self
             .call(
@@ -227,7 +227,7 @@ async fn writes_split_at_the_batch_size_and_keep_one_sequence() {
         assert_eq!(case.visible().await, ["1", "2", "3", "4", "5"]);
         assert_eq!(read.records[0].offset, first);
         assert_eq!(read.records[2].offset, last);
-        // Opening the same Producer epoch again gives the same writer, so it keeps the sequence.
+        // Opening the same Producer epoch again returns the same writer, so it keeps the sequence.
         assert_eq!(case.open(client(), |_| {}).await, writer);
     }
 }
@@ -467,8 +467,7 @@ async fn a_write_of_a_retry_attempt_withdraws_the_earlier_attempt() {
     }
 }
 
-/// A memory Store whose first append goes in but whose answer is lost, as on a dropped
-/// connection.
+/// A memory Store that writes the first append but loses its result, as on a dropped connection.
 struct LosesFirstAnswer {
     inner: Arc<MemoryStore>,
     lost: AtomicBool,

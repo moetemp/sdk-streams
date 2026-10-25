@@ -1,10 +1,10 @@
-//! Writers for Activities and clients. `write` appends its Records at once and answers their
-//! offsets, which is what an awaited publish needs. A writer keeps one Producer epoch and one
-//! `sequence` order, so a retry of a batch goes in once. Lang buffers on its own, if it wants
-//! to, and writes each batch with one call.
+//! Writers for Activities and clients. `write` appends its Records at once and returns their
+//! offsets, as an awaited publish needs. A writer keeps one Producer epoch and one `sequence`
+//! order, so that the Store writes a retried batch only once. Lang can buffer Records on its own
+//! and write each batch with one call.
 //!
-//! The handles of one Producer epoch on one Stream share one writer. Each open counts a handle,
-//! and each close or free releases one, so a process keeps no writer that no handle uses.
+//! The handles of one Producer epoch on one Stream share one writer. Each open adds a handle and
+//! each close or free releases one. The last release drops the writer.
 
 use crate::{
     Reason, StreamError, StreamResult,
@@ -31,9 +31,8 @@ const DEFAULT_BATCH: usize = 1000;
 const DEFAULT_RETRY: Duration = Duration::from_secs(10);
 const FIRST_BACKOFF: Duration = Duration::from_millis(50);
 
-/// The last `sequence` of any batch in this process. Every writer numbers its batches from it,
-/// so a writer opened again after its close goes on above its earlier batches, with no record
-/// of closed writers to keep.
+/// The last `sequence` of any batch in this process. Every writer numbers its batches from it, so
+/// that a writer that opens again after its close continues above its earlier batches.
 static LAST_SEQUENCE: AtomicI64 = AtomicI64::new(0);
 
 fn next_sequence() -> i64 {
@@ -43,8 +42,8 @@ fn next_sequence() -> i64 {
 #[derive(Default)]
 struct State {
     last_offset: i64,
-    /// A write that failed for good. Every later call fails with it, since the batch may be in
-    /// the Store under a `sequence` the writer can't reuse.
+    /// A write that failed permanently. Every later call fails with it, since the batch may be in
+    /// the Store under a `sequence` that the writer can't reuse.
     failed: Option<StreamError>,
     closed: bool,
 }
@@ -60,7 +59,7 @@ struct Writer {
     max_retry: Duration,
     service: Arc<StreamService>,
     state: Mutex<State>,
-    /// One write at a time, so the batches of one epoch go out in `sequence` order.
+    /// Allows one write at a time, so that the batches of one epoch reach the Store in order.
     writing: tokio::sync::Mutex<()>,
 }
 
@@ -71,8 +70,8 @@ fn duration(value: Option<prost_types::Duration>) -> Option<Duration> {
 }
 
 impl Writer {
-    /// How many of `records` go in the next batch. The Store refuses a batch over its limit, so
-    /// a batch ends at the count or the bytes, whichever comes first.
+    /// The number of `records` in the next batch. The Store refuses a batch over its limit, so a
+    /// batch ends at the count limit or the byte limit, whichever comes first.
     fn batch_len<'a>(&self, records: impl Iterator<Item = &'a AppendRecord>) -> usize {
         let mut count = 0;
         let mut bytes = 0;
@@ -87,8 +86,8 @@ impl Writer {
         count
     }
 
-    /// Appends `records` now and answers the offsets of the first and the last one. Records
-    /// past the Store's batch limit go as more batches, in order.
+    /// Appends `records` now and returns the offsets of the first and the last one. Records past
+    /// the Store's batch limit go in more batches, in order.
     async fn write(&self, mut records: Vec<AppendRecord>) -> StreamResult<(i64, i64)> {
         let _writing = self.writing.lock().await;
         // A close that started while this write waited has ended the writer.
@@ -108,7 +107,7 @@ impl Writer {
             let sequence = next_sequence();
             let (batch_first, batch_last) = match self.send(records, sequence).await {
                 Ok(offsets) => offsets,
-                // The batch may be in the Store, so the writer can't go on in this epoch.
+                // The batch may be in the Store, so the writer can't continue in this epoch.
                 Err(error) => {
                     self.state.lock().failed = Some(error.clone());
                     return Err(error);
@@ -125,8 +124,8 @@ impl Writer {
         Ok((first, last))
     }
 
-    /// Appends one batch, and sends it again with the same `sequence` after a Store failure, so
-    /// the dedupe key keeps it from going in twice. Answers the first and the last offset.
+    /// Appends one batch and returns its first and last offset. After a Store failure it sends the
+    /// batch again with the same `sequence`, so the dedupe key stops a second write.
     async fn send(&self, records: Vec<AppendRecord>, sequence: i64) -> StreamResult<(i64, i64)> {
         let request = AppendRecordsRequest {
             namespace: self.namespace.clone(),
@@ -192,8 +191,8 @@ struct Table {
 }
 
 impl Table {
-    /// Releases one handle of a writer, or every handle with `all`. Answers the writer when it
-    /// has no handle left, so the caller ends it.
+    /// Releases one handle of a writer, or every handle with `all`. Returns the writer when it has
+    /// no handle left, so that the caller ends it.
     fn release(&mut self, id: u64, all: bool) -> StreamResult<Option<Arc<Writer>>> {
         let open = self
             .open
@@ -217,9 +216,9 @@ pub(crate) struct Writers {
 }
 
 impl Writers {
-    /// Opens a writer, or adds a handle to the one this Producer epoch has on the Stream. A
-    /// writer of an Activity attempt above 1 first sends an empty batch, so the new epoch
-    /// withdraws the earlier attempt's Records also when it publishes nothing. On a closed or
+    /// Opens a writer, or adds a handle to the one that this Producer epoch has on the Stream. A
+    /// writer of an Activity attempt above 1 first sends an empty batch, so that the new epoch
+    /// withdraws the earlier attempt's Records even when it publishes nothing. On a closed or
     /// expired Stream the open still succeeds, and the first write fails with the reason.
     pub(crate) async fn open(
         &self,
@@ -270,7 +269,7 @@ impl Writers {
         ) && epoch.attempt > 1;
         if retry {
             match writer.send(vec![], next_sequence()).await {
-                // A Stream with no key has nothing to withdraw yet. A closed or expired one takes
+                // A Stream with no key has nothing to withdraw yet. A closed or expired one accepts
                 // no more Records, and a retry that only reads it must still run.
                 Ok(_) => {}
                 Err(error)
@@ -316,8 +315,8 @@ impl Writers {
             .ok_or_else(|| StreamError::new(Reason::UnknownWriter, format!("No writer {id}")))
     }
 
-    /// Appends Records at once and answers the first and the last offset. A retry after a Store
-    /// failure resends the same batch, so it goes in once.
+    /// Appends Records at once and returns the first and the last offset. A retry after a Store
+    /// failure resends the same batch, so that the Store writes it once.
     pub(crate) async fn write(
         &self,
         id: u64,
@@ -340,7 +339,7 @@ impl Writers {
         writer.write(records).await
     }
 
-    /// Closes every open writer, whatever its handles. Answers how many had failed.
+    /// Closes every open writer, whatever its handles. Returns how many had failed.
     pub(crate) async fn close_all(&self) -> usize {
         let ids: Vec<u64> = self.table.lock().open.keys().copied().collect();
         let mut failed = 0;
@@ -357,7 +356,7 @@ impl Writers {
     }
 
     /// Releases one handle. The last one waits for a write in flight, then drops the writer.
-    /// Answers its last offset, or the error it failed with.
+    /// Returns its last offset, or the error it failed with.
     pub(crate) async fn close(&self, id: u64) -> StreamResult<i64> {
         let writer = self.get(id)?;
         if self.table.lock().release(id, false)?.is_none() {
@@ -371,7 +370,7 @@ impl Writers {
     }
 
     /// Releases one handle with no wait, for a handle that lang drops. A write in flight still
-    /// ends, and a write that waits behind it is refused once no handle is left.
+    /// completes, and a write that waits behind it is refused once no handle is left.
     pub(crate) fn free(&self, id: u64) -> StreamResult<()> {
         if let Some(writer) = self.table.lock().release(id, false)? {
             writer.state.lock().closed = true;
@@ -380,7 +379,7 @@ impl Writers {
     }
 }
 
-/// Ends a writer that no handle uses: waits for a write in flight, then answers its last offset
+/// Ends a writer that no handle uses. It waits for a write in flight, then returns its last offset
 /// or the error it failed with.
 async fn end(writer: &Writer) -> StreamResult<i64> {
     writer.state.lock().closed = true;

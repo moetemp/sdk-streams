@@ -1,5 +1,4 @@
-//! The Stream runtime as a plain object, which lang's bridge builds per client and calls by
-//! method name. Core has no hook for it.
+//! The Stream runtime, a plain object that lang's bridge builds per client and calls by name.
 
 use crate::{
     Reason, StreamError, StreamResult,
@@ -27,10 +26,10 @@ use tokio::sync::OnceCell;
 /// The name of the Redis runtime, for logs and for a bridge that selects a runtime by name.
 pub const EXTENSION_NAME: &str = "temporalio-streams-redis";
 
-/// What the extension needs besides the Store options.
+/// The options of a Stream runtime on Redis.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ExtensionOptions {
-    /// How to reach Redis.
+    /// How to connect to Redis.
     pub store: RedisStoreOptions,
     /// The backend name that lang registered the extension under, for the refs it builds.
     pub backend: String,
@@ -73,7 +72,7 @@ fn duration(value: Option<prost_types::Duration>) -> Option<Duration> {
     (!duration.is_zero()).then_some(duration)
 }
 
-/// What the extension's calls share.
+/// The state that the extension's calls share.
 pub(crate) struct Shared {
     name: &'static str,
     options: ExtensionOptions,
@@ -83,8 +82,8 @@ pub(crate) struct Shared {
 }
 
 impl Shared {
-    /// The service, which connects to Redis on its first use. A failed connect is tried again
-    /// on the next call.
+    /// The service, which connects to Redis on its first use. A failed connect is retried on the
+    /// next call.
     pub(crate) async fn service(&self) -> StreamResult<&Arc<StreamService>> {
         self.service
             .get_or_try_init(|| async {
@@ -101,7 +100,7 @@ impl Shared {
 
 /// The Stream runtime on Redis or, for tests, on the memory Store.
 ///
-/// On Redis it connects on its first call that needs Redis, so a bridge can build it with no
+/// On Redis, it connects on the first call that needs Redis. So a bridge can build it with no async
 /// runtime, and a Workflow that never publishes never needs Redis. A bridge builds one for each
 /// client with a Stream backend, and that client's Workers share it.
 pub struct StreamExtension {
@@ -146,7 +145,7 @@ impl StreamExtension {
         Arc::new(Self { shared })
     }
 
-    /// Builds the extension on Redis. It counts on `meter`, lang's runtime meter, when given.
+    /// Builds the extension on Redis. It records metrics on `meter`, lang's runtime meter, if set.
     pub fn new(options: ExtensionOptions, meter: Option<TemporalMeter>) -> Arc<Self> {
         Self::build(EXTENSION_NAME, options, meter, None)
     }
@@ -186,7 +185,7 @@ impl StreamExtension {
         Ok(Self::new(ExtensionOptions::from_config(config)?, meter))
     }
 
-    /// The options the runtime runs with.
+    /// The options of the runtime.
     pub fn options(&self) -> &ExtensionOptions {
         &self.shared.options
     }
@@ -202,10 +201,10 @@ impl StreamExtension {
         self.shared.writers.free(writer_id)
     }
 
-    /// Runs one method on encoded input and answers the encoded output. The bridge raises an
-    /// error with [StreamError::code] and [StreamError::details].
+    /// Runs one method on encoded input and returns the encoded output. The bridge raises an error
+    /// with [StreamError::code] and [StreamError::details].
     pub async fn call(&self, method: &str, input: &[u8]) -> StreamResult<Vec<u8>> {
-        // A free needs no Store, so it works also when Redis is down.
+        // `FreeWriter` needs no Store, so it works when Redis is down too.
         if method == "FreeWriter" {
             let request = decode::<FreeWriterRequest>(input)?;
             self.free_writer(request.writer_id)?;
@@ -302,8 +301,8 @@ impl MemoryStreamExtension {
         Self::with_store(memory, meter)
     }
 
-    /// Builds an extension from an encoded [RedisStreamConfig]. The URLs don't count, so a
-    /// backend can pass the config it builds for Redis.
+    /// Builds an extension from an encoded [RedisStreamConfig]. It ignores the URLs, so a backend
+    /// can pass the config that it builds for Redis.
     pub fn from_config_bytes(
         config: &[u8],
         meter: Option<TemporalMeter>,

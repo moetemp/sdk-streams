@@ -1,10 +1,10 @@
-//! Connections: one multiplexed connection for every short call, and dedicated ones for blocking
-//! reads.
+//! The connections of the Redis Store. All short calls share one multiplexed connection, and each
+//! blocking read uses a dedicated one.
 //!
-//! redis-rs sends every command of a multiplexed connection down one socket in order, so a
-//! blocking `XREAD` there would stall every append behind it. A blocking read takes a connection
-//! of its own from a bounded pool per node instead. A read that is cancelled drops its connection,
-//! since the server may still answer the blocked command on it.
+//! redis-rs sends all commands of a multiplexed connection on one socket, in order. A blocking
+//! `XREAD` there would block every append after it. So a blocking read uses a dedicated connection
+//! from a bounded pool per node. A cancelled read drops its connection, since the server can still
+//! reply to the blocked command on it.
 
 use redis::{
     AsyncConnectionConfig, Client, Cmd, ConnectionAddr, ConnectionInfo, IntoConnectionInfo,
@@ -24,7 +24,7 @@ use tokio::{
     time::Instant,
 };
 
-/// The connection every short call shares.
+/// The connection that all short calls share.
 #[derive(Clone)]
 pub(crate) enum Shared {
     Single(ConnectionManager),
@@ -78,8 +78,8 @@ impl Shared {
         ))
     }
 
-    /// Runs `cmd` on the server, or on every primary of a cluster, and answers each reply with
-    /// the node that sent it. Each primary holds its own share of the keys and its own settings.
+    /// Runs `cmd` on the server, or on every primary of a cluster, and returns each reply with the
+    /// node that sent it. Each primary holds its own share of the keys and its own settings.
     pub(crate) async fn on_each_primary(&self, cmd: Cmd) -> RedisResult<Vec<(String, Value)>> {
         match self.clone() {
             Shared::Single(mut conn) => {
@@ -108,7 +108,7 @@ impl Shared {
     }
 }
 
-/// The node a key lives on, for a store that talks to one.
+/// The host and port of a Redis node.
 type Node = (String, u16);
 
 struct NodePool {
@@ -122,8 +122,8 @@ pub(crate) struct BlockingPool {
     seed: ConnectionInfo,
     per_node: usize,
     cluster: bool,
-    /// How long past its own deadline a blocked read waits for the server's answer. A server
-    /// that died without a reset never answers, and the read must still end.
+    /// How long a blocked read waits for the server's reply after the read's deadline. A server
+    /// that stopped without a reset never replies, and the read must still end.
     response_timeout: Duration,
     nodes: Mutex<HashMap<Node, Arc<NodePool>>>,
     /// The node that serves each slot, learned from redirects. A cluster moves slots rarely, and
@@ -167,7 +167,7 @@ impl BlockingPool {
 
     /// Runs `cmd` on a dedicated connection to the node that holds `key`.
     ///
-    /// Returns `None` when no connection came free before `deadline`, which the caller treats as
+    /// Returns `None` when no connection became free before `deadline`, which the caller treats as
     /// a wait in which nothing arrived.
     pub(crate) async fn query(
         &self,
@@ -212,8 +212,8 @@ impl BlockingPool {
                     lease.release();
                     return Ok(Some(value));
                 }
-                // A restart drops every idle connection, so one fresh try tells a dead connection
-                // from a dead server.
+                // A server restart closes every idle connection. So one retry on a new connection
+                // tells a dead connection from a dead server.
                 Err(error)
                     if lease.reused
                         && !fresh
@@ -244,8 +244,8 @@ impl BlockingPool {
         }
     }
 
-    /// Drops a slot's cached node and answers the seed. A failover can replace a node's
-    /// address for good, and only a redirect would ever update the entry otherwise.
+    /// Drops a slot's cached node and returns the seed. A failover can change a node's address
+    /// permanently, and otherwise only a redirect would update the entry.
     fn forget(&self, slot: Option<u16>, node: &Node) -> Node {
         if let Some(slot) = slot {
             let mut slots = self.slots.lock().unwrap();
@@ -318,7 +318,7 @@ fn address(info: &ConnectionInfo) -> Node {
     }
 }
 
-/// The seed's settings, credentials and TLS included, at another node.
+/// The seed's connection settings, with its credentials and TLS, for another node.
 fn at(seed: &ConnectionInfo, (host, port): &Node) -> ConnectionInfo {
     let addr = match seed.addr() {
         ConnectionAddr::TcpTls {
@@ -351,7 +351,7 @@ fn redirect(error: &RedisError) -> Option<Node> {
         .and_then(|(host, port)| Some((host.to_string(), port.parse().ok()?)))
 }
 
-/// The cluster slot of a key: CRC16 of its hash tag, or of the whole key without one.
+/// The cluster slot of a key, which is the CRC16 of its hash tag, or of the whole key with no tag.
 pub(crate) fn slot(key: &str) -> u16 {
     let bytes = key.as_bytes();
     let tagged = bytes.iter().position(|&b| b == b'{').and_then(|open| {

@@ -3,9 +3,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     tonic_prost_build::configure()
         .build_server(false)
         .build_client(false)
-        // One type for each Temporal API message, so a value moves between this crate and the
-        // sdk-rust crates with no conversion. The stream service is not in sdk-rust, so the
-        // crate generates it.
+        // Use the sdk-rust types for the Temporal API messages, so that values need no conversion
+        // between the crates. sdk-rust has no Stream service, so the crate generates it.
         .extern_path(
             ".temporal.api.common",
             "::temporalio_common::protos::temporal::api::common",

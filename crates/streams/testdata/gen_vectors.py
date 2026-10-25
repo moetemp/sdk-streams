@@ -191,7 +191,7 @@ def digests():
             "name": "two records",
             "records": [{"topic": "a", "data": "01"}, {"topic": "", "data": "0203"}],
         },
-        # The lengths keep these two apart, though their bytes run together the same.
+        # The length prefixes give these two different digests, though their joined bytes are equal.
         {"name": "topic and data split one way", "records": [{"topic": "ab", "data": "63"}]},
         {"name": "topic and data split another way", "records": [{"topic": "a", "data": "6263"}]},
     ]
@@ -251,7 +251,7 @@ def withdraws(supersession, record):
     if c and started == c_started:
         c_time = tuple(c.get("started_time", (0, 0)))
         if c.get("attempt", 0) == 0:
-            # Core gives attempt 0 when it no longer has c's attempt, so the time decides.
+            # Core sets attempt 0 when it no longer knows c's attempt. Then the time decides.
             return tuple(old.get("task_started_time", (0, 0))) < c_time
         if old_key < task_key(c["started_event_id"], c["attempt"], c_time):
             return True
@@ -287,32 +287,32 @@ def withdrawal_examples():
     def completed(started, attempt=1, time=(100, 0)):
         return {"started_event_id": started, "attempt": attempt, "started_time": list(time)}
 
-    # 1. A retried task writes nothing: B at [5] failed, [8] wrote nothing, C at [11], c = [8].
+    # 1. A retried task writes nothing. B at [5] failed, [8] wrote nothing, C at [11], c = [8].
     s = sup(wf(r1, 11), completed(8), failed=[5])
     case("e1 B at the failed task 5 goes", s, wf(r1, 5), True)
     case("e1 a Record at the completed task 8 stays", s, wf(r1, 8), False)
     case("e1 a Record before c stays", s, wf(r1, 3), False)
-    # 2. A refused completion: B at [5] refused, B' at [8] with failed [5].
+    # 2. A refused completion. B at [5] refused, B' at [8] with failed [5].
     s = sup(wf(r1, 8), completed(2), failed=[5])
     case("e2 B goes", s, wf(r1, 5), True)
     case("e2 an older completed Record stays", s, wf(r1, 2), False)
-    # 3. A transient retry: D at [8] attempt 2, D' at [8] attempt 3.
+    # 3. A transient retry. D at [8] attempt 2, D' at [8] attempt 3.
     s = sup(wf(r1, 8, attempt=3), completed(5))
     case("e3 D at a lower attempt of t goes", s, wf(r1, 8, attempt=2), True)
     case("e3 a Record of t itself stays", s, wf(r1, 8, attempt=3), False)
-    # 4. A dropped speculative task: U at [9] T1, the next task at [9] T2.
+    # 4. A dropped speculative task. U at [9] T1, the next task at [9] T2.
     s = sup(wf(r1, 9, time=(200, 0)), completed(6))
     case("e4 U at an earlier started time goes", s, wf(r1, 9, time=(150, 0)), True)
-    # 5. A refused transient attempt: c = [5], D at [11] refused, D' at [14].
+    # 5. A refused transient attempt. c = [5], D at [11] refused, D' at [14].
     s = sup(wf(r1, 14), completed(5))
     case("e5 D between c and t goes", s, wf(r1, 11, attempt=2), True)
     case("e5 a Record at c stays", s, wf(r1, 5), False)
-    # c with attempt 0: an earlier attempt at c's started id goes, c itself stays.
+    # With c at attempt 0, an earlier attempt at c's started id is withdrawn and c itself isn't.
     s = sup(wf(r1, 14), {"started_event_id": 8, "attempt": 0, "started_time": [300, 0]})
     case("c attempt 0, an earlier attempt at c goes", s, wf(r1, 8, attempt=1, time=(200, 0)),
          True)
     case("c attempt 0, c itself stays", s, wf(r1, 8, attempt=2, time=(300, 0)), False)
-    # A Local Activity of a withdrawn task goes with it.
+    # A Local Activity of a withdrawn task is withdrawn too.
     la = {"kind": "local_activity", "id": "la:" + join(r1, "k"), "run_id": r1,
           "epoch": {"task_started_event_id": 5, "task_attempt": 1,
                     "task_started_time": [100, 0], "attempt": 2}}
@@ -320,7 +320,7 @@ def withdrawal_examples():
          True)
     other_run = wf("r9", 5)
     case("another run's Record stays", sup(wf(r1, 11), completed(8), [5]), other_run, False)
-    # 6. A Workflow retry: r2's first batch withdraws r1 and its Activity.
+    # 6. A Workflow retry. r2's first batch withdraws r1 and its Activity.
     act = {"kind": "activity", "id": "act:" + join(r1, "a", "s"), "run_id": r1,
            "epoch": {"attempt_scheduled_time": [100, 0], "attempt": 1}}
     s = sup(wf("r2", 3), None, withdraw_run=r1, run="r2")
@@ -343,7 +343,7 @@ def withdrawal_examples():
                 "epoch": {"task_started_event_id": started, "task_attempt": task_attempt,
                           "task_started_time": [100, 0], "attempt": attempt}}
 
-    # A retry run's create writes an item with no epoch. It withdraws only the previous run, also
+    # A retry run's create writes an item with no epoch. It withdraws only the previous run, even
     # when it names failed tasks.
     s = {"producer_kind": "workflow", "producer_id": "wf:" + part("r2"), "run_id": "r2",
          "withdraw_run": r1, "failed_tasks": [5]}

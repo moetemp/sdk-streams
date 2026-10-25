@@ -1,13 +1,14 @@
-//! Stream ids, Producer ids and the Redis key layout. Every SDK must build them the same, so the
-//! shared vectors in `testdata/ids.json` pin them.
+//! Stream ids, Producer ids and the Redis key layout. Every SDK must build them the same way, and
+//! `testdata/ids.json` has the shared vectors that check it.
 //!
 //! ```text
 //! <prefix>:{<namespace>:<stream id>}:meta    the create key, the fence, dedupe and close state
 //! <prefix>:{<namespace>:<stream id>}:log     the log, one entry per Record
 //! ```
 //!
-//! The part in braces is the Redis Cluster hash tag, so one script reaches both keys. Each part
-//! is percent-encoded, so a `:` or a brace in an id can't make two Streams share a key.
+//! The part in braces is the Redis Cluster hash tag, so that both keys are in one slot for one
+//! script. Each part is percent-encoded, so a `:` or a brace in an id can't make two Streams share
+//! a key.
 
 use crate::{
     StreamError, StreamResult,
@@ -33,7 +34,7 @@ pub fn encode_part(text: &str) -> String {
     out
 }
 
-/// Reverses [encode_part], or `None` for text that [encode_part] never makes.
+/// Decodes the text of [encode_part]. Returns `None` for text that [encode_part] can't make.
 pub fn decode_part(text: &str) -> Option<String> {
     let mut bytes = Vec::with_capacity(text.len());
     let mut rest = text.as_bytes();
@@ -107,8 +108,8 @@ pub fn client_producer_id(identity: &str, process_key: &str) -> String {
     format!("client:{}", join(&[identity, process_key]))
 }
 
-/// The Producer id that a client names itself, `client:<name>`. The caller keeps the name and
-/// raises the epoch across restarts, so a new incarnation fences the one before it.
+/// The Producer id that a client names itself, `client:<name>`. The caller keeps the name across
+/// restarts and raises the epoch on each one, so that a new incarnation fences the earlier one.
 pub fn named_client_producer_id(name: &str) -> String {
     format!("client:{}", join(&[name]))
 }
@@ -126,7 +127,7 @@ pub(crate) fn kind_prefix(kind: ProducerKind) -> Option<&'static str> {
 }
 
 /// Checks that a Producer's id has the prefix of its kind, and that the run in the id is its
-/// `run_id`. The kind prefix keeps one Producer from taking another kind's id.
+/// `run_id`. The kind prefix stops a Producer from using the id of another kind.
 pub fn check_producer(producer: &Producer) -> StreamResult<()> {
     let kind = ProducerKind::try_from(producer.kind).unwrap_or(ProducerKind::Unspecified);
     let Some(prefix) = kind_prefix(kind) else {
@@ -142,7 +143,7 @@ pub fn check_producer(producer: &Producer) -> StreamResult<()> {
     let expected = match kind {
         ProducerKind::Workflow => 1,
         ProducerKind::LocalActivity | ProducerKind::StandaloneActivity => 2,
-        // A named client has one part, and a process's client two.
+        // A named client id has one part. A process client id has two.
         ProducerKind::Client if parts.len() == 1 => 1,
         ProducerKind::Client => 2,
         ProducerKind::Activity => 3,
@@ -188,9 +189,9 @@ pub mod fields {
         format!("e|{kind}|{producer_id}")
     }
 
-    /// The last batch of a Producer's newest epoch,
-    /// `<epoch key>|<sequence>|<first>|<last>|<digest>`, the dedupe key, the Positions it got and
-    /// the content digest that a resend must match.
+    /// The last batch of a Producer's newest epoch, as
+    /// `<epoch key>|<sequence>|<first>|<last>|<digest>`. These are the dedupe key, the first and
+    /// last entry ids of the batch, and the content digest that a resend must match.
     pub fn dedupe(kind: i32, producer_id: &str) -> String {
         format!("d|{kind}|{producer_id}")
     }
@@ -229,7 +230,7 @@ impl StreamKeys {
         }
     }
 
-    /// The hash holding the format version, the fence, dedupe and close state.
+    /// The hash with the format version, the fence, dedupe and close state.
     pub fn meta(&self) -> String {
         format!("{}:meta", self.base)
     }

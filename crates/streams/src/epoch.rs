@@ -1,8 +1,8 @@
 //! Producer epochs, their order, and the withdrawal rule of a `Superseded` item.
 //!
-//! The Lua scripts compare epochs as strings, so an epoch goes to Redis as a key of fixed-width
-//! hex fields in the order of comparison. A plain string comparison of two keys then orders the
-//! epochs field by field. The shared vectors in `testdata/epochs.json` pin the keys.
+//! The Lua scripts compare epochs as strings. So an epoch is stored in Redis as a key of
+//! fixed-width hex fields, in the order of comparison. A string comparison of two keys then orders
+//! the epochs field by field. `testdata/epochs.json` has the shared vectors of the keys.
 
 use crate::proto::{
     Producer, ProducerEpoch, ProducerKind, StreamRecord, Supersession, WorkflowTaskEpoch,
@@ -26,8 +26,8 @@ fn time_fields(time: Option<&Timestamp>) -> [String; 2] {
     [hex64(seconds), hex32(nanos)]
 }
 
-/// The key of a Workflow Task attempt: started event id, attempt, started time. It is the start
-/// of the epoch key of the run and of the Local Activities that the task dispatched.
+/// The key of a Workflow Task attempt, from its started event id, attempt and started time. The
+/// epoch keys of the run and of the task's Local Activities start with it.
 pub fn task_key(task: &WorkflowTaskEpoch) -> String {
     let [seconds, nanos] = time_fields(task.started_time.as_ref());
     [
@@ -39,7 +39,7 @@ pub fn task_key(task: &WorkflowTaskEpoch) -> String {
     .join(".")
 }
 
-/// The key of an epoch. Fields a kind doesn't use compare as zero.
+/// The key of an epoch. Fields that a kind doesn't use compare as zero.
 pub fn epoch_key(epoch: &ProducerEpoch) -> String {
     let [scheduled_seconds, scheduled_nanos] = time_fields(epoch.attempt_scheduled_time.as_ref());
     [
@@ -88,9 +88,9 @@ pub fn timestamp(time: SystemTime) -> Timestamp {
 /// For an Activity or a Local Activity, it withdraws that Producer's Records with a lower epoch.
 /// For a Workflow task t with the previous completed task c, it withdraws the Records of the run
 /// and of its Local Activities whose task is in `failed_tasks` or strictly between c and t, and
-/// those at c or at t with a lower epoch. A retry run withdraws every Record whose Producer has
-/// the previous run. A client's newer epoch fences the earlier ones but withdraws nothing, since
-/// a restarted client's earlier Records are real messages, not a failed attempt's.
+/// those at c or at t with a lower epoch. The item of a retry run withdraws every Record of the
+/// previous run. A client's newer epoch fences the earlier ones but withdraws nothing, since a
+/// restarted client's earlier Records are real messages, not a failed attempt's.
 pub fn withdraws(supersession: &Supersession, record: &StreamRecord) -> bool {
     let Some(producer) = record.producer.as_ref() else {
         return false;
@@ -126,8 +126,8 @@ pub fn withdraws(supersession: &Supersession, record: &StreamRecord) -> bool {
     let lower_at = |at: &WorkflowTaskEpoch| {
         started == at.started_event_id && compare_tasks(&old, at) == Ordering::Less
     };
-    // Core gives c with attempt 0 when it no longer has c's attempt. The attempts of one task
-    // start in time order, so the started time still tells the lower ones.
+    // Core sets attempt 0 on c when it no longer knows c's attempt. The attempts of one task start
+    // in time order, so the started time still finds the lower ones.
     let lower_at_completed = |c: &WorkflowTaskEpoch| {
         if c.attempt > 0 {
             return lower_at(c);
