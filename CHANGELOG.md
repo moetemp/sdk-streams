@@ -172,3 +172,5 @@
 - `testdata/withdrawals.json` has the cases of a `Superseded` item with no epoch, as a retry run's
   create writes, of a Local Activity's newer epoch, and of more Local Activity Records under a
   Workflow item. A case with no `epoch` key has none, and `gen_vectors.py` reads it so.
+- The crate pins `temporalio-common` at sdk-rust Brook c8 `f7826366`, which adds only a Core
+  CHANGELOG fix and Core tests.
